@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": "req-7",
+  "method": "permission.decide",
+  "params": {
+    "runId": "run_01HZX9R2Y3",
+    "requestId": "perm_01",
+    "decision": { "behavior": "deny", "message": "Rede bloqueada pelo perfil de sandbox estrito" }
+  }
+}

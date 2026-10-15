@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    name: TypeScript (protocolo, sidecar, UI)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # O npm 11 tem um bug no resolvedor de workspaces; usamos o 12.
+      - run: npm install -g npm@12
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build -w @octopus/protocol
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build -w @octopus/agent-runtime
+
+  rust:
+    name: Rust (core Tauri)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: cargo fmt --all --check
+        working-directory: apps/desktop/src-tauri
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: apps/desktop/src-tauri
+      - run: cargo test
+        working-directory: apps/desktop/src-tauri
+
+  e2e:
+    name: Playwright (UI com mock)
+    runs-on: macos-latest
+    needs: typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install -g npm@12
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build -w @octopus/protocol
+      - run: npx playwright install --with-deps chromium
+        working-directory: apps/desktop
+      - run: npm run test:e2e
+        working-directory: apps/desktop
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/desktop/playwright-report
