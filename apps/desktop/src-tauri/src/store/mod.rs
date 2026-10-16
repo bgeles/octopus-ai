@@ -45,6 +45,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0008_sandbox_budget.sql"),
     ),
     ("0009_memory", include_str!("migrations/0009_memory.sql")),
+    (
+        "0010_memory_handoff",
+        include_str!("migrations/0010_memory_handoff.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -458,6 +462,18 @@ impl Store {
                     )?;
                 }
             }
+            RunEvent::BriefInjected { chars, items } => {
+                if let Some(project_id) = run_project_id(&tx, run_id)? {
+                    Self::record_context_event_in(
+                        &tx,
+                        &project_id,
+                        run_id,
+                        "brief",
+                        serde_json::json!({"chars": chars, "items": items}),
+                        at,
+                    )?;
+                }
+            }
             RunEvent::Compaction {
                 phase,
                 trigger,
@@ -651,11 +667,12 @@ mod tests {
                 "0007_policy".to_string(),
                 "0008_sandbox_budget".to_string(),
                 "0009_memory".to_string(),
+                "0010_memory_handoff".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 9);
+        assert_eq!(s.applied_migrations().unwrap().len(), 10);
     }
 
     #[test]

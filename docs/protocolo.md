@@ -22,8 +22,9 @@ JSON-RPC 2.0 em NDJSON (uma mensagem JSON por linha) pelo stdio do sidecar.
 | `sessions.rename` | `{ sessionId, cwd, title }` | `{ ok: true }` |
 | `sessions.tag` | `{ sessionId, cwd, tag: string \| null }` | `{ ok: true }` (`null` remove a tag) |
 | `hook.decide` | `{ runId, hookId, decision: { behavior: allow\|deny\|ask, reason?, updatedInput? } }` | `{ applied }` (resposta do core a um `run.hook`) |
+| `memory.result` | `{ runId, callId, result: { ok, content } }` | `{ applied }` (resposta do core a um `run.memory_call`; `content` vira o texto devolvido à tool) |
 
-`options` (`RunOptions`): `model`, `permissionMode`, `maxTurns`, `maxBudgetUsd`, `resumeSessionId`, `forkSession`, `systemPromptAppend`, `allowedTools`, `settingSources`, `env`, `includePartialMessages`, `agents` (mapa nome → `{ description, prompt, tools?, model? }`, vira `options.agents` do SDK; o Octopus preenche com os membros do time que reportam ao agente do run), `taskContext` (`{ taskId, title, stage, allowedStatuses }`: o sidecar cria um MCP server in-process `octopus` com a tool `task_update(status, note)`, libera `mcp__octopus__task_update` em `allowedTools` e emite o evento `task_update`), `policyHooks` (registra um hook `PreToolUse` que emite `run.hook` e espera `hook.decide`; sem resposta em 30 s a decisão vira `ask`), `sandbox` (subconjunto do `SandboxSettings` do SDK: `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands`, `network.allowedDomains/deniedDomains/strictAllowlist`, `filesystem.allowWrite/denyWrite/denyRead/allowRead`, `credentials.envVars`), `memory` (`{ capture }`: registra hooks `PostToolUse`, `Stop`, `SubagentStop`, `SessionEnd`, `PreCompact` e `PostCompact` que emitem os eventos `observation` e `compaction`; o core sanitiza segredos antes de gravar).
+`options` (`RunOptions`): `model`, `permissionMode`, `maxTurns`, `maxBudgetUsd`, `resumeSessionId`, `forkSession`, `systemPromptAppend`, `allowedTools`, `settingSources`, `env`, `includePartialMessages`, `agents` (mapa nome → `{ description, prompt, tools?, model? }`, vira `options.agents` do SDK; o Octopus preenche com os membros do time que reportam ao agente do run), `taskContext` (`{ taskId, title, stage, allowedStatuses }`: o sidecar cria um MCP server in-process `octopus` com a tool `task_update(status, note)`, libera `mcp__octopus__task_update` em `allowedTools` e emite o evento `task_update`), `policyHooks` (registra um hook `PreToolUse` que emite `run.hook` e espera `hook.decide`; sem resposta em 30 s a decisão vira `ask`), `sandbox` (subconjunto do `SandboxSettings` do SDK: `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands`, `network.allowedDomains/deniedDomains/strictAllowlist`, `filesystem.allowWrite/denyWrite/denyRead/allowRead`, `credentials.envVars`), `memory` (`{ capture, brief?, briefItems?, tools? }`: `capture` registra hooks `PostToolUse`, `Stop`, `SubagentStop`, `SessionEnd`, `PreCompact` e `PostCompact` que emitem `observation` e `compaction`, sanitizados pelo core; `brief` é injetado como `additionalContext` no primeiro `UserPromptSubmit` e gera `brief_injected`; `tools` expõe as tools MCP `memory_search(query)`, `memory_write(kind, title, body)` e `memory_handoff(body)`, respondidas pelo core via `run.memory_call` → `memory.result`).
 
 Retomar e bifurcar não têm método próprio: são um `run.start` com `options.resumeSessionId` (e `forkSession: true` para bifurcar); o SDK recebe `resume`/`forkSession`. O `session_init` do novo run traz o `sessionId` resultante (o mesmo, ao retomar; um novo, ao bifurcar).
 
@@ -49,6 +50,7 @@ Retomar e bifurcar não têm método próprio: são um `run.start` com `options.
 | `task_update` | `taskId, status (done\|review\|blocked), note` | tool MCP in-process `task_update` chamada pelo agente (só em runs com `options.taskContext`) |
 | `observation` | `kind (tool_use\|turn_end\|subagent_end\|session_end), title, body, toolName, toolUseId, parentToolUseId, agentId` | capturada pelos hooks de memória (só em runs com `options.memory.capture`); o corpo é truncado no sidecar e sanitizado no core |
 | `compaction` | `phase (pre\|post), trigger (manual\|auto), summary` | hooks `PreCompact`/`PostCompact`; o resumo só vem no `post` |
+| `brief_injected` | `chars, items[]` | o brief de memória entrou como `additionalContext` (uma vez por run) |
 
 `parentToolUseId` não nulo indica mensagem de subagente (árvore reconstruível pelo id da tool call `Agent` que o iniciou).
 
@@ -57,6 +59,10 @@ Eventos terminais: `result` e `error` com `fatal: true`.
 ### `run.hook`
 
 `{ runId, hookId, event: "PreToolUse", toolName, input, toolUseId, parentToolUseId }`. Bloqueante: o sidecar segura a ferramenta até o core responder com `hook.decide`. O core avalia as regras de política (nega vence, depois pergunta, senão permite) e registra a decisão na auditoria (`policy.allow|deny|ask`). `deny` chega ao agente com o motivo; `ask` vira um `permission_request` normal (com o motivo da regra em `reason`).
+
+### `run.memory_call`
+
+`{ runId, callId, op: search|write|handoff, args }`. O agente chamou uma tool MCP de memória; o sidecar segura a resposta da tool até o core responder `memory.result` (timeout de 30 s devolve um erro textual ao agente).
 
 ### `runtime.log`
 

@@ -2,7 +2,8 @@ import type { RunEvent } from "@octopus/protocol";
 import { describe, expect, it } from "vitest";
 import type { SdkMessageLike } from "./events.js";
 import { RunManager, type HookCallbackLike, type QueryFn, type QueryOptionsLike } from "./runner.js";
-import type { RunHookNotification } from "@octopus/protocol";
+import type { RunHookNotification, RunMemoryCallNotification } from "@octopus/protocol";
+import type { MemoryCaller } from "./octopusTools.js";
 
 type Captured = { runId: string; event: RunEvent };
 
@@ -90,8 +91,8 @@ describe("RunManager", () => {
     const { events, emit } = collector();
     let seen: QueryOptionsLike | undefined;
     let capturedUpdate: ((status: "done" | "review" | "blocked", note: string | null) => void) | undefined;
-    const factory = (_ctx: unknown, onUpdate: typeof capturedUpdate) => {
-      capturedUpdate = onUpdate;
+    const factory = (opts: { task?: { onUpdate: typeof capturedUpdate } }) => {
+      capturedUpdate = opts.task?.onUpdate;
       return { fake: "server" };
     };
     const manager = new RunManager(fakeQuery([{ type: "result", subtype: "success", session_id: "s" }], (o) => (seen = o)), emit, () => {}, factory as never);
@@ -183,6 +184,68 @@ describe("RunManager", () => {
     const observation = emitted.find((e) => e.type === "observation");
     expect(observation).toMatchObject({ type: "observation", kind: "tool_use", title: "Write a.sql", body: "ok", toolUseId: "t1" });
     expect(emitted.find((e) => e.type === "compaction")).toMatchObject({ phase: "post", summary: "resumo" });
+  });
+
+  it("com memory.brief, injeta additionalContext uma vez e emite brief_injected", async () => {
+    let seen: QueryOptionsLike | undefined;
+    const emitted: RunEvent[] = [];
+    const manager = new RunManager(
+      fakeQuery([{ type: "result", subtype: "success", is_error: false, session_id: "s", total_cost_usd: 0, duration_ms: 1, num_turns: 1, usage: { input_tokens: 1, output_tokens: 1 } }], (o) => {
+        seen = o;
+      }),
+      (_runId, event) => emitted.push(event),
+    );
+    manager.start({ runId: "r1", cwd: "/p", prompt: "oi", options: { memory: { capture: false, brief: "## Memória\nUse Flyway.", briefItems: ["Migrações em Flyway"] } } });
+    const hook = seen?.hooks?.UserPromptSubmit?.[0]?.hooks[0] as HookCallbackLike;
+    const signal = new AbortController().signal;
+    const first = await hook({ hook_event_name: "UserPromptSubmit", tool_name: "", tool_input: null }, undefined, { signal });
+    expect(first).toEqual({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "## Memória\nUse Flyway." } });
+    expect(await hook({ hook_event_name: "UserPromptSubmit", tool_name: "", tool_input: null }, undefined, { signal })).toEqual({});
+    await manager.drain();
+    expect(emitted.filter((e) => e.type === "brief_injected")).toEqual([{ type: "brief_injected", chars: 22, items: ["Migrações em Flyway"] }]);
+    expect(seen?.hooks?.PostToolUse).toBeUndefined();
+  });
+
+  it("com memory.tools, monta o MCP com as tools de memória e faz o round trip run.memory_call → memory.result (com timeout)", async () => {
+    let seen: QueryOptionsLike | undefined;
+    let caller: MemoryCaller | undefined;
+    const calls: RunMemoryCallNotification[] = [];
+    const factory = (opts: { memory?: { call: MemoryCaller } }) => {
+      caller = opts.memory?.call;
+      return { fake: "server" };
+    };
+    const gate = (() => {
+      let release!: () => void;
+      const promise = new Promise<void>((r) => (release = r));
+      return { promise, release };
+    })();
+    const gated: QueryFn = ({ options }) => {
+      seen = options;
+      return {
+        async *[Symbol.asyncIterator]() {
+          await gate.promise;
+          yield { type: "result", subtype: "success", session_id: "s" };
+        },
+      };
+    };
+    const manager = new RunManager(gated, () => {}, () => {}, factory as never, null, 50, (call) => calls.push(call));
+    manager.start({ runId: "r1", cwd: "/p", prompt: "oi", options: { allowedTools: ["Read"], memory: { capture: false, tools: true } } });
+    expect(seen?.mcpServers).toEqual({ octopus: { fake: "server" } });
+    expect(seen?.allowedTools).toEqual(["Read", "mcp__octopus__memory_search", "mcp__octopus__memory_write", "mcp__octopus__memory_handoff"]);
+    const pending = caller!("search", { query: "flyway" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ runId: "r1", op: "search", args: { query: "flyway" } });
+    expect(manager.resolveMemoryCall("r1", calls[0]!.callId, { ok: true, content: "1 página" })).toBe(true);
+    expect(await pending).toEqual({ ok: true, content: "1 página" });
+    const slow = await caller!("write", { kind: "note", title: "t", body: "b" });
+    expect(slow.ok).toBe(false);
+    expect(slow.content).toContain("não respondeu a tempo");
+    expect(() => manager.resolveMemoryCall("r1", "mem_999", { ok: true, content: "" })).toThrow(/não encontrada/);
+    // Chamada pendente quando o run acaba recebe erro, não fica presa.
+    const orphan = caller!("handoff", { body: "x" });
+    gate.release();
+    await manager.drain();
+    expect((await orphan).content).toContain("Run encerrado");
   });
 
   it("sem memory, nenhum hook de memória é registrado", async () => {

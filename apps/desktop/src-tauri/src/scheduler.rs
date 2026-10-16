@@ -134,6 +134,16 @@ pub async fn tick(
                 store.mark_run_failed(&run.id, "task deixou de estar pronta")?;
                 continue;
             }
+            let mut options = options;
+            {
+                let brief = store.memory_brief(&project.id, Some(&task.id), &prompt, &run.id)?;
+                let memory = options.memory.get_or_insert_with(Default::default);
+                memory.tools = Some(true);
+                if let Some(b) = brief {
+                    memory.brief = Some(b.text);
+                    memory.brief_items = Some(b.items);
+                }
+            }
             let options = match crate::secrets::options_for_sidecar(&project, &options, secrets) {
                 Ok(o) => o,
                 Err(e) => {
@@ -480,13 +490,26 @@ mod tests {
                 &wf.id,
                 &TaskInput {
                     title: "Checagem do orquestrador".into(),
-                    description_md: "Não leia nem altere arquivos e não use outras ferramentas. Apenas confirme que recebeu esta task chamando a tool task_update com status \"done\" e a nota \"octopus ok\".".into(),
+                    description_md: "Não leia nem altere arquivos. A memória do projeto (já no seu contexto, e também pela tool memory_search) contém a palavra secreta do projeto. Chame a tool task_update com status \"done\" e a nota igual a essa palavra, em minúsculas, sem mais nada.".into(),
                     assigned_agent_id: Some(ana),
                     ..Default::default()
                 },
             )
             .unwrap();
 
+        store
+            .save_page(
+                &crate::store::memory::MemoryPageInput {
+                    project_id: project.id.clone(),
+                    page_id: None,
+                    kind: "decisions".into(),
+                    title: "Palavra secreta do projeto".into(),
+                    body_md: "A palavra secreta deste projeto é melancia.".into(),
+                },
+                "teste",
+                "manual",
+            )
+            .unwrap();
         let report = tick(&store, &sidecar, &MemorySecrets::default())
             .await
             .unwrap();
@@ -566,6 +589,24 @@ mod tests {
         );
         assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error_message);
         assert!(saw_task_update, "o agente não chamou task_update");
+        let finished = store.get_task(&task.id).unwrap().unwrap();
+        let note = finished
+            .last_note
+            .clone()
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            note.contains("melancia"),
+            "o brief de memória não chegou ao agente: nota = {note:?}"
+        );
+        assert!(
+            store
+                .list_context_events(&run_id)
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "brief"),
+            "evento brief_injected não registrado"
+        );
         let after = store.get_task(&task.id).unwrap().unwrap();
         eprintln!(
             "task {:?} estágio {} nota {:?}",
@@ -578,7 +619,7 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .to_lowercase()
-            .contains("octopus ok"));
+            .contains("melancia"));
         let kinds: Vec<String> = store
             .list_task_events(&task.id)
             .unwrap()

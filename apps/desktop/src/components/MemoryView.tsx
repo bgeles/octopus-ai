@@ -1,7 +1,7 @@
 import { Archive, BookOpen, History, Plus, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { Transport } from "../lib/transport";
-import { MEMORY_KIND_LABELS, MEMORY_PAGE_KINDS, type MemoryObservation, type MemoryPage, type MemoryPageKind, type MemoryPageVersion, type MemorySearchHit, type Project } from "../lib/types";
+import { MEMORY_KIND_LABELS, MEMORY_PAGE_KINDS, type MemoryHandoff, type MemoryObservation, type MemoryPage, type MemoryPageKind, type MemoryPageVersion, type MemorySearchHit, type Project, type Task } from "../lib/types";
 import { formatRelative } from "./SessionsView";
 
 export type MemoryTab = "pages" | "observations" | "handoffs" | "context";
@@ -21,10 +21,12 @@ const KIND_COLOR: Record<MemoryPageKind, string> = {
   note: "text-slate",
 };
 
-export function MemoryView({ project, transport, availableTabs = ["pages", "observations"] }: MemoryViewProps) {
+export function MemoryView({ project, transport, availableTabs = ["pages", "observations", "handoffs"] }: MemoryViewProps) {
   const [tab, setTab] = useState<MemoryTab>("pages");
   const [pages, setPages] = useState<MemoryPage[] | null>(null);
   const [observations, setObservations] = useState<MemoryObservation[] | null>(null);
+  const [handoffs, setHandoffs] = useState<MemoryHandoff[] | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<MemorySearchHit[] | null>(null);
   const [selected, setSelected] = useState<MemoryPage | null>(null);
@@ -46,15 +48,24 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
     setObservations(await transport.invoke("list_memory_observations", { projectId, limit: 200 }));
   }, [transport, projectId]);
 
+  const refreshHandoffs = useCallback(async () => {
+    if (!projectId) return;
+    const [list, taskList] = await Promise.all([transport.invoke("list_memory_handoffs", { projectId }), transport.invoke("list_tasks", { projectId }).catch(() => [] as Task[])]);
+    setHandoffs(list);
+    setTasks(taskList);
+  }, [transport, projectId]);
+
   useEffect(() => {
     setPages(null);
     setObservations(null);
+    setHandoffs(null);
     setSelected(null);
     setHits(null);
     setQuery("");
     void refreshPages().catch((e) => setError(String(e)));
     void refreshObservations().catch((e) => setError(String(e)));
-  }, [refreshPages, refreshObservations]);
+    void refreshHandoffs().catch((e) => setError(String(e)));
+  }, [refreshPages, refreshObservations, refreshHandoffs]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -97,7 +108,7 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
   const tabs: { id: MemoryTab; label: string }[] = [
     { id: "pages", label: pages ? `Páginas · ${pages.length}` : "Páginas" },
     { id: "observations", label: observations ? `Observações · ${observations.length}` : "Observações" },
-    { id: "handoffs", label: "Handoffs" },
+    { id: "handoffs", label: handoffs ? `Handoffs · ${handoffs.filter((h) => !h.consumedAt).length} ${handoffs.filter((h) => !h.consumedAt).length === 1 ? "pendente" : "pendentes"}` : "Handoffs" },
     { id: "context", label: "Contexto" },
   ];
   const listed: { page: MemoryPage; snippet: string | null }[] = hits ? hits.map((h) => ({ page: h.page, snippet: h.snippet })) : (pages ?? []).map((page) => ({ page, snippet: null }));
@@ -289,6 +300,34 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
             )}
           </div>
         </div>
+      )}
+
+      {tab === "handoffs" && (
+        <section aria-label="Handoffs" className="flex flex-col gap-2 rounded-xl border hairline bg-surface p-5">
+          <div className="flex items-baseline gap-3">
+            <h2 className="m-0 font-display text-sm font-semibold">Handoffs entre runs</h2>
+            <span className="text-xs text-slate">"onde parei / o que falhou / o que falta": deixados pelo agente (memory_handoff) ou gerados ao fim de um run que não terminou; o próximo run da mesma task recebe e consome</span>
+          </div>
+          <ul className="m-0 flex list-none flex-col p-0" data-testid="handoff-list">
+            {(handoffs ?? []).map((h) => {
+              const task = tasks.find((t) => t.id === h.taskId) ?? null;
+              return (
+                <li key={h.id} className={["flex flex-col gap-1 border-b hairline py-2.5 text-[13px] last:border-b-0", h.consumedAt ? "opacity-70" : ""].join(" ")} data-testid="handoff-row" data-consumed={Boolean(h.consumedAt)} data-source={h.source}>
+                  <span className="flex flex-wrap items-baseline gap-2">
+                    <span className={["eyebrow", h.consumedAt ? "text-slate" : "text-brand"].join(" ")}>{h.consumedAt ? "consumido" : "pendente"}</span>
+                    <span className="font-semibold">{task ? task.title : h.taskId ? h.taskId : "run avulso"}</span>
+                    <span className="font-mono text-xs text-slate">
+                      {formatRelative(h.createdAt)} · {h.source === "auto" ? "gerado ao fim do run" : "deixado pelo agente"}
+                      {h.consumedByRunId ? ` · lido pelo run ${h.consumedByRunId.slice(0, 12)}` : " · para o próximo run"}
+                    </span>
+                  </span>
+                  <div className="flex flex-col gap-1 text-[13px]">{renderMarkdown(h.bodyMd)}</div>
+                </li>
+              );
+            })}
+            {handoffs !== null && handoffs.length === 0 && <li className="py-2 text-[13px] text-slate">Nenhum handoff ainda. Eles aparecem quando um run de task termina sem concluir ou quando o agente chama memory_handoff.</li>}
+          </ul>
+        </section>
       )}
 
       {tab === "observations" && (

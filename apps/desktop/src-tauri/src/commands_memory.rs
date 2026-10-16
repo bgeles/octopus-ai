@@ -5,7 +5,7 @@ use tauri::State;
 use crate::commands::AppState;
 use crate::commands_security::audit;
 use crate::store::memory::{
-    ContextEvent, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageVersion,
+    ContextEvent, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageVersion,
     MemorySearchHit,
 };
 
@@ -128,6 +128,14 @@ pub fn list_context_events(
     run_id: String,
 ) -> CmdResult<Vec<ContextEvent>> {
     state.store.list_context_events(&run_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn list_memory_handoffs(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<MemoryHandoff>> {
+    state.store.list_handoffs(&project_id).map_err(err)
 }
 
 /// Reconstrói o índice a partir dos arquivos `.md` da wiki (fonte da verdade).

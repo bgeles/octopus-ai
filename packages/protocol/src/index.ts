@@ -93,6 +93,12 @@ export type SandboxSettings = z.infer<typeof SandboxSettingsSchema>;
 /** Memória do projeto: captura observações por hooks (PostToolUse, Stop, SubagentStop, SessionEnd, Pre/PostCompact). */
 export const MemoryOptionsSchema = z.object({
   capture: z.boolean().default(true),
+  /** Brief de memória (markdown) injetado como `additionalContext` no primeiro `UserPromptSubmit`. */
+  brief: z.string().optional(),
+  /** Rótulos do que entrou no brief (páginas, handoff), para o evento `brief_injected`. */
+  briefItems: z.array(z.string()).optional(),
+  /** Expõe as tools MCP `memory_search`, `memory_write` e `memory_handoff` (respondidas pelo core via `run.memory_call`/`memory.result`). */
+  tools: z.boolean().optional(),
 });
 export type MemoryOptions = z.infer<typeof MemoryOptionsSchema>;
 
@@ -207,6 +213,26 @@ export const HookDecideParamsSchema = z.object({
 export type HookDecideParams = z.infer<typeof HookDecideParamsSchema>;
 export const HookDecideResultSchema = z.object({ applied: z.boolean() });
 
+/** Chamada de tool de memória feita pelo agente; o core responde com `memory.result`. */
+export const MemoryOpSchema = z.enum(["search", "write", "handoff"]);
+export type MemoryOp = z.infer<typeof MemoryOpSchema>;
+export const RunMemoryCallNotificationSchema = z.object({
+  runId: z.string(),
+  callId: z.string(),
+  op: MemoryOpSchema,
+  args: z.record(z.string(), z.unknown()),
+});
+export type RunMemoryCallNotification = z.infer<typeof RunMemoryCallNotificationSchema>;
+export const MemoryCallResultSchema = z.object({ ok: z.boolean(), content: z.string() });
+export type MemoryCallResult = z.infer<typeof MemoryCallResultSchema>;
+export const MemoryResultParamsSchema = z.object({
+  runId: z.string(),
+  callId: z.string(),
+  result: MemoryCallResultSchema,
+});
+export type MemoryResultParams = z.infer<typeof MemoryResultParamsSchema>;
+export const MemoryResultResultSchema = z.object({ applied: z.boolean() });
+
 export const RequestMethodSchema = z.enum([
   "runtime.hello",
   "run.start",
@@ -216,6 +242,7 @@ export const RequestMethodSchema = z.enum([
   "sessions.rename",
   "sessions.tag",
   "hook.decide",
+  "memory.result",
 ]);
 export type RequestMethod = z.infer<typeof RequestMethodSchema>;
 
@@ -228,6 +255,7 @@ export const REQUEST_SCHEMAS = {
   "sessions.rename": { params: SessionsRenameParamsSchema, result: SessionMutationResultSchema },
   "sessions.tag": { params: SessionsTagParamsSchema, result: SessionMutationResultSchema },
   "hook.decide": { params: HookDecideParamsSchema, result: HookDecideResultSchema },
+  "memory.result": { params: MemoryResultParamsSchema, result: MemoryResultResultSchema },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -319,6 +347,12 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     parentToolUseId,
     agentId: z.string().nullable().default(null),
   }),
+  /** O brief de memória entrou no contexto do agente (via UserPromptSubmit). */
+  z.object({
+    type: z.literal("brief_injected"),
+    chars: z.number().int().nonnegative(),
+    items: z.array(z.string()).default([]),
+  }),
   /** Compactação do contexto pelo Claude Code (PreCompact sem resumo; PostCompact com o resumo gerado). */
   z.object({
     type: z.literal("compaction"),
@@ -356,13 +390,14 @@ export const RunHookNotificationSchema = z.object({
 });
 export type RunHookNotification = z.infer<typeof RunHookNotificationSchema>;
 
-export const NotificationMethodSchema = z.enum(["run.event", "runtime.log", "run.hook"]);
+export const NotificationMethodSchema = z.enum(["run.event", "runtime.log", "run.hook", "run.memory_call"]);
 export type NotificationMethod = z.infer<typeof NotificationMethodSchema>;
 
 export const NOTIFICATION_SCHEMAS = {
   "run.event": RunEventNotificationSchema,
   "runtime.log": RuntimeLogSchema,
   "run.hook": RunHookNotificationSchema,
+  "run.memory_call": RunMemoryCallNotificationSchema,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -425,6 +460,7 @@ export const JsonRpcErrorCode = {
   RunAlreadyExists: -32002,
   PermissionRequestNotFound: -32003,
   HookNotFound: -32004,
+  MemoryCallNotFound: -32005,
 } as const;
 
 // ---------------------------------------------------------------------------

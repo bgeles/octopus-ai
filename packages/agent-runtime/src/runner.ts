@@ -2,10 +2,11 @@
  * Gerencia runs do Agent SDK: inicia, interrompe, encaminha permissões e emite eventos.
  * O acesso ao SDK é injetado (QueryFn) para permitir testes sem rede nem binário do Claude.
  */
-import type { HookDecision, PermissionDecision, RunEvent, RunHookNotification, RunStartParams, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
+import type { HookDecision, MemoryCallResult, MemoryOp, PermissionDecision, RunEvent, RunHookNotification, RunMemoryCallNotification, RunStartParams } from "@octopus/protocol";
 import { JsonRpcErrorCode } from "@octopus/protocol";
 import { mapSdkMessage, type SdkMessageLike } from "./events.js";
 import { MEMORY_HOOK_EVENTS, eventFromMemoryHook, type MemoryHookInputLike } from "./memoryHooks.js";
+import { MEMORY_TOOLS, type OctopusToolsFactory } from "./octopusTools.js";
 import { RpcError } from "./rpc.js";
 
 export type PermissionResultLike =
@@ -58,8 +59,8 @@ export type HookSink = (notification: RunHookNotification) => void;
 /** Quanto tempo esperar pelo core antes de cair em `ask`. */
 export const HOOK_TIMEOUT_MS = 30_000;
 
-/** Fábrica do MCP server `octopus` (createSdkMcpServer + tool do SDK), injetada para testes. */
-export type TaskToolsFactory = (ctx: TaskContext, onUpdate: (status: TaskStatusUpdate, note: string | null) => void) => unknown;
+/** Notifica o core de uma chamada de tool de memória (`run.memory_call`); a resposta chega por `resolveMemoryCall`. */
+export type MemoryCallSink = (notification: RunMemoryCallNotification) => void;
 
 export const TASK_UPDATE_TOOL = "mcp__octopus__task_update";
 
@@ -71,14 +72,21 @@ type PendingHook = {
   resolve: (decision: HookDecision) => void;
 };
 
+type PendingMemoryCall = {
+  resolve: (result: MemoryCallResult) => void;
+};
+
 type ActiveRun = {
   runId: string;
   abort: AbortController;
   handle: QueryHandleLike | null;
   pendingPermissions: Map<string, PendingPermission>;
   pendingHooks: Map<string, PendingHook>;
+  pendingMemoryCalls: Map<string, PendingMemoryCall>;
   /** Motivo de um `ask` da política, para o `permission_request` seguinte da mesma ferramenta. */
   askReasons: Map<string, string>;
+  /** O brief de memória só entra uma vez por run. */
+  briefInjected: boolean;
   done: Promise<void>;
 };
 
@@ -86,14 +94,16 @@ export class RunManager {
   private readonly runs = new Map<string, ActiveRun>();
   private permissionCounter = 0;
   private hookCounter = 0;
+  private memoryCallCounter = 0;
 
   constructor(
     private readonly queryFn: QueryFn,
     private readonly emit: EventSink,
     private readonly log: (level: "debug" | "info" | "warn" | "error", message: string) => void = () => {},
-    private readonly taskTools: TaskToolsFactory | null = null,
+    private readonly octopusTools: OctopusToolsFactory | null = null,
     private readonly emitHook: HookSink | null = null,
     private readonly hookTimeoutMs: number = HOOK_TIMEOUT_MS,
+    private readonly emitMemoryCall: MemoryCallSink | null = null,
   ) {}
 
   get activeRunIds(): string[] {
@@ -112,7 +122,9 @@ export class RunManager {
       handle: null,
       pendingPermissions: new Map(),
       pendingHooks: new Map(),
+      pendingMemoryCalls: new Map(),
       askReasons: new Map(),
+      briefInjected: false,
       done: Promise.resolve(),
     };
     this.runs.set(params.runId, run);
@@ -125,6 +137,8 @@ export class RunManager {
       run.pendingPermissions.clear();
       for (const pending of run.pendingHooks.values()) pending.resolve({ behavior: "deny", reason: "Run encerrado antes da decisão" });
       run.pendingHooks.clear();
+      for (const pending of run.pendingMemoryCalls.values()) pending.resolve({ ok: false, content: "Run encerrado antes da resposta da memória" });
+      run.pendingMemoryCalls.clear();
       this.runs.delete(params.runId);
     });
   }
@@ -158,6 +172,16 @@ export class RunManager {
     if (!pending) throw new RpcError(JsonRpcErrorCode.HookNotFound, `Hook ${hookId} não encontrado`);
     run.pendingHooks.delete(hookId);
     pending.resolve(decision);
+    return true;
+  }
+
+  resolveMemoryCall(runId: string, callId: string, result: MemoryCallResult): boolean {
+    const run = this.runs.get(runId);
+    if (!run) throw new RpcError(JsonRpcErrorCode.RunNotFound, `Run ${runId} não encontrado`);
+    const pending = run.pendingMemoryCalls.get(callId);
+    if (!pending) throw new RpcError(JsonRpcErrorCode.MemoryCallNotFound, `Chamada de memória ${callId} não encontrada`);
+    run.pendingMemoryCalls.delete(callId);
+    pending.resolve(result);
     return true;
   }
 
@@ -200,14 +224,37 @@ export class RunManager {
       }
       options.hooks = hooks;
     }
-    if (o.taskContext && this.taskTools) {
+    if (o.memory?.brief) {
+      const brief = o.memory.brief;
+      const items = o.memory.briefItems ?? [];
+      const hooks = options.hooks ?? {};
+      hooks.UserPromptSubmit = [
+        ...(hooks.UserPromptSubmit ?? []),
+        {
+          hooks: [
+            async () => {
+              if (run.briefInjected) return {};
+              run.briefInjected = true;
+              this.emit(run.runId, { type: "brief_injected", chars: brief.length, items });
+              return { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: brief } };
+            },
+          ],
+        },
+      ];
+      options.hooks = hooks;
+    }
+    const wantsMemoryTools = Boolean(o.memory?.tools) && this.emitMemoryCall !== null;
+    if ((o.taskContext || wantsMemoryTools) && this.octopusTools) {
       const ctx = o.taskContext;
-      const server = this.taskTools(ctx, (status, note) => {
-        this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note });
+      const server = this.octopusTools({
+        task: ctx ? { ctx, onUpdate: (status, note) => this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note }) } : undefined,
+        memory: wantsMemoryTools ? { call: (op, args) => this.memoryCall(run, op, args) } : undefined,
       });
       options.mcpServers = { octopus: server as never };
-      if (options.allowedTools && !options.allowedTools.includes(TASK_UPDATE_TOOL)) {
-        options.allowedTools = [...options.allowedTools, TASK_UPDATE_TOOL];
+      const extra = [...(ctx ? [TASK_UPDATE_TOOL] : []), ...(wantsMemoryTools ? MEMORY_TOOLS : [])];
+      if (options.allowedTools) {
+        const allowed = options.allowedTools;
+        options.allowedTools = [...allowed, ...extra.filter((t) => !allowed.includes(t))];
       }
     }
     return options;
@@ -235,6 +282,26 @@ export class RunManager {
         this.emit(run.runId, { type: "error", message, fatal: true });
       }
     }
+  }
+
+  /** Tool de memória: pergunta ao core (`run.memory_call`) e espera `memory.result`; sem resposta a tempo, devolve erro textual. */
+  private memoryCall(run: ActiveRun, op: MemoryOp, args: Record<string, unknown>): Promise<MemoryCallResult> {
+    const callId = `mem_${++this.memoryCallCounter}`;
+    return new Promise<MemoryCallResult>((resolve) => {
+      const timer = setTimeout(() => {
+        if (run.pendingMemoryCalls.delete(callId)) {
+          this.log("warn", `chamada de memória ${callId} sem resposta do core em ${this.hookTimeoutMs} ms`);
+          resolve({ ok: false, content: "Memória indisponível: o core não respondeu a tempo. Siga sem ela." });
+        }
+      }, this.hookTimeoutMs);
+      run.pendingMemoryCalls.set(callId, {
+        resolve: (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+      });
+      this.emitMemoryCall!({ runId: run.runId, callId, op, args });
+    });
   }
 
   /** Hooks de memória: emitem `observation`/`compaction` e nunca interferem no fluxo do agente. */

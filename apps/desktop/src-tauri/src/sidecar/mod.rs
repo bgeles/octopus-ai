@@ -30,6 +30,8 @@ pub enum SidecarNotification {
     RunEvent(RunEventNotification),
     /// Hook PreToolUse bloqueante: o core precisa responder com `decide_hook`.
     Hook(RunHookNotification),
+    /// Tool de memória chamada pelo agente: o core responde com `memory_result`.
+    MemoryCall(RunMemoryCallNotification),
     Log(RuntimeLog),
     /// O processo terminou (código de saída, se houver).
     Exited(Option<i32>),
@@ -208,6 +210,10 @@ impl Sidecar {
         self.request("hook.decide", params).await
     }
 
+    pub async fn memory_result(&self, params: MemoryResultParams) -> Result<MemoryResultResult> {
+        self.request("memory.result", params).await
+    }
+
     pub async fn list_sessions(&self, cwd: &str) -> Result<SessionsListResult> {
         self.request("sessions.list", SessionsListParams { cwd: cwd.into() })
             .await
@@ -289,6 +295,16 @@ async fn dispatch_line(
                         let _ = notify_tx.send(SidecarNotification::Hook(n)).await;
                     }
                     Err(e) => error!("run.hook inválido: {e}"),
+                }
+            }
+            "run.memory_call" => {
+                match serde_json::from_value::<RunMemoryCallNotification>(
+                    params.unwrap_or(Value::Null),
+                ) {
+                    Ok(n) => {
+                        let _ = notify_tx.send(SidecarNotification::MemoryCall(n)).await;
+                    }
+                    Err(e) => error!("run.memory_call inválido: {e}"),
                 }
             }
             "runtime.log" => {
@@ -389,6 +405,7 @@ mod tests {
                 }
                 SidecarNotification::Log(_) => saw_log = true,
                 SidecarNotification::Hook(_) => {}
+                SidecarNotification::MemoryCall(_) => {}
                 SidecarNotification::Exited(_) => panic!("sidecar saiu cedo demais"),
             }
         }
