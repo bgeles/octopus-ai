@@ -196,6 +196,11 @@ function applyEvent(state: RunViewState, event: RunEvent, at: string): RunViewSt
     case "task_update":
       // O board reage a este evento; no transcript a chamada da tool task_update já aparece como tool_use.
       return state;
+
+    case "observation":
+    case "compaction":
+      // Vão para a memória/contexto no core; o transcript não muda (a compactação ganha vista na Fase 4, iteração 04).
+      return state;
   }
 }
 

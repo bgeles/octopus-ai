@@ -163,6 +163,41 @@ describe("RunManager", () => {
     await manager.drain();
   });
 
+  it("com memory.capture, registra os seis hooks de memória e emite observation/compaction sem bloquear", async () => {
+    let seen: QueryOptionsLike | undefined;
+    const emitted: RunEvent[] = [];
+    const manager = new RunManager(
+      fakeQuery([{ type: "result", subtype: "success", is_error: false, session_id: "s", total_cost_usd: 0, duration_ms: 1, num_turns: 1, usage: { input_tokens: 1, output_tokens: 1 } }], (o) => {
+        seen = o;
+      }),
+      (_runId, event) => emitted.push(event),
+    );
+    manager.start({ runId: "r1", cwd: "/p", prompt: "oi", options: { memory: { capture: true }, policyHooks: false } });
+    await manager.drain();
+    const hooks = seen?.hooks ?? {};
+    expect(Object.keys(hooks).sort()).toEqual(["PostCompact", "PostToolUse", "PreCompact", "SessionEnd", "Stop", "SubagentStop"]);
+    const post = hooks.PostToolUse?.[0]?.hooks[0] as HookCallbackLike;
+    const signal = new AbortController().signal;
+    expect(await post({ hook_event_name: "PostToolUse", tool_name: "Write", tool_input: { file_path: "a.sql" }, tool_response: "ok", tool_use_id: "t1" }, "t1", { signal })).toEqual({});
+    await (hooks.PostCompact?.[0]?.hooks[0] as HookCallbackLike)({ hook_event_name: "PostCompact", tool_name: "", tool_input: null, trigger: "auto", compact_summary: "resumo" }, undefined, { signal });
+    const observation = emitted.find((e) => e.type === "observation");
+    expect(observation).toMatchObject({ type: "observation", kind: "tool_use", title: "Write a.sql", body: "ok", toolUseId: "t1" });
+    expect(emitted.find((e) => e.type === "compaction")).toMatchObject({ phase: "post", summary: "resumo" });
+  });
+
+  it("sem memory, nenhum hook de memória é registrado", async () => {
+    let seen: QueryOptionsLike | undefined;
+    const manager = new RunManager(
+      fakeQuery([{ type: "result", subtype: "success", is_error: false, session_id: "s", total_cost_usd: 0, duration_ms: 1, num_turns: 1, usage: { input_tokens: 1, output_tokens: 1 } }], (o) => {
+        seen = o;
+      }),
+      () => {},
+    );
+    manager.start({ runId: "r2", cwd: "/p", prompt: "oi", options: {} });
+    await manager.drain();
+    expect(seen?.hooks).toBeUndefined();
+  });
+
   it("rejeita run duplicado", async () => {
     const manager = new RunManager(fakeQuery([{ type: "result", subtype: "success", session_id: "s" }]), () => {});
     manager.start(baseParams);

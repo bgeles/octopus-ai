@@ -3,6 +3,7 @@ import type { PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
 import { BoardView } from "./components/BoardView";
+import { MemoryView } from "./components/MemoryView";
 import { SecurityView, type SecurityTab } from "./components/SecurityView";
 import { TaskDialog } from "./components/TaskDialog";
 import { MemberDialog } from "./components/MemberDialog";
@@ -773,6 +774,7 @@ export function App({ transport }: AppProps) {
         />
       )}
 
+      {view === "memory" && <MemoryView project={selectedProject} transport={transport} />}
       {view === "security" && (
         <SecurityView
           project={selectedProject}

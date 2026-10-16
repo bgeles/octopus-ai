@@ -5,6 +5,7 @@
 import type { HookDecision, PermissionDecision, RunEvent, RunHookNotification, RunStartParams, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 import { JsonRpcErrorCode } from "@octopus/protocol";
 import { mapSdkMessage, type SdkMessageLike } from "./events.js";
+import { MEMORY_HOOK_EVENTS, eventFromMemoryHook, type MemoryHookInputLike } from "./memoryHooks.js";
 import { RpcError } from "./rpc.js";
 
 export type PermissionResultLike =
@@ -49,7 +50,7 @@ export type EventSink = (runId: string, event: RunEvent) => void;
 
 /** Entrada mínima do hook PreToolUse do SDK. */
 export type PreToolUseInputLike = { hook_event_name: string; tool_name: string; tool_input: unknown; tool_use_id?: string; parent_tool_use_id?: string | null };
-export type HookCallbackLike = (input: PreToolUseInputLike, toolUseId: string | undefined, options: { signal: AbortSignal }) => Promise<unknown>;
+export type HookCallbackLike = (input: PreToolUseInputLike & MemoryHookInputLike, toolUseId: string | undefined, options: { signal: AbortSignal }) => Promise<unknown>;
 
 /** Notifica o core de um hook bloqueante (`run.hook`); a resposta chega por `decideHook`. */
 export type HookSink = (notification: RunHookNotification) => void;
@@ -192,6 +193,13 @@ export class RunManager {
     if (o.policyHooks && this.emitHook) {
       options.hooks = { PreToolUse: [{ hooks: [(input, toolUseId) => this.preToolUse(run, input, toolUseId)] }] };
     }
+    if (o.memory && o.memory.capture !== false) {
+      const hooks = options.hooks ?? {};
+      for (const eventName of MEMORY_HOOK_EVENTS) {
+        hooks[eventName] = [...(hooks[eventName] ?? []), { hooks: [async (input) => this.memoryHook(run, input)] }];
+      }
+      options.hooks = hooks;
+    }
     if (o.taskContext && this.taskTools) {
       const ctx = o.taskContext;
       const server = this.taskTools(ctx, (status, note) => {
@@ -227,6 +235,17 @@ export class RunManager {
         this.emit(run.runId, { type: "error", message, fatal: true });
       }
     }
+  }
+
+  /** Hooks de memória: emitem `observation`/`compaction` e nunca interferem no fluxo do agente. */
+  private memoryHook(run: ActiveRun, input: MemoryHookInputLike): unknown {
+    try {
+      const event = eventFromMemoryHook(input);
+      if (event) this.emit(run.runId, event);
+    } catch (error) {
+      this.log("warn", `hook de memória falhou: ${String(error)}`);
+    }
+    return {};
   }
 
   /** Hook PreToolUse: pergunta ao core e traduz a decisão para o formato do SDK. */

@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, Approval, AppSettings, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, PolicyDecision, PolicyRule, SandboxProfile, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -341,6 +341,79 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     for (const ch of seed) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
     return h.toString(16).padStart(8, "0").repeat(8);
   };
+  // ------------------------------------------------------------------ memória (Fase 4)
+  const observations: MemoryObservation[] = [];
+  const pages: MemoryPage[] = [];
+  const pageVersions: MemoryPageVersion[] = [];
+  const contextEvents: ContextEvent[] = [];
+  const sanitizeMock = (text: string): [string, boolean] => {
+    let redacted = false;
+    let out = text.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, () => {
+      redacted = true;
+      return "[redigido]";
+    });
+    out = out.replace(/\b([A-Z0-9_]*(?:api[_-]?key|token|secret|password|passwd|senha)[A-Z0-9_]*)\s*[=:]\s*["']?([^\s"'&;,]{6,})/gi, (_m, key: string) => {
+      redacted = true;
+      return `${key}=[redigido]`;
+    });
+    out = out.replace(/:\/\/[^/\s:@]+:[^@\s/]+@/g, () => {
+      redacted = true;
+      return "://[redigido]@";
+    });
+    return [out, redacted];
+  };
+  const slugifyMock = (title: string) =>
+    title
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 80) || "pagina";
+  const savePageMock = (input: MemoryPageInput, reason: string, source: string): MemoryPage => {
+    if (!input.title.trim()) throw new Error("A página precisa de título");
+    const ts = new Date().toISOString();
+    const [title] = sanitizeMock(input.title.trim());
+    const [bodyMd] = sanitizeMock(input.bodyMd);
+    let page = input.pageId ? pages.find((p) => p.id === input.pageId) : undefined;
+    if (page) {
+      Object.assign(page, { kind: input.kind, title, bodyMd, updatedAt: ts, versions: page.versions + 1 });
+    } else {
+      let slug = slugifyMock(title);
+      if (pages.some((p) => p.projectId === input.projectId && p.slug === slug)) slug = `${slug}-${Math.random().toString(36).slice(2, 8)}`;
+      page = { id: `page_${Math.random().toString(36).slice(2, 10)}`, projectId: input.projectId, kind: input.kind, slug, title, bodyMd, score: 0.5, accessCount: 0, lastAccessedAt: null, source, createdAt: ts, updatedAt: ts, archivedAt: null, versions: 1 };
+      pages.unshift(page);
+    }
+    pageVersions.unshift({ id: `ver_${Math.random().toString(36).slice(2, 10)}`, pageId: page.id, title, bodyMd, reason, createdAt: ts });
+    return page;
+  };
+  /** Consolidação bruta ao fim do run: entrada no log de tarefas do mês (como o core). */
+  const consolidateRunMock = (run: Run) => {
+    const month = run.startedAt.slice(0, 7);
+    const files = observations
+      .filter((o) => o.runId === run.id && o.kind === "tool_use" && ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(o.toolName ?? ""))
+      .map((o) => o.title.split(/\s+/)[1])
+      .filter((f, i, arr): f is string => Boolean(f) && arr.indexOf(f) === i);
+    const notes = observations.filter((o) => o.runId === run.id && (o.kind === "turn_end" || o.kind === "subagent_end") && o.body.trim()).map((o) => o.body.trim().slice(0, 400));
+    const statusLabel = run.status === "completed" ? "concluído" : run.status === "failed" ? "falhou" : run.status;
+    let entry = `\n## ${run.startedAt.slice(0, 16).replace("T", " ")} · run ${run.id.slice(0, 12)} · ${statusLabel}${run.costUsd != null ? ` · US$ ${run.costUsd.toFixed(2)}` : ""}\n`;
+    entry += `**Pedido:** ${run.prompt.trim().slice(0, 300)}\n`;
+    if (run.resultText?.trim()) entry += `**Resultado:** ${run.resultText.trim().slice(0, 600)}\n`;
+    if (run.errorMessage?.trim()) entry += `**Erro:** ${run.errorMessage.trim().slice(0, 300)}\n`;
+    if (files.length) entry += `**Arquivos tocados:** ${files.join(", ")}\n`;
+    if (notes.length) entry += `**Notas do agente:** ${notes.join(" · ")}\n`;
+    const slug = `log-de-tarefas-${month}`;
+    const existing = pages.find((p) => p.projectId === run.projectId && p.slug === slug);
+    const saved = savePageMock(
+      { projectId: run.projectId, pageId: existing?.id ?? null, kind: "tasklog", title: `Log de tarefas — ${month}`, bodyMd: existing ? `${existing.bodyMd.trimEnd()}\n${entry}` : `Entradas geradas automaticamente ao fim de cada run (consolidação bruta).\n${entry}` },
+      `run ${run.id}`,
+      "auto",
+    );
+    if (!existing) saved.slug = slug;
+    const ts = new Date().toISOString();
+    for (const o of observations) if (o.runId === run.id && !o.consolidatedAt) o.consolidatedAt = ts;
+  };
+
   /** Keychain de mentira: só para a UI; os valores nunca saem daqui. */
   const secrets = new Map<string, string>();
   const audit = (actor: string, kind: string, projectId: string | null, payload: unknown) => {
@@ -530,6 +603,13 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       closePendingApprovals(run.id);
       finishTaskRun(run, !ev.isError, ev.resultText);
       audit("sistema", "run.finished", run.projectId, { runId, status: run.status, costUsd: ev.costUsd, numTurns: ev.numTurns });
+      consolidateRunMock(run);
+    } else if (ev.type === "observation") {
+      const [title, r1] = sanitizeMock(ev.title);
+      const [body, r2] = sanitizeMock(ev.body);
+      observations.unshift({ id: `obs_${Math.random().toString(36).slice(2, 10)}`, projectId: run.projectId, runId: run.id, taskId: run.taskId ?? null, agentProfileId: run.agentProfileId ?? null, kind: ev.kind, title, body, toolName: ev.toolName, redacted: r1 || r2, createdAt: notification.at, consolidatedAt: null });
+    } else if (ev.type === "compaction") {
+      contextEvents.push({ id: `ctx_${Math.random().toString(36).slice(2, 10)}`, projectId: run.projectId, runId: run.id, kind: `compaction_${ev.phase}`, payload: { trigger: ev.trigger, summary: ev.summary }, createdAt: notification.at });
     } else if (ev.type === "task_update") {
       const task = tasks.find((t) => t.id === run.taskId);
       if (task) {
@@ -1064,6 +1144,67 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return decision;
     },
     list_sandbox_profiles: async () => sandboxProfiles.map((p) => ({ ...p })),
+    list_memory_pages: async ({ projectId, includeArchived }) => pages.filter((p) => p.projectId === projectId && (includeArchived || !p.archivedAt)).map((p) => ({ ...p })),
+    get_memory_page: async ({ pageId }) => {
+      const page = pages.find((p) => p.id === pageId);
+      if (!page) return null;
+      page.accessCount += 1;
+      page.lastAccessedAt = new Date().toISOString();
+      page.score = Math.min(1, page.score + 0.05);
+      return { ...page };
+    },
+    search_memory: async ({ projectId, query, limit }) => {
+      const terms = query
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .split(/[^a-z0-9_-]+/)
+        .filter((t) => t.length >= 2);
+      if (terms.length === 0) return [];
+      const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const hits: MemorySearchHit[] = [];
+      for (const page of pages) {
+        if (page.projectId !== projectId || page.archivedAt) continue;
+        const title = norm(page.title);
+        const body = norm(page.bodyMd);
+        let rank = 0;
+        let firstIdx = -1;
+        for (const t of terms) {
+          if (title.includes(t)) rank += 3;
+          const idx = body.indexOf(t);
+          if (idx >= 0) {
+            rank += 1;
+            if (firstIdx < 0) firstIdx = idx;
+          }
+        }
+        if (rank === 0) continue;
+        const start = Math.max(0, firstIdx - 40);
+        const snippet = firstIdx >= 0 ? `${start > 0 ? "…" : ""}${page.bodyMd.slice(start, firstIdx)}«${page.bodyMd.slice(firstIdx, firstIdx + terms[0]!.length)}»${page.bodyMd.slice(firstIdx + terms[0]!.length, firstIdx + 80)}…` : page.title;
+        hits.push({ page: { ...page }, snippet, rank: rank * (0.5 + page.score) });
+      }
+      return hits.sort((a, b) => b.rank - a.rank).slice(0, limit ?? 20);
+    },
+    save_memory_page: async ({ input }) => {
+      const reason = input.pageId ? "edição manual" : "criação manual";
+      const page = savePageMock(input, reason, "manual");
+      audit("você", "memory.page", input.projectId, { pageId: page.id, kind: page.kind, title: page.title, reason });
+      return { ...page };
+    },
+    set_memory_page_archived: async ({ pageId, archived }) => {
+      const page = pages.find((p) => p.id === pageId);
+      if (!page) throw new Error(`Página ${pageId} não encontrada`);
+      page.archivedAt = archived ? new Date().toISOString() : null;
+      audit("você", archived ? "memory.page.archived" : "memory.page.restored", page.projectId, { pageId, title: page.title });
+      return { ...page };
+    },
+    list_memory_page_versions: async ({ pageId }) => pageVersions.filter((v) => v.pageId === pageId).map((v) => ({ ...v })),
+    list_memory_observations: async ({ projectId, runId, limit }) => observations.filter((o) => o.projectId === projectId && (!runId || o.runId === runId)).slice(0, limit ?? 200).map((o) => ({ ...o })),
+    list_context_events: async ({ runId }) => contextEvents.filter((c) => c.runId === runId).map((c) => ({ ...c })),
+    rebuild_memory_index: async ({ projectId }) => {
+      const n = pages.filter((p) => p.projectId === projectId).length;
+      audit("você", "memory.reindex", projectId, { pages: n });
+      return n;
+    },
     update_project_auth: async ({ projectId, authMode }) => {
       const project = projects.find((p) => p.id === projectId);
       if (!project) throw new Error(`Projeto ${projectId} não encontrado`);

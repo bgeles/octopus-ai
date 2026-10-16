@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod commands_config;
+pub mod commands_memory;
 pub mod commands_orchestration;
 pub mod commands_security;
 pub mod commands_team;
@@ -280,6 +281,15 @@ pub fn run() {
             commands_security::set_project_api_key,
             commands_security::clear_project_api_key,
             commands_security::has_project_api_key,
+            commands_memory::list_memory_pages,
+            commands_memory::get_memory_page,
+            commands_memory::search_memory,
+            commands_memory::save_memory_page,
+            commands_memory::set_memory_page_archived,
+            commands_memory::list_memory_page_versions,
+            commands_memory::list_memory_observations,
+            commands_memory::list_context_events,
+            commands_memory::rebuild_memory_index,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");

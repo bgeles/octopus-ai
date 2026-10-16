@@ -182,6 +182,53 @@ pub struct RunOptions {
     pub policy_hooks: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryOptions>,
+}
+
+/// Captura de memória por hooks do SDK.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryOptions {
+    #[serde(default = "default_true")]
+    pub capture: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MemoryOptions {
+    fn default() -> Self {
+        Self { capture: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationKind {
+    ToolUse,
+    TurnEnd,
+    SubagentEnd,
+    SessionEnd,
+}
+
+impl ObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObservationKind::ToolUse => "tool_use",
+            ObservationKind::TurnEnd => "turn_end",
+            ObservationKind::SubagentEnd => "subagent_end",
+            ObservationKind::SessionEnd => "session_end",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionPhase {
+    Pre,
+    Post,
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +483,27 @@ pub enum RunEvent {
         #[serde(default)]
         note: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    Observation {
+        kind: ObservationKind,
+        title: String,
+        body: String,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
+        #[serde(default)]
+        agent_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Compaction {
+        phase: CompactionPhase,
+        trigger: String,
+        #[serde(default)]
+        summary: Option<String>,
+    },
 }
 
 impl RunEvent {
@@ -452,6 +520,8 @@ impl RunEvent {
             RunEvent::Result { .. } => "result",
             RunEvent::Error { .. } => "error",
             RunEvent::TaskUpdate { .. } => "task_update",
+            RunEvent::Observation { .. } => "observation",
+            RunEvent::Compaction { .. } => "compaction",
         }
     }
 
@@ -690,6 +760,37 @@ mod tests {
                 "result"
             ]
         );
+    }
+
+    #[test]
+    fn memory_fixture_parses_observations_and_compaction() {
+        let raw = read_fixture("run-events-memory.notifications.json");
+        let mut observations = 0;
+        let mut post_summary = None;
+        for item in raw.as_array().unwrap() {
+            let incoming: IncomingMessage = serde_json::from_value(item.clone()).unwrap();
+            if let IncomingMessage::Notification { params, .. } = incoming {
+                let n: RunEventNotification = serde_json::from_value(params.unwrap()).unwrap();
+                match &n.event {
+                    RunEvent::Observation { kind, title, .. } => {
+                        observations += 1;
+                        if *kind == ObservationKind::SubagentEnd {
+                            assert!(title.contains("Subagente"));
+                        }
+                    }
+                    RunEvent::Compaction {
+                        phase: CompactionPhase::Post,
+                        summary,
+                        ..
+                    } => post_summary = summary.clone(),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(observations, 5);
+        assert!(post_summary.unwrap().contains("V12"));
+        let opts: RunOptions = serde_json::from_value(serde_json::json!({"memory": {}})).unwrap();
+        assert!(opts.memory.unwrap().capture);
     }
 
     #[test]
