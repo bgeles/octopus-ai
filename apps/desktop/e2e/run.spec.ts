@@ -22,6 +22,13 @@ test.describe("Run ao vivo (mock)", () => {
     await expect(page.getByTestId("run-status")).toHaveText("Concluído");
     await expect(page.getByText("US$ 0,04")).toBeVisible();
     await expect(page.getByRole("progressbar", { name: "Uso do contexto" })).toHaveAttribute("aria-valuenow", "9");
+
+    // A decisão fica registrada na vista Aprovações.
+    await page.getByRole("button", { name: "Aprovações" }).click();
+    const decided = page.getByTestId("decided-approval");
+    await expect(decided).toHaveCount(1);
+    await expect(decided).toContainText("Bash");
+    await expect(decided).toContainText("permitido");
   });
 
   test("interrompe um run em andamento", async ({ page }) => {

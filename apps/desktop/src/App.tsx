@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
+import { ApprovalsView } from "./components/ApprovalsView";
 import { Composer } from "./components/Composer";
 import { RunHeader } from "./components/RunHeader";
 import { RunSidebar } from "./components/RunSidebar";
@@ -8,7 +9,7 @@ import { SessionsView } from "./components/SessionsView";
 import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import type { Transport } from "./lib/transport";
-import type { PermissionDecision, Project, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
+import type { Approval, FilePreview, PermissionDecision, Project, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -27,6 +28,7 @@ export function App({ transport }: AppProps) {
   const [toast, setToast] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [resumeTarget, setResumeTarget] = useState<ResumeTarget | null>(null);
+  const [approvals, setApprovals] = useState<Approval[] | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -62,11 +64,23 @@ export function App({ transport }: AppProps) {
     };
   }, [transport]);
 
+  const refreshApprovals = useCallback(
+    async (projectId: string) => {
+      try {
+        setApprovals(await transport.invoke("list_approvals", { projectId, limit: 100 }));
+      } catch (e) {
+        setToast(`Falha ao listar aprovações: ${messageOf(e)}`);
+      }
+    },
+    [transport],
+  );
+
   useEffect(() => {
     if (!selectedProject) return;
     void refreshRuns(selectedProject.id);
+    void refreshApprovals(selectedProject.id);
     setSessions(null);
-  }, [selectedProject, refreshRuns]);
+  }, [selectedProject, refreshRuns, refreshApprovals]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -77,7 +91,10 @@ export function App({ transport }: AppProps) {
         setRunState((state) => applyRunEvent(state, notification));
         if (notification.event.type === "result" || (notification.event.type === "error" && notification.event.fatal) || notification.event.type === "permission_request") {
           const projectId = selectedProjectRef.current?.id;
-          if (projectId) void refreshRuns(projectId);
+          if (projectId) {
+            void refreshRuns(projectId);
+            void refreshApprovals(projectId);
+          }
         }
       })
       .then((fn) => {
@@ -88,7 +105,7 @@ export function App({ transport }: AppProps) {
       disposed = true;
       unlisten?.();
     };
-  }, [transport, refreshRuns]);
+  }, [transport, refreshRuns, refreshApprovals]);
 
   const selectedProjectRef = useRef<Project | null>(null);
   selectedProjectRef.current = selectedProject;
@@ -154,19 +171,31 @@ export function App({ transport }: AppProps) {
     }
   };
 
-  const decide = async (requestId: string, decision: PermissionDecision) => {
-    if (!currentRun) return;
+  const decide = async (runId: string, requestId: string, decision: PermissionDecision, note: string | null) => {
     setDeciding(requestId);
     try {
-      await transport.invoke("decide_permission", { input: { runId: currentRun.id, requestId, decision } });
-      setRunState((state) => resolvePermission(state, requestId));
-      await refreshRuns(currentRun.projectId);
+      await transport.invoke("decide_permission", { input: { runId, requestId, decision, note } });
+      if (runId === currentRunIdRef.current) setRunState((state) => resolvePermission(state, requestId));
+      const projectId = selectedProjectRef.current?.id;
+      if (projectId) {
+        await refreshRuns(projectId);
+        await refreshApprovals(projectId);
+      }
     } catch (e) {
       setToast(`Falha ao registrar decisão: ${messageOf(e)}`);
     } finally {
       setDeciding(null);
     }
   };
+
+  const readProjectFile = useCallback(
+    (path: string): Promise<FilePreview> => {
+      const projectId = selectedProjectRef.current?.id;
+      if (!projectId) return Promise.reject(new Error("Sem projeto selecionado"));
+      return transport.invoke("read_project_file", { projectId, path });
+    },
+    [transport],
+  );
 
   const openRun = async (run: Run) => {
     const events = await transport.invoke("list_run_events", { runId: run.id });
@@ -231,6 +260,7 @@ export function App({ transport }: AppProps) {
   };
 
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "waiting_approval" || r.status === "queued");
+  const pendingApprovals = approvals ? approvals.filter((a) => a.decision === null).length : runState.pendingPermissions.length;
 
   return (
     <Shell
@@ -246,7 +276,7 @@ export function App({ transport }: AppProps) {
       view={view}
       onChangeView={setView}
       activeRuns={activeRuns}
-      pendingApprovals={runState.pendingPermissions.length}
+      pendingApprovals={pendingApprovals}
     >
       {view === "run" && (
         <>
@@ -264,7 +294,7 @@ export function App({ transport }: AppProps) {
           />
           <div className="flex min-h-0 flex-1">
             <section aria-label="Transcript do run" className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-              <Transcript items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(id, d) => void decide(id, d)} deciding={deciding} />
+              <Transcript runId={currentRun?.id ?? null} items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(runId, id, d, note) => void decide(runId, id, d, note)} deciding={deciding} readFile={readProjectFile} />
             </section>
             <RunSidebar state={runState} run={currentRun} elapsedMs={elapsedMs} />
           </div>
@@ -292,15 +322,16 @@ export function App({ transport }: AppProps) {
       )}
 
       {view === "approvals" && (
-        <div className="flex flex-col gap-4 p-6">
-          <div className="eyebrow text-brand">{selectedProject?.name ?? ""}</div>
-          <h1 className="m-0 font-display text-xl font-bold tracking-tight">Aprovações</h1>
-          {runState.pendingPermissions.length === 0 ? (
-            <p className="text-slate">Nenhuma aprovação pendente. Pedidos de permissão do run atual aparecem aqui e no transcript.</p>
-          ) : (
-            <Transcript items={[]} pendingPermissions={runState.pendingPermissions} onDecide={(id, d) => void decide(id, d)} deciding={deciding} />
-          )}
-        </div>
+        <ApprovalsView
+          project={selectedProject}
+          approvals={approvals}
+          deciding={deciding}
+          onDecide={(runId, id, d, note) => void decide(runId, id, d, note)}
+          onRefresh={() => {
+            if (selectedProject) void refreshApprovals(selectedProject.id);
+          }}
+          readFile={readProjectFile}
+        />
       )}
 
       {toast && (

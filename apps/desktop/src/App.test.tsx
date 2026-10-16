@@ -2,10 +2,10 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "./App";
-import { createMockTransport } from "./lib/mockTransport";
+import { createMockTransport, editApprovalRunEvents } from "./lib/mockTransport";
 
-function setup() {
-  const transport = createMockTransport({ tickMs: 5 });
+function setup(options: Parameters<typeof createMockTransport>[0] = {}) {
+  const transport = createMockTransport({ tickMs: 5, ...options });
   const user = userEvent.setup();
   render(<App transport={transport} />);
   return { transport, user };
@@ -64,7 +64,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
     await user.click(screen.getByRole("button", { name: "Enviar" }));
 
     const approval = await screen.findByTestId("approval-card");
-    await user.type(within(approval).getByLabelText("Motivo da negativa"), "sem rede");
+    await user.type(within(approval).getByLabelText("Motivo da decisão"), "sem rede");
     await user.click(within(approval).getByRole("button", { name: "Negar" }));
 
     // A ferramenta negada aparece como chamada com falha; expandindo, o motivo está no resultado.
@@ -224,5 +224,57 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
     await user.click(screen.getByRole("button", { name: "Continuar sessão" }));
     expect(screen.getByTestId("resume-banner")).toHaveTextContent(/Retomando/);
     expect(screen.getByTestId("resume-banner")).toHaveTextContent("Primeiro");
+  });
+
+  it("aprovações de Edit/Write mostram diff e a decisão com motivo fica na vista Aprovações", async () => {
+    const { user } = setup({ events: editApprovalRunEvents() });
+    await screen.findByDisplayValue("chat-core");
+    await user.type(screen.getByLabelText("Instrução para o agente"), "Troque o findAll");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+
+    // Edit: diff do old_string -> new_string, sem tocar no disco.
+    const editCard = await screen.findByTestId("approval-card");
+    expect(within(editCard).getByText("Edit")).toBeInTheDocument();
+    expect(within(editCard).getByTestId("diff-removed")).toHaveTextContent("−1");
+    expect(within(editCard).getByTestId("diff-added")).toHaveTextContent("+2");
+    expect(screen.getByRole("button", { name: /Aprovações/ })).toHaveTextContent("1");
+
+    await user.type(within(editCard).getByLabelText("Motivo da decisão"), "prefiro manter o findAll");
+    await user.click(within(editCard).getByRole("button", { name: "Negar" }));
+
+    // Write: arquivo novo, lido pelo read_project_file do mock.
+    const writeCard = await screen.findByTestId("approval-card");
+    expect(within(writeCard).getByText("Write")).toBeInTheDocument();
+    await waitFor(() => expect(within(writeCard).getByTestId("write-kind")).toHaveTextContent("arquivo novo"));
+    await user.type(within(writeCard).getByLabelText("Motivo da decisão"), "índice necessário");
+    await user.click(within(writeCard).getByRole("button", { name: "Permitir uma vez" }));
+    await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
+
+    await user.click(screen.getByRole("button", { name: /Aprovações/ }));
+    expect(await screen.findByText("Nenhuma aprovação pendente", { exact: false })).toBeInTheDocument();
+    const decided = screen.getAllByTestId("decided-approval");
+    expect(decided).toHaveLength(2);
+    const texts = decided.map((el) => el.textContent ?? "");
+    expect(texts.some((t) => t.includes("Edit") && t.includes("negado") && t.includes("Motivo: prefiro manter o findAll"))).toBe(true);
+    expect(texts.some((t) => t.includes("Write") && t.includes("permitido") && t.includes("Motivo: índice necessário"))).toBe(true);
+  });
+
+  it("a vista Aprovações permite decidir um pedido pendente fora do transcript", async () => {
+    const { user } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    await screen.findByTestId("approval-card");
+
+    await user.click(screen.getByRole("button", { name: /Aprovações/ }));
+    const pending = await screen.findByTestId("approval-card");
+    expect(within(pending).getByText("Bash")).toBeInTheDocument();
+    expect(within(pending).getByText(/Run: rodar testes/)).toBeInTheDocument();
+    await user.click(within(pending).getByRole("button", { name: "Permitir uma vice".replace("vice", "vez") }));
+    await waitFor(() => expect(screen.getByTestId("decided-approval")).toHaveTextContent("permitido"));
+    expect(screen.getByRole("button", { name: /Aprovações/ })).not.toHaveTextContent("1");
+
+    await user.click(screen.getByRole("button", { name: /Run ao vivo/ }));
+    await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
   });
 });

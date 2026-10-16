@@ -1,8 +1,9 @@
 //! Comandos Tauri expostos à UI. Todos devolvem `Result<T, String>` para a ponte JS.
 
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::protocol::{
@@ -10,7 +11,7 @@ use crate::protocol::{
     SessionSummary, SessionsRenameParams, SessionsTagParams,
 };
 use crate::sidecar::Sidecar;
-use crate::store::models::{Project, Run, RunStatus, StoredRunEvent};
+use crate::store::models::{Approval, Project, Run, RunStatus, StoredRunEvent};
 use crate::store::Store;
 
 pub struct AppState {
@@ -159,6 +160,9 @@ pub struct DecidePermissionInput {
     pub run_id: String,
     pub request_id: String,
     pub decision: PermissionDecision,
+    /// Motivo informado pelo usuário ao permitir (ao negar, a mensagem da decisão já é o motivo).
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[tauri::command]
@@ -168,11 +172,20 @@ pub async fn decide_permission(
 ) -> CmdResult<bool> {
     let params = PermissionDecideParams {
         run_id: input.run_id.clone(),
-        request_id: input.request_id,
-        decision: input.decision,
+        request_id: input.request_id.clone(),
+        decision: input.decision.clone(),
     };
     let result = state.sidecar.decide_permission(params).await.map_err(err)?;
     if result.applied {
+        state
+            .store
+            .record_approval_decision(
+                &input.run_id,
+                &input.request_id,
+                &input.decision,
+                input.note.as_deref(),
+            )
+            .map_err(err)?;
         state
             .store
             .set_run_status(&input.run_id, RunStatus::Running)
@@ -264,4 +277,162 @@ pub async fn tag_session(state: State<'_, AppState>, input: TagSessionInput) -> 
         .await
         .map_err(err)?;
     Ok(result.ok)
+}
+
+#[tauri::command]
+pub fn list_approvals(
+    state: State<'_, AppState>,
+    project_id: String,
+    limit: Option<u32>,
+) -> CmdResult<Vec<Approval>> {
+    state
+        .store
+        .list_approvals(&project_id, limit.unwrap_or(100))
+        .map_err(err)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    pub path: String,
+    pub exists: bool,
+    pub content: String,
+    pub truncated: bool,
+}
+
+const DEFAULT_PREVIEW_BYTES: usize = 256 * 1024;
+
+/// Lê um arquivo da pasta do projeto para o preview/diff de aprovações.
+/// Caminhos fora da pasta do projeto são recusados.
+#[tauri::command]
+pub fn read_project_file(
+    state: State<'_, AppState>,
+    project_id: String,
+    path: String,
+    max_bytes: Option<usize>,
+) -> CmdResult<FilePreview> {
+    let project = state
+        .store
+        .get_project(&project_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Projeto {project_id} não encontrado"))?;
+    let resolved = resolve_within(Path::new(&project.path), &path)?;
+    read_preview(&resolved, max_bytes.unwrap_or(DEFAULT_PREVIEW_BYTES))
+}
+
+/// Resolve `requested` (absoluto ou relativo) dentro de `root`, recusando escapes por `..`
+/// ou por links simbólicos.
+pub fn resolve_within(root: &Path, requested: &str) -> Result<PathBuf, String> {
+    let requested_path = Path::new(requested);
+    let joined = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        root.join(requested_path)
+    };
+    // Normalização lexical: remove `.` e resolve `..` sem tocar no disco.
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!("Caminho fora da pasta do projeto: {requested}"));
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let root_real = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let inside = match normalized.canonicalize() {
+        // Existe: vale o caminho real (links simbólicos para fora são recusados).
+        Ok(real) => real.starts_with(&root_real),
+        // Ainda não existe (ex.: Write cria o arquivo): vale o caminho lexical.
+        Err(_) => normalized.starts_with(root) || normalized.starts_with(&root_real),
+    };
+    if inside {
+        Ok(normalized)
+    } else {
+        Err(format!("Caminho fora da pasta do projeto: {requested}"))
+    }
+}
+
+fn read_preview(path: &Path, max_bytes: usize) -> CmdResult<FilePreview> {
+    let display = path.to_string_lossy().into_owned();
+    if !path.exists() {
+        return Ok(FilePreview {
+            path: display,
+            exists: false,
+            content: String::new(),
+            truncated: false,
+        });
+    }
+    if path.is_dir() {
+        return Err(format!("{display} é uma pasta"));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Falha lendo {display}: {e}"))?;
+    let truncated = bytes.len() > max_bytes;
+    let slice = if truncated {
+        &bytes[..max_bytes]
+    } else {
+        &bytes[..]
+    };
+    Ok(FilePreview {
+        path: display,
+        exists: true,
+        content: String::from_utf8_lossy(slice).into_owned(),
+        truncated,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_within_accepts_relative_and_absolute_inside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.txt"), "x").unwrap();
+
+        let rel = resolve_within(root, "src/a.txt").unwrap();
+        assert!(rel.ends_with("src/a.txt"));
+        let abs = resolve_within(root, root.join("src/./a.txt").to_str().unwrap()).unwrap();
+        assert!(abs.ends_with("src/a.txt"));
+        // Arquivo que ainda não existe (Write cria): aceito se estiver dentro.
+        assert!(resolve_within(root, "src/novo.sql").is_ok());
+    }
+
+    #[test]
+    fn resolve_within_rejects_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(resolve_within(root, "../fora.txt").is_err());
+        assert!(resolve_within(root, "src/../../fora.txt").is_err());
+        assert!(resolve_within(root, "/etc/passwd").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_within_rejects_symlink_leaving_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("segredo"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("segredo"), dir.path().join("link"))
+            .unwrap();
+        assert!(resolve_within(dir.path(), "link").is_err());
+    }
+
+    #[test]
+    fn read_preview_reports_missing_and_truncates() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = read_preview(&dir.path().join("nada.txt"), 10).unwrap();
+        assert!(!missing.exists);
+        std::fs::write(dir.path().join("a.txt"), "0123456789abcdef").unwrap();
+        let preview = read_preview(&dir.path().join("a.txt"), 10).unwrap();
+        assert!(preview.exists);
+        assert!(preview.truncated);
+        assert_eq!(preview.content, "0123456789");
+        assert!(read_preview(dir.path(), 10).is_err());
+    }
 }

@@ -3,10 +3,11 @@
  * Reproduz as fixtures compartilhadas do protocolo para que a UI possa ser desenvolvida e testada
  * sem Tauri, sem Claude e sem rede. Também é o backend dos testes Playwright.
  */
+import editApprovalEvents from "@octopus/protocol/fixtures/run-events-edit-approval.notifications.json";
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { CommandName, Commands, EventName, Events, Project, Run, SessionSummary, StoredRunEvent } from "./types";
+import type { Approval, CommandName, Commands, EventName, Events, Project, Run, SessionSummary, StoredRunEvent } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -22,6 +23,29 @@ export type MockOptions = {
 export function fixtureRunEvents(): RunEventNotification[] {
   return (fixtureEvents as FixtureNotification[]).map((n) => n.params);
 }
+
+/** Roteiro alternativo: aprovações de Edit e Write (preview com diff). */
+export function editApprovalRunEvents(): RunEventNotification[] {
+  return (editApprovalEvents as FixtureNotification[]).map((n) => n.params);
+}
+
+/** Conteúdo "atual" de arquivos do projeto de demonstração, para o diff de Write. */
+const MOCK_FILES: Record<string, string> = {
+  "README.md": "# chat-core\n\nServiço de leads.\n",
+  "src/main/java/com/acme/leads/LeadRepository.java": [
+    "package com.acme.leads;",
+    "",
+    "import java.util.List;",
+    "import org.springframework.data.jpa.repository.JpaRepository;",
+    "",
+    "public interface LeadRepository extends JpaRepository<Lead, Long> {",
+    "    List<Lead> findByStatus(LeadStatus status);",
+    "",
+    "    List<Lead> findAll();",
+    "}",
+    "",
+  ].join("\n"),
+};
 
 export function createMockTransport(options: MockOptions = {}): Transport & { emit: <E extends EventName>(e: E, p: Events[E]) => void } {
   const tickMs = options.tickMs ?? 120;
@@ -43,6 +67,35 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     },
   ];
   let forkCounter = 0;
+  const approvals = new Map<string, Approval>();
+  const approvalKey = (runId: string, requestId: string) => `${runId}:${requestId}`;
+  const recordApproval = (run: Run, at: string, ev: Extract<RunEventNotification["event"], { type: "permission_request" }>) => {
+    const key = approvalKey(run.id, ev.requestId);
+    if (approvals.has(key)) return;
+    approvals.set(key, {
+      id: `appr_${approvals.size + 1}`,
+      runId: run.id,
+      projectId: run.projectId,
+      runPrompt: run.prompt,
+      requestId: ev.requestId,
+      toolName: ev.toolName,
+      toolInput: ev.input,
+      reason: ev.reason,
+      decision: null,
+      decisionMessage: null,
+      requestedAt: at,
+      decidedAt: null,
+    });
+  };
+  const closePendingApprovals = (runId: string) => {
+    for (const approval of approvals.values()) {
+      if (approval.runId === runId && approval.decision === null) {
+        approval.decision = "deny";
+        approval.decisionMessage = "Run encerrado antes da decisão";
+        approval.decidedAt = new Date().toISOString();
+      }
+    }
+  };
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
   const pausedAt = new Map<string, number>();
   const seqByRun = new Map<string, number>();
@@ -100,8 +153,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       run.numTurns = ev.numTurns;
       run.resultText = ev.resultText;
       run.endedAt = notification.at;
+      closePendingApprovals(run.id);
     } else if (ev.type === "permission_request") {
       run.status = "waiting_approval";
+      recordApproval(run, notification.at, ev);
     }
     emit("run:event", notification);
     if (ev.type === "permission_request") {
@@ -181,6 +236,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       pausedAt.delete(runId);
       run.status = "interrupted";
       run.endedAt = new Date().toISOString();
+      closePendingApprovals(runId);
       emitEvent(runId, { type: "error", message: "Run interrompido pelo usuário", fatal: true });
       return true;
     },
@@ -191,18 +247,38 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const run = runs.get(input.runId)!;
       run.status = "running";
       const decision: PermissionDecision = input.decision;
-      const pending = events.get(input.runId)?.findLast((e) => e.event.type === "permission_request");
+      const pending = events.get(input.runId)?.findLast((e) => e.event.type === "permission_request" && e.event.requestId === input.requestId);
       const toolName = pending?.event.type === "permission_request" ? pending.event.toolName : "Bash";
       const toolInput = pending?.event.type === "permission_request" ? pending.event.input : {};
+      const approval = approvals.get(approvalKey(input.runId, input.requestId));
+      if (approval && approval.decision === null) {
+        approval.decision = decision.behavior;
+        approval.decisionMessage = decision.behavior === "deny" ? decision.message : (input.note?.trim() || null);
+        approval.decidedAt = new Date().toISOString();
+      }
       // Como no SDK: a ferramenta aprovada ou negada aparece como tool_use seguido do seu tool_result.
-      emitEvent(input.runId, { type: "tool_use", toolUseId: "toolu_perm", name: toolName, input: toolInput, parentToolUseId: null });
+      const toolUseId = `toolu_${input.requestId}`;
+      emitEvent(input.runId, { type: "tool_use", toolUseId, name: toolName, input: toolInput, parentToolUseId: null });
       if (decision.behavior === "deny") {
-        emitEvent(input.runId, { type: "tool_result", toolUseId: "toolu_perm", content: `Negado: ${decision.message}`, isError: true, parentToolUseId: null });
+        emitEvent(input.runId, { type: "tool_result", toolUseId, content: `Negado: ${decision.message}`, isError: true, parentToolUseId: null });
       } else {
-        emitEvent(input.runId, { type: "tool_result", toolUseId: "toolu_perm", content: "Tests run: 12, Failures: 0", isError: false, parentToolUseId: null });
+        emitEvent(input.runId, { type: "tool_result", toolUseId, content: toolName === "Bash" ? "Tests run: 12, Failures: 0" : "OK", isError: false, parentToolUseId: null });
       }
       schedule(input.runId, resume);
       return true;
+    },
+    list_approvals: async ({ projectId, limit }) =>
+      [...approvals.values()]
+        .filter((a) => a.projectId === projectId)
+        .sort((a, b) => Number(a.decision !== null) - Number(b.decision !== null) || b.requestedAt.localeCompare(a.requestedAt))
+        .slice(0, limit ?? 100)
+        .map((a) => ({ ...a })),
+    read_project_file: async ({ path, maxBytes }) => {
+      const key = path.replace(/^\/Users\/dev\/projetos\/chat-core\//, "");
+      const content = MOCK_FILES[key];
+      if (content === undefined) return { path, exists: false, content: "", truncated: false };
+      const limit = maxBytes ?? 256 * 1024;
+      return { path, exists: true, content: content.slice(0, limit), truncated: content.length > limit };
     },
     list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
     rename_session: async ({ input }) => {

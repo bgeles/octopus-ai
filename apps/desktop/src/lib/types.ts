@@ -53,6 +53,32 @@ export type ResumeTarget = {
   fork: boolean;
 };
 
+export type ApprovalDecisionKind = "allow" | "deny";
+
+/** Espelha `store::models::Approval`. */
+export type Approval = {
+  id: string;
+  runId: string;
+  projectId: string;
+  runPrompt: string;
+  requestId: string;
+  toolName: string;
+  toolInput: unknown;
+  reason: string | null;
+  decision: ApprovalDecisionKind | null;
+  decisionMessage: string | null;
+  requestedAt: string;
+  decidedAt: string | null;
+};
+
+/** Espelha `commands::FilePreview`. */
+export type FilePreview = {
+  path: string;
+  exists: boolean;
+  content: string;
+  truncated: boolean;
+};
+
 export type RuntimeLog = { level: "debug" | "info" | "warn" | "error"; message: string };
 
 /** Assinaturas dos comandos Tauri (nome -> args -> resultado). */
@@ -66,10 +92,12 @@ export type Commands = {
   list_run_events: { args: { runId: string }; result: StoredRunEvent[] };
   start_run: { args: { input: { projectId: string; prompt: string; options?: RunOptions } }; result: Run };
   interrupt_run: { args: { runId: string }; result: boolean };
-  decide_permission: { args: { input: { runId: string; requestId: string; decision: PermissionDecision } }; result: boolean };
+  decide_permission: { args: { input: { runId: string; requestId: string; decision: PermissionDecision; note?: string | null } }; result: boolean };
   list_sessions: { args: { projectId: string }; result: SessionSummary[] };
   rename_session: { args: { input: { projectId: string; sessionId: string; title: string } }; result: boolean };
   tag_session: { args: { input: { projectId: string; sessionId: string; tag: string | null } }; result: boolean };
+  list_approvals: { args: { projectId: string; limit?: number }; result: Approval[] };
+  read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 
 export type CommandName = keyof Commands;

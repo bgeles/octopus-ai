@@ -1,7 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { Transcript, summarizeInput } from "./Transcript";
+import { summarizeInput } from "./ApprovalCard";
+import { Transcript } from "./Transcript";
 import { formatDuration, formatTokens, formatUsd } from "./RunSidebar";
 
 describe("Transcript", () => {
@@ -9,6 +10,7 @@ describe("Transcript", () => {
     const user = userEvent.setup();
     render(
       <Transcript
+        runId="r1"
         items={[
           { kind: "tool", id: "t", toolUseId: "t", name: "Read", input: { file_path: "a.txt" }, result: "conteúdo", isError: false, parentToolUseId: null, at: "2026-10-15T17:00:00Z" },
         ]}
@@ -28,13 +30,14 @@ describe("Transcript", () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(
-      <Transcript items={[]} pendingPermissions={[{ requestId: "p1", toolName: "Bash", input: { command: "rm -rf x" }, reason: "destrutivo", at: "t" }]} onDecide={onDecide} />,
+      <Transcript runId="r1" items={[]} pendingPermissions={[{ requestId: "p1", toolName: "Bash", input: { command: "rm -rf x" }, reason: "destrutivo", at: "t" }]} onDecide={onDecide} />,
     );
-    await user.type(screen.getByLabelText("Motivo da negativa"), "não");
+    expect(screen.getByTestId("preview-command")).toHaveTextContent("rm -rf x");
+    await user.type(screen.getByLabelText("Motivo da decisão"), "não");
     await user.click(screen.getByRole("button", { name: "Negar" }));
-    expect(onDecide).toHaveBeenCalledWith("p1", { behavior: "deny", message: "não" });
+    expect(onDecide).toHaveBeenCalledWith("r1", "p1", { behavior: "deny", message: "não" }, "não");
     await user.click(screen.getByRole("button", { name: "Permitir uma vez" }));
-    expect(onDecide).toHaveBeenCalledWith("p1", { behavior: "allow" });
+    expect(onDecide).toHaveBeenCalledWith("r1", "p1", { behavior: "allow" }, "não");
   });
 });
 

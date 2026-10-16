@@ -2,6 +2,7 @@
 
 use rusqlite::Row;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::protocol::{RunEvent, RunOptions};
 
@@ -153,4 +154,75 @@ pub struct StoredRunEvent {
     pub at: String,
     pub kind: String,
     pub event: RunEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalDecision {
+    Allow,
+    Deny,
+}
+
+impl ApprovalDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalDecision::Allow => "allow",
+            ApprovalDecision::Deny => "deny",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "allow" => Some(ApprovalDecision::Allow),
+            "deny" => Some(ApprovalDecision::Deny),
+            _ => None,
+        }
+    }
+}
+
+/// Pedido de permissão feito pelo agente e, quando houver, a decisão do usuário com o motivo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    pub id: String,
+    pub run_id: String,
+    pub project_id: String,
+    pub run_prompt: String,
+    pub request_id: String,
+    pub tool_name: String,
+    pub tool_input: Value,
+    pub reason: Option<String>,
+    pub decision: Option<ApprovalDecision>,
+    pub decision_message: Option<String>,
+    pub requested_at: String,
+    pub decided_at: Option<String>,
+}
+
+impl Approval {
+    pub const SELECT: &'static str = "SELECT a.id, a.run_id, r.project_id, r.prompt, a.request_id, a.tool_name, a.tool_input_json,
+        a.reason, a.decision, a.decision_message, a.requested_at, a.decided_at FROM approval a JOIN run r ON r.id = a.run_id";
+
+    pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let input_json: String = row.get(6)?;
+        let tool_input: Value = serde_json::from_str(&input_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        Ok(Approval {
+            id: row.get(0)?,
+            run_id: row.get(1)?,
+            project_id: row.get(2)?,
+            run_prompt: row.get(3)?,
+            request_id: row.get(4)?,
+            tool_name: row.get(5)?,
+            tool_input,
+            reason: row.get(7)?,
+            decision: row
+                .get::<_, Option<String>>(8)?
+                .as_deref()
+                .and_then(ApprovalDecision::parse),
+            decision_message: row.get(9)?,
+            requested_at: row.get(10)?,
+            decided_at: row.get(11)?,
+        })
+    }
 }
