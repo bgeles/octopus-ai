@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
+import { OnboardingView, type OnboardingResult } from "./components/OnboardingView";
+import { SettingsView } from "./components/SettingsView";
 import { Composer } from "./components/Composer";
 import { RunHeader } from "./components/RunHeader";
 import { RunSidebar } from "./components/RunSidebar";
 import { SessionsView } from "./components/SessionsView";
 import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
+import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { Approval, FilePreview, PermissionDecision, Project, ProjectTotals, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
+import type { AppSettings, Approval, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -30,6 +33,12 @@ export function App({ transport }: AppProps) {
   const [resumeTarget, setResumeTarget] = useState<ResumeTarget | null>(null);
   const [approvals, setApprovals] = useState<Approval[] | null>(null);
   const [totals, setTotals] = useState<ProjectTotals | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [theme, setThemeState] = useState<ThemePreference>(() => readThemePreference());
+  const [environment, setEnvironment] = useState<EnvironmentCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [snapshots, setSnapshots] = useState<BackupSnapshot[] | null>(null);
+  const [runtime, setRuntime] = useState<HelloResult | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -50,6 +59,35 @@ export function App({ transport }: AppProps) {
     },
     [transport],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    transport
+      .invoke("get_settings", {})
+      .then((loaded) => {
+        if (cancelled) return;
+        setSettings(loaded);
+        if (isThemePreference(loaded.theme)) {
+          setThemeState(loaded.theme);
+          applyTheme(loaded.theme);
+          saveThemePreference(loaded.theme);
+        }
+      })
+      .catch((e) => setToast(`Falha ao carregar preferências: ${messageOf(e)}`));
+    transport
+      .invoke("runtime_info", {})
+      .then((info) => {
+        if (!cancelled) setRuntime(info);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [transport]);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     let cancelled = false;
@@ -261,8 +299,93 @@ export function App({ transport }: AppProps) {
     }
   };
 
+  const setSetting = useCallback(
+    async (key: string, value: unknown) => {
+      await transport.invoke("set_setting", { key, value });
+      setSettings((current) => {
+        const next = { ...(current ?? {}) };
+        if (value === null || value === undefined) delete next[key];
+        else next[key] = value;
+        return next;
+      });
+    },
+    [transport],
+  );
+
+  const changeTheme = (next: ThemePreference) => {
+    setThemeState(next);
+    saveThemePreference(next);
+    void setSetting("theme", next).catch((e) => setToast(`Falha ao salvar o tema: ${messageOf(e)}`));
+  };
+
+  const recheckEnvironment = useCallback(() => {
+    setChecking(true);
+    transport
+      .invoke("check_environment", {})
+      .then(setEnvironment)
+      .catch((e) => setToast(`Falha ao checar o ambiente: ${messageOf(e)}`))
+      .finally(() => setChecking(false));
+  }, [transport]);
+
+  const refreshSnapshots = useCallback(() => {
+    transport
+      .invoke("config_backups_list", {})
+      .then(setSnapshots)
+      .catch((e) => setToast(`Falha ao listar cópias: ${messageOf(e)}`));
+  }, [transport]);
+
+  const reloadProjects = useCallback(async () => {
+    const list = await transport.invoke("list_projects", {});
+    setProjects(list);
+    setSelectedProject((current) => (current && list.some((p) => p.id === current.id) ? current : (list[0] ?? null)));
+  }, [transport]);
+
+  const afterConfigChange = async () => {
+    await reloadProjects();
+    setSettings(await transport.invoke("get_settings", {}));
+    refreshSnapshots();
+  };
+
+  const finishOnboarding = async (result: OnboardingResult) => {
+    if (result.project) await createProject(result.project);
+    await setSetting("defaultAuthMode", result.defaultAuthMode);
+    await setSetting("theme", result.theme);
+    await setSetting("onboarding.completedAt", new Date().toISOString());
+    setView("run");
+  };
+
+  const onboardingPending = settings !== null && settings["onboarding.completedAt"] === undefined;
+
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "waiting_approval" || r.status === "queued");
   const pendingApprovals = approvals ? approvals.filter((a) => a.decision === null).length : runState.pendingPermissions.length;
+
+  if (onboardingPending) {
+    return (
+      <>
+        <OnboardingView
+          environment={environment}
+          checking={checking}
+          onRecheck={recheckEnvironment}
+          theme={theme}
+          onThemeChange={changeTheme}
+          onPreviewImport={(path) => transport.invoke("config_import_preview", { path })}
+          onImport={async (path, mode) => {
+            await transport.invoke("config_import", { input: { path, mode } });
+            await afterConfigChange();
+          }}
+          onFinish={finishOnboarding}
+        />
+        {toast && (
+          <div role="status" className="fixed right-6 bottom-6 flex items-center gap-3 rounded-xl bg-ink px-4 py-3 text-[13px] text-paper shadow-md">
+            <span>{toast}</span>
+            <button type="button" onClick={() => setToast(null)} className="text-paper/70 hover:text-paper">
+              Fechar
+            </button>
+          </div>
+        )}
+      </>
+    );
+  }
 
   return (
     <Shell
@@ -280,6 +403,8 @@ export function App({ transport }: AppProps) {
       onChangeView={setView}
       activeRuns={activeRuns}
       pendingApprovals={pendingApprovals}
+      theme={theme}
+      onThemeChange={changeTheme}
     >
       {view === "run" && (
         <>
@@ -335,6 +460,37 @@ export function App({ transport }: AppProps) {
             if (selectedProject) void refreshApprovals(selectedProject.id);
           }}
           readFile={readProjectFile}
+        />
+      )}
+
+      {view === "settings" && settings && (
+        <SettingsView
+          settings={settings}
+          environment={environment}
+          checking={checking}
+          onRecheck={recheckEnvironment}
+          theme={theme}
+          onThemeChange={changeTheme}
+          onSetSetting={setSetting}
+          snapshots={snapshots}
+          onRefreshSnapshots={refreshSnapshots}
+          onExport={async (destination) => {
+            await transport.invoke("config_export", { destination });
+            refreshSnapshots();
+          }}
+          onPreviewFile={(path) => transport.invoke("config_import_preview", { path })}
+          onImportFile={async (path, mode) => {
+            await transport.invoke("config_import", { input: { path, mode } });
+            await afterConfigChange();
+          }}
+          onPreviewSnapshot={(id) => transport.invoke("config_backup_preview", { id })}
+          onRestoreSnapshot={async (id, mode) => {
+            await transport.invoke("config_backup_restore", { input: { id, mode } });
+            await afterConfigChange();
+          }}
+          onRevealSnapshot={(id) => transport.invoke("config_backup_reveal", { id }).then(() => undefined)}
+          onRedoOnboarding={() => setSetting("onboarding.completedAt", null)}
+          runtimeLabel={runtime ? `agent-runtime ${runtime.runtimeVersion} · SDK ${runtime.sdkVersion} · protocolo ${runtime.protocolVersion}` : "…"}
         />
       )}
 

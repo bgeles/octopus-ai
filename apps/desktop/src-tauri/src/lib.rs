@@ -4,6 +4,7 @@
 //! persistir e repassar eventos de run para a janela e expor comandos à UI.
 
 pub mod commands;
+pub mod commands_config;
 pub mod protocol;
 pub mod sidecar;
 pub mod store;

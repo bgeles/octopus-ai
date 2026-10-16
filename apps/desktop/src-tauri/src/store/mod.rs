@@ -4,6 +4,7 @@
 //! Migrations são SQL versionado aplicado em `open()`. Todo acesso passa por `Store`,
 //! que serializa escritas com um `Mutex` (SQLite tem um único escritor).
 
+pub mod config;
 pub mod models;
 
 use std::path::{Path, PathBuf};
@@ -22,10 +23,16 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_approvals",
         include_str!("migrations/0002_approvals.sql"),
     ),
+    (
+        "0003_settings_backups",
+        include_str!("migrations/0003_settings_backups.sql"),
+    ),
 ];
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Pasta das cópias de configuração (`<dados>/backups`); `None` em memória.
+    backup_dir: Option<PathBuf>,
 }
 
 impl Store {
@@ -36,15 +43,15 @@ impl Store {
                 .with_context(|| format!("criando {}", parent.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("abrindo {}", path.display()))?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, config::default_backup_dir(path))
     }
 
     /// Banco em memória, para testes.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, None)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    fn from_connection(conn: Connection, backup_dir: Option<PathBuf>) -> Result<Self> {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
@@ -52,6 +59,7 @@ impl Store {
         )?;
         let store = Self {
             conn: Mutex::new(conn),
+            backup_dir,
         };
         store.migrate()?;
         Ok(store)
@@ -434,7 +442,7 @@ fn close_pending_approvals(tx: &rusqlite::Transaction<'_>, run_id: &str) -> Resu
     Ok(())
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
@@ -456,11 +464,15 @@ mod tests {
         let s = store();
         assert_eq!(
             s.applied_migrations().unwrap(),
-            vec!["0001_init".to_string(), "0002_approvals".to_string()]
+            vec![
+                "0001_init".to_string(),
+                "0002_approvals".to_string(),
+                "0003_settings_backups".to_string()
+            ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 2);
+        assert_eq!(s.applied_migrations().unwrap().len(), 3);
     }
 
     #[test]
