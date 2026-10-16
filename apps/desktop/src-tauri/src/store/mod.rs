@@ -13,10 +13,16 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::protocol::{RunEvent, RunOptions};
-use models::{Project, Run, RunStatus, StoredRunEvent};
+use crate::protocol::{PermissionDecision, RunEvent, RunOptions};
+use models::{Approval, ApprovalDecision, Project, Run, RunStatus, StoredRunEvent};
 
-const MIGRATIONS: &[(&str, &str)] = &[("0001_init", include_str!("migrations/0001_init.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("migrations/0001_init.sql")),
+    (
+        "0002_approvals",
+        include_str!("migrations/0002_approvals.sql"),
+    ),
+];
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -255,10 +261,28 @@ impl Store {
                     params![run_id, usage.input_tokens as i64, usage.output_tokens as i64, usage.cache_read_tokens as i64],
                 )?;
             }
-            RunEvent::PermissionRequest { .. } => {
+            RunEvent::PermissionRequest {
+                request_id,
+                tool_name,
+                input,
+                reason,
+            } => {
                 tx.execute(
                     "UPDATE run SET status = 'waiting_approval' WHERE id = ?1",
                     params![run_id],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO approval (id, run_id, request_id, tool_name, tool_input_json, reason, requested_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        new_id("appr"),
+                        run_id,
+                        request_id,
+                        tool_name,
+                        serde_json::to_string(input)?,
+                        reason,
+                        at
+                    ],
                 )?;
             }
             RunEvent::Result {
@@ -276,6 +300,7 @@ impl Store {
                 } else {
                     RunStatus::Completed
                 };
+                close_pending_approvals(&tx, run_id)?;
                 tx.execute(
                     "UPDATE run SET status = ?2, claude_session_id = COALESCE(NULLIF(?3, ''), claude_session_id),
                         cost_usd = ?4, num_turns = ?5, stop_reason = ?6, result_text = ?7, ended_at = ?8,
@@ -301,6 +326,7 @@ impl Store {
                 message,
                 fatal: true,
             } => {
+                close_pending_approvals(&tx, run_id)?;
                 tx.execute(
                     "UPDATE run SET status = 'failed', error_message = ?2, ended_at = ?3 WHERE id = ?1",
                     params![run_id, message, now()],
@@ -310,6 +336,45 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    // ------------------------------------------------------------------ aprovações
+
+    /// Grava a decisão (e o motivo) de um pedido pendente. Retorna `false` se não havia pendente.
+    pub fn record_approval_decision(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        decision: &PermissionDecision,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        let (kind, message) = match decision {
+            PermissionDecision::Allow { .. } => (ApprovalDecision::Allow, note),
+            PermissionDecision::Deny { message } => {
+                (ApprovalDecision::Deny, Some(message.as_str()))
+            }
+        };
+        let message = message.map(str::trim).filter(|m| !m.is_empty());
+        let conn = self.conn.lock().expect("store mutex");
+        let changed = conn.execute(
+            "UPDATE approval SET decision = ?3, decision_message = ?4, decided_at = ?5
+             WHERE run_id = ?1 AND request_id = ?2 AND decision IS NULL",
+            params![run_id, request_id, kind.as_str(), message, now()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Aprovações do projeto: pendentes primeiro, depois as mais recentes.
+    pub fn list_approvals(&self, project_id: &str, limit: u32) -> Result<Vec<Approval>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare(&format!(
+            "{} WHERE r.project_id = ?1 ORDER BY (a.decision IS NULL) DESC, a.requested_at DESC LIMIT ?2",
+            Approval::SELECT
+        ))?;
+        let rows = stmt
+            .query_map(params![project_id, limit], Approval::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn list_run_events(&self, run_id: &str) -> Result<Vec<StoredRunEvent>> {
@@ -337,6 +402,16 @@ impl Store {
     }
 }
 
+/// Um run que termina leva junto seus pedidos pendentes: o sidecar já os negou.
+fn close_pending_approvals(tx: &rusqlite::Transaction<'_>, run_id: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE approval SET decision = 'deny', decision_message = 'Run encerrado antes da decisão', decided_at = ?2
+         WHERE run_id = ?1 AND decision IS NULL",
+        params![run_id, now()],
+    )?;
+    Ok(())
+}
+
 fn now() -> String {
     Utc::now().to_rfc3339()
 }
@@ -359,11 +434,11 @@ mod tests {
         let s = store();
         assert_eq!(
             s.applied_migrations().unwrap(),
-            vec!["0001_init".to_string()]
+            vec!["0001_init".to_string(), "0002_approvals".to_string()]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 1);
+        assert_eq!(s.applied_migrations().unwrap().len(), 2);
     }
 
     #[test]
@@ -567,5 +642,143 @@ mod tests {
         s.delete_project(&p.id).unwrap();
         assert!(s.get_run(&run.id).unwrap().is_none());
         assert!(s.list_run_events(&run.id).unwrap().is_empty());
+    }
+
+    fn permission(request_id: &str, tool: &str) -> RunEvent {
+        RunEvent::PermissionRequest {
+            request_id: request_id.into(),
+            tool_name: tool.into(),
+            input: serde_json::json!({"command": "ls"}),
+            reason: Some("fora do modo somente leitura".into()),
+        }
+    }
+
+    #[test]
+    fn approval_lifecycle_pending_then_decided() {
+        let s = store();
+        let p = s.create_project("p", "/tmp/p").unwrap();
+        let run = s.create_run(&p.id, "x", &RunOptions::default()).unwrap();
+        s.record_run_event(
+            &run.id,
+            0,
+            "2026-10-16T10:00:00Z",
+            &permission("perm_1", "Bash"),
+        )
+        .unwrap();
+        // Reentrega do mesmo evento não duplica.
+        s.record_run_event(
+            &run.id,
+            0,
+            "2026-10-16T10:00:00Z",
+            &permission("perm_1", "Bash"),
+        )
+        .unwrap();
+        s.record_run_event(
+            &run.id,
+            1,
+            "2026-10-16T10:00:05Z",
+            &permission("perm_2", "Edit"),
+        )
+        .unwrap();
+
+        let list = s.list_approvals(&p.id, 10).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|a| a.decision.is_none()));
+        assert_eq!(list[0].request_id, "perm_2", "mais recente primeiro");
+        assert_eq!(list[0].project_id, p.id);
+        assert_eq!(list[0].run_prompt, "x");
+        assert_eq!(
+            list[1].reason.as_deref(),
+            Some("fora do modo somente leitura")
+        );
+        assert_eq!(list[1].tool_input["command"], "ls");
+
+        assert!(s
+            .record_approval_decision(
+                &run.id,
+                "perm_1",
+                &PermissionDecision::Deny {
+                    message: "sem rede".into()
+                },
+                None,
+            )
+            .unwrap());
+        assert!(s
+            .record_approval_decision(
+                &run.id,
+                "perm_2",
+                &PermissionDecision::Allow {
+                    updated_input: None
+                },
+                Some("  edição esperada  "),
+            )
+            .unwrap());
+        // Já decidida: não muda de novo.
+        assert!(!s
+            .record_approval_decision(
+                &run.id,
+                "perm_2",
+                &PermissionDecision::Allow {
+                    updated_input: None
+                },
+                None,
+            )
+            .unwrap());
+        assert!(!s
+            .record_approval_decision(
+                &run.id,
+                "inexistente",
+                &PermissionDecision::Allow {
+                    updated_input: None
+                },
+                None,
+            )
+            .unwrap());
+
+        let list = s.list_approvals(&p.id, 10).unwrap();
+        let denied = list.iter().find(|a| a.request_id == "perm_1").unwrap();
+        assert_eq!(denied.decision, Some(ApprovalDecision::Deny));
+        assert_eq!(denied.decision_message.as_deref(), Some("sem rede"));
+        assert!(denied.decided_at.is_some());
+        let allowed = list.iter().find(|a| a.request_id == "perm_2").unwrap();
+        assert_eq!(allowed.decision, Some(ApprovalDecision::Allow));
+        assert_eq!(allowed.decision_message.as_deref(), Some("edição esperada"));
+
+        // Pendentes vêm antes das decididas.
+        s.record_run_event(
+            &run.id,
+            2,
+            "2026-10-16T09:00:00Z",
+            &permission("perm_0", "Write"),
+        )
+        .unwrap();
+        let list = s.list_approvals(&p.id, 10).unwrap();
+        assert_eq!(list[0].request_id, "perm_0");
+
+        // Run encerrado fecha o que ficou pendente.
+        s.record_run_event(
+            &run.id,
+            3,
+            "t",
+            &RunEvent::Error {
+                message: "interrompido".into(),
+                fatal: true,
+            },
+        )
+        .unwrap();
+        let list = s.list_approvals(&p.id, 10).unwrap();
+        assert!(list.iter().all(|a| a.decision.is_some()));
+        let closed = list.iter().find(|a| a.request_id == "perm_0").unwrap();
+        assert_eq!(closed.decision, Some(ApprovalDecision::Deny));
+        assert_eq!(
+            closed.decision_message.as_deref(),
+            Some("Run encerrado antes da decisão")
+        );
+
+        // Outro projeto não vê estas aprovações; apagar o projeto apaga tudo.
+        let other = s.create_project("o", "/tmp/o").unwrap();
+        assert!(s.list_approvals(&other.id, 10).unwrap().is_empty());
+        s.delete_project(&p.id).unwrap();
+        assert!(s.list_approvals(&p.id, 10).unwrap().is_empty());
     }
 }

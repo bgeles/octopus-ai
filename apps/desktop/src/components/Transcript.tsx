@@ -1,16 +1,18 @@
 import { AlertTriangle, Check, ChevronRight, X } from "lucide-react";
 import { useState } from "react";
 import type { PendingPermission, TranscriptItem } from "../state/runReducer";
-import type { PermissionDecision } from "../lib/types";
+import { ApprovalCard, summarizeInput, type DecideFn, type ReadFileFn } from "./ApprovalCard";
 
 type TranscriptProps = {
+  runId: string | null;
   items: TranscriptItem[];
   pendingPermissions: PendingPermission[];
-  onDecide: (requestId: string, decision: PermissionDecision) => void;
+  onDecide: DecideFn;
   deciding?: string | null;
+  readFile?: ReadFileFn;
 };
 
-export function Transcript({ items, pendingPermissions, onDecide, deciding }: TranscriptProps) {
+export function Transcript({ runId, items, pendingPermissions, onDecide, deciding, readFile }: TranscriptProps) {
   if (items.length === 0 && pendingPermissions.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center p-6 text-center text-slate">
@@ -70,7 +72,14 @@ export function Transcript({ items, pendingPermissions, onDecide, deciding }: Tr
       )}
 
       {pendingPermissions.map((permission) => (
-        <ApprovalCard key={permission.requestId} permission={permission} onDecide={onDecide} busy={deciding === permission.requestId} />
+        <ApprovalCard
+          key={permission.requestId}
+          request={{ runId: runId ?? "", requestId: permission.requestId, toolName: permission.toolName, input: permission.input, reason: permission.reason, at: permission.at }}
+          onDecide={onDecide}
+          busy={deciding === permission.requestId}
+          readFile={readFile}
+          inset
+        />
       ))}
     </div>
   );
@@ -108,55 +117,6 @@ function ToolCall({ item }: { item: Extract<TranscriptItem, { kind: "tool" }> })
   );
 }
 
-export function ApprovalCard({ permission, onDecide, busy }: { permission: PendingPermission; onDecide: TranscriptProps["onDecide"]; busy: boolean }) {
-  const [denyReason, setDenyReason] = useState("");
-  const summary = summarizeInput(permission.toolName, permission.input);
-  return (
-    <section aria-label={`Aprovação necessária: ${permission.toolName}`} className="ml-10 flex flex-col gap-2.5 rounded-xl border-[1.5px] border-brand bg-surface p-3.5" data-testid="approval-card">
-      <div className="flex items-center gap-2">
-        <span className="eyebrow text-brand">Aprovação necessária</span>
-        {permission.reason && <span className="ml-auto text-xs text-slate">{permission.reason}</span>}
-      </div>
-      <div className="flex items-center gap-2 text-[13px]">
-        <span className="font-semibold text-ink">{permission.toolName}</span>
-        <code className="min-w-0 flex-1 truncate rounded-sm bg-paper px-2.5 py-1.5 font-mono text-xs text-ink">{summary}</code>
-      </div>
-      <details className="text-xs text-slate">
-        <summary className="cursor-pointer">Ver entrada completa</summary>
-        <pre className="m-0 mt-1 max-h-48 overflow-auto rounded-sm bg-paper p-2 font-mono whitespace-pre-wrap">{JSON.stringify(permission.input, null, 2)}</pre>
-      </details>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onDecide(permission.requestId, { behavior: "allow" })}
-          className="rounded-full bg-brand px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-brand-hover disabled:opacity-50"
-        >
-          Permitir uma vez
-        </button>
-        <label className="sr-only" htmlFor={`deny-${permission.requestId}`}>
-          Motivo da negativa
-        </label>
-        <input
-          id={`deny-${permission.requestId}`}
-          value={denyReason}
-          onChange={(e) => setDenyReason(e.target.value)}
-          placeholder="Motivo (opcional)"
-          className="min-w-0 flex-1 rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px]"
-        />
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onDecide(permission.requestId, { behavior: "deny", message: denyReason.trim() || "Negado pelo usuário" })}
-          className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium text-ink hover:border-ink disabled:opacity-50"
-        >
-          Negar
-        </button>
-      </div>
-    </section>
-  );
-}
-
 type Group = { kind: "user"; id: string; text: string; at: string } | { kind: "assistant"; id: string; at: string; items: TranscriptItem[] };
 
 function groupItems(items: TranscriptItem[]): Group[] {
@@ -174,19 +134,6 @@ function groupItems(items: TranscriptItem[]): Group[] {
     }
   }
   return groups;
-}
-
-export function summarizeInput(toolName: string, input: unknown): string {
-  if (typeof input !== "object" || input === null) return input === undefined || input === null ? "" : String(input);
-  const record = input as Record<string, unknown>;
-  const preferred = ["command", "file_path", "pattern", "path", "query", "url", "prompt", "description"];
-  for (const key of preferred) {
-    const value = record[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  const keys = Object.keys(record);
-  if (keys.length === 0) return toolName;
-  return keys.map((k) => `${k}=${JSON.stringify(record[k])}`).join(" ");
 }
 
 export function formatTime(iso: string): string {
