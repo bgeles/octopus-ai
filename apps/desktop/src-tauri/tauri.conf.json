@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run sidecar:build && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run sidecar:build && npm run build && node ../../scripts/bundle-sidecar.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -26,6 +26,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "sidecar-bundle/": "sidecar/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

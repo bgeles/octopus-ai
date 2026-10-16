@@ -56,6 +56,14 @@ O desenvolvimento segue as fases do `docs/plano.md`, uma branch por fase e uma p
 
 Regras: PRs de iteração entram na branch da fase com a suíte de testes verde no CI; a branch da fase só vai para `main` quando os critérios de "pronto quando" da fase no plano forem cumpridos.
 
+## Build de teste (.app / .dmg)
+
+```bash
+npm run build:app
+```
+
+Gera `apps/desktop/src-tauri/target/release/bundle/macos/Octopus AI.app` e o `.dmg` em `bundle/dmg/`. O `beforeBuildCommand` compila o protocolo, o sidecar e a UI e roda `scripts/bundle-sidecar.mjs`, que copia o sidecar e só as dependências de runtime (incluindo o binário nativo do Claude do Agent SDK) para `src-tauri/sidecar-bundle/`, empacotado como resource (`Contents/Resources/sidecar/`). Em release o app roda esse sidecar com o `node` da máquina: procura no PATH e nos caminhos usuais (Homebrew, instalador oficial, Volta, nvm), ou no que `OCTOPUS_NODE` indicar. Node e o login do Claude Code continuam pré-requisitos; o binário único do sidecar fica para a Fase 7. O build não é assinado: na primeira abertura, use botão direito → Abrir.
+
 ## Onde ficam os dados
 
 `~/Library/Application Support/ai.octopus.desktop/octopus.db` (SQLite). As sessões do Claude continuam em `~/.claude/projects/`.
