@@ -33,7 +33,7 @@ export function Composer({ disabled, busy, onSubmit }: ComposerProps) {
         e.preventDefault();
         submit();
       }}
-      className="flex flex-col gap-2 border-t hairline bg-white px-6 pt-4 pb-5"
+      className="flex flex-col gap-2 border-t hairline bg-surface px-6 pt-4 pb-5"
     >
       <label htmlFor="prompt" className="text-xs font-medium text-slate">
         Instrução para o agente
@@ -49,7 +49,7 @@ export function Composer({ disabled, busy, onSubmit }: ComposerProps) {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
           }}
           placeholder={disabled ? "Selecione um projeto para começar" : "Ex.: liste as migrações e resuma a última (⌘↵ envia)"}
-          className="min-w-0 flex-1 basis-80 resize-y rounded-sm border hairline-strong bg-white px-3 py-2.5 text-sm text-ink disabled:bg-paper"
+          className="min-w-0 flex-1 basis-80 resize-y rounded-sm border hairline-strong bg-surface px-3 py-2.5 text-sm text-ink disabled:bg-paper"
         />
         <button
           type="submit"
@@ -62,7 +62,7 @@ export function Composer({ disabled, busy, onSubmit }: ComposerProps) {
       <div className="flex flex-wrap items-center gap-3 text-xs text-slate">
         <label className="flex items-center gap-1.5">
           Permissões
-          <select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value as PermissionMode)} disabled={disabled} className="rounded-sm border hairline-strong bg-white px-2 py-1 text-xs text-ink">
+          <select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value as PermissionMode)} disabled={disabled} className="rounded-sm border hairline-strong bg-surface px-2 py-1 text-xs text-ink">
             {(Object.keys(PERMISSION_LABELS) as PermissionMode[]).map((mode) => (
               <option key={mode} value={mode}>
                 {PERMISSION_LABELS[mode]}
@@ -79,7 +79,7 @@ export function Composer({ disabled, busy, onSubmit }: ComposerProps) {
             value={maxTurns}
             disabled={disabled}
             onChange={(e) => setMaxTurns(Math.max(1, Number(e.target.value) || 1))}
-            className="w-16 rounded-sm border hairline-strong bg-white px-2 py-1 text-xs text-ink"
+            className="w-16 rounded-sm border hairline-strong bg-surface px-2 py-1 text-xs text-ink"
           />
         </label>
       </div>
