@@ -92,7 +92,9 @@ octopus-ai/
 ### Modelo de dados (SQLite, migrations em Rust)
 
 - `project` (id, name, path, auth_mode `subscription|api_key`, default_agent_id, sandbox_profile_id, settings_json)
-- `agent_profile` (id, project_id nullable=global, name, role, instructions_md, model, effort, permission_mode, allowed_tools_json, mcp_server_ids, skill_ids, subagents_json, max_turns, max_budget_usd)
+- `role` (id, scope `global|project`, project_id nullable, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position)
+- `agent_profile` (id, project_id nullable=global, role_id, name, avatar_seed, instructions_md, model, effort, permission_mode, allowed_tools_json, mcp_server_ids, skill_ids, subagents_json, max_turns, max_budget_usd)
+- `team_member` (id, project_id, agent_profile_id, reports_to_agent_id nullable=gestor, position)
 - `workflow` (id, project_id, name, stages_json: lista de estágios com agente responsável, gate humano sim/não, paralelismo)
 - `task` (id, project_id, workflow_id, stage, title, description_md, status `backlog|ready|running|waiting_approval|review|done|blocked|failed`, assigned_agent_id, depends_on_json, acceptance_md, worktree_path, lock_run_id)
 - `run` (id, task_id, project_id, agent_id, claude_session_id, status, started_at, ended_at, cost_usd, input_tokens, output_tokens, cache_read_tokens, model, stop_reason, transcript_path)
@@ -118,6 +120,16 @@ octopus-ai/
 - Agente = perfil declarativo (instruções, modelo, ferramentas, permission mode, MCPs, skills, subagentes). Instruções viram `systemPrompt: {type:'preset', preset:'claude_code', append}`; subagentes viram `options.agents`.
 - Scheduler em Rust: pega tasks `ready` cujas dependências estão `done`, respeita concorrência por projeto, faz checkout atômico (lock), cria `git worktree` por task (opcional por workflow), abre um run e, ao terminar, move a task para o próximo estágio ou para `waiting_approval` se o estágio tem gate humano.
 - Templates de workflow iniciais: "Planejar → Implementar → Revisar → Aprovar", "Pesquisa paralela → Síntese".
+
+### Modelo de time: cargos, especialidades e responsabilidades (inspirado no Paperclip, decidido em 16/10/2026)
+
+O Paperclip apresenta agentes como funcionários de uma empresa: organograma com cargos, títulos e linhas de reporte, metas ligadas a issues, aprovações como governança, orçamentos com hard stop, heartbeats e activity log. Do que ele traz, o Octopus já cobria tasks com dependências e locks, runs com custo e orçamento, aprovações, audit log e adapters; faltava a **apresentação de time**. A metáfora escolhida é **"você gerencia o time"**: o usuário é o gestor; cada agente é um membro do time com cargo, especialidade e responsabilidades; a delegação entre agentes (subagentes) aparece como subordinação no organograma. Não há agente-CEO.
+
+- **Cargo (`role`)**: título (ex.: Implementador), especialidade em uma linha (ex.: "Código Java/Spring e migrações"), responsabilidades em markdown (3 a 5 frases que viram parte do `systemPrompt.append`), modelo e permission mode padrão, ferramentas padrão, ícone. Escopo global (catálogo) ou do projeto (ajustes locais). Catálogo inicial: Planejador, Implementador, Revisor, Testador, Pesquisador, Documentador, Segurança.
+- **Membro do time (`team_member`)**: um `agent_profile` colocado no time de um projeto, com `reports_to_agent_id` (a quem reporta; `null` = reporta ao gestor) e `position` para a ordem no organograma. O perfil herda do cargo e pode sobrescrever instruções, modelo, ferramentas e orçamento.
+- **Telas**: *Time* (organograma com o gestor no topo e cards de membro; status ao vivo quando há run; custo do mês vs. orçamento), *Ficha do membro* (responsabilidades, como trabalha, delegação, histórico de runs e custo) e *Board* (Kanban por estágio com avatar do responsável em cada card). A entrada de navegação "Agentes" passa a chamar-se **Time**.
+- **Regras visuais (Grafite)**: avatar monocromático com iniciais sobre `--surface` e borda `--mist` (o acento vermelho fica para run ativo, ação primária e alertas); título do cargo em Plus Jakarta Sans; especialidade em eyebrow; responsabilidades em até 3 linhas no card; chips de ferramentas; barra fina de custo do mês sobre o orçamento; organograma com linhas em `--mist` ligando gestor → membros → delegados. Pranchas: `Time`, `AgenteFicha` e `BoardTime` no artefato Design.
+- **Fora de escopo por decisão (16/10/2026)**: metas (goals) ligadas às tasks e heartbeats/rotinas do Paperclip. Reavaliar na Fase 7 ou depois.
 
 ### Segurança de execução (camadas)
 1. **Sandbox nativo do Claude Code**: perfil de sandbox por projeto no app → traduzido para `options.sandbox`/settings (`enabled: true`, `allowUnsandboxedCommands: false`, `failIfUnavailable: true`, `filesystem.allowWrite` = só o projeto/worktree, `denyRead` para `~/.ssh`, `~/.aws`, `~/.config` etc., `network.allowedDomains` com allowlist, `strictAllowlist`, `credentials` deny/mask com `injectHosts`). Perfis prontos: `estrito`, `dev-padrão`, `somente-leitura`.
@@ -192,9 +204,9 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 - `canUseTool` → aprovação na UI com diff/preview do input; `permissionMode` por run.
 - Árvore de tool calls e subagentes, medidor de custo/tokens.
 
-### Fase 2 — Projetos, agentes e orquestração
-- CRUD de projetos, perfis de agente, workflows e tasks; board Kanban; grafo xyflow.
-- Scheduler (locks, DAG, concorrência, worktrees, gates humanos); templates de workflow.
+### Fase 2 — Projetos, time e orquestração
+- **2a — Time (telas aprovadas no Design na Fase 1, iteração 03)**: catálogo de cargos com seed, CRUD de membros do time, tela Time com organograma (xyflow) e cards de membro, Ficha do membro, Board Kanban com responsável por card; nav "Agentes" vira "Time". Perfil de agente vira `options` do SDK (instruções do cargo + do membro em `systemPrompt.append`, `agents` para os delegados).
+- **2b — Orquestração**: CRUD de projetos, workflows e tasks; scheduler (locks, DAG, concorrência, worktrees, gates humanos); templates de workflow; grafo de estágios.
 - MCP in-process com `task_update` para o agente mover a própria task.
 
 ### Fase 3 — Segurança de execução
@@ -216,7 +228,7 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 
 - **Fase 0**: `npm run tauri dev` abre o app; prompt "liste os arquivos" em uma pasta de teste produz streaming e um registro em `run` com `claude_session_id` e `cost_usd`; `sqlite3 octopus.db 'select * from run'` confirma.
 - **Fase 1**: retomar a sessão e perguntar "o que fizemos antes?" responde com contexto; pedir uma escrita de arquivo gera aprovação na UI; negar impede a escrita.
-- **Fase 2**: criar workflow de 3 estágios com 2 tasks dependentes; scheduler só inicia a segunda após a primeira ficar `done`; gate humano segura a task em `waiting_approval`; worktree criado em `.octopus/worktrees/<task>`.
+- **Fase 2**: montar um time com 3 membros (Planejador → Implementador → Revisor) e ver o organograma com os três ligados ao gestor; abrir a ficha do Implementador e conferir que as responsabilidades do cargo entram no `system/init`; criar workflow de 3 estágios com 2 tasks dependentes; scheduler só inicia a segunda após a primeira ficar `done`; gate humano segura a task em `waiting_approval`; worktree criado em `.octopus/worktrees/<task>`.
 - **Fase 3**: com perfil `estrito`, pedir `curl https://example.com` falha (host fora da allowlist) e `cat ~/.ssh/id_rsa` falha; pedir `rm -rf /tmp/x` fora do projeto é negado pelo motor Rust com motivo visível; alterar manualmente uma linha do audit log quebra a verificação de hash.
 - **Fase 4**: após um run, páginas aparecem em `memory/wiki`; novo run na mesma task recebe o handoff; busca na UI encontra a decisão registrada; medidor de contexto sobe conforme o run avança e registra a compactação.
 - **Fase 5**: adicionar um MCP server inválido mostra erro de health; agente com skill vinculada a vê no `system/init`.

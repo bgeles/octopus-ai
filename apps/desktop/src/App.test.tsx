@@ -19,6 +19,14 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
     expect(screen.getByTestId("run-status")).toHaveTextContent("Pronto");
   });
 
+  it("a navegação apresenta o time (ainda desabilitado até a Fase 2)", async () => {
+    setup();
+    await screen.findByDisplayValue("chat-core");
+    const team = screen.getByRole("button", { name: "Time" });
+    expect(team).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Agentes" })).not.toBeInTheDocument();
+  });
+
   it("inicia um run, mostra streaming, pede aprovação e conclui após permitir", async () => {
     const { user } = setup();
     await screen.findByDisplayValue("chat-core");

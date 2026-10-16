@@ -1,4 +1,4 @@
-import { BookOpen, Bot, CheckCircle2, ChevronDown, History, Lock, Play } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronDown, History, Lock, Play, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Project, Run } from "../lib/types";
 import { THEME_LABELS, useTheme, type ThemePreference } from "../lib/theme";
@@ -27,7 +27,7 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
     { id: "run", label: "Run ao vivo", icon: <Play size={16} aria-hidden />, live: activeRuns.length > 0 },
     { id: "sessions", label: "Sessões", icon: <History size={16} aria-hidden /> },
     { id: "approvals", label: "Aprovações", icon: <CheckCircle2 size={16} aria-hidden />, badge: pendingApprovals },
-    { id: "agents", label: "Agentes", icon: <Bot size={16} aria-hidden />, disabled: true },
+    { id: "agents", label: "Time", icon: <Users size={16} aria-hidden />, disabled: true },
     { id: "memory", label: "Memória", icon: <BookOpen size={16} aria-hidden />, disabled: true },
     { id: "security", label: "Segurança", icon: <Lock size={16} aria-hidden />, disabled: true },
   ];
