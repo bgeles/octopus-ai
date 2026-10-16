@@ -101,6 +101,9 @@ pub struct StartRunInput {
     pub prompt: String,
     #[serde(default)]
     pub options: RunOptions,
+    /// Membro do time que executa o run: instruções do cargo, limites e delegados entram nas opções.
+    #[serde(default)]
+    pub agent_profile_id: Option<String>,
 }
 
 #[tauri::command]
@@ -114,16 +117,28 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
         .map_err(err)?
         .ok_or_else(|| format!("Projeto {} não encontrado", input.project_id))?;
 
+    let options = match input.agent_profile_id.as_deref() {
+        Some(agent_id) => state
+            .store
+            .agent_run_options(agent_id, &input.options)
+            .map_err(err)?,
+        None => input.options,
+    };
     let run = state
         .store
-        .create_run(&project.id, &input.prompt, &input.options)
+        .create_run_for_agent(
+            &project.id,
+            &input.prompt,
+            &options,
+            input.agent_profile_id.as_deref(),
+        )
         .map_err(err)?;
 
     let params = RunStartParams {
         run_id: run.id.clone(),
         cwd: project.path.clone(),
         prompt: input.prompt,
-        options: input.options,
+        options,
     };
     match state.sidecar.start_run(params).await {
         Ok(_) => {

@@ -1,13 +1,18 @@
 import { GitFork, History } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { PermissionMode } from "@octopus/protocol";
-import type { ResumeTarget } from "../lib/types";
+import type { ResumeTarget, TeamMember } from "../lib/types";
+import { Avatar } from "./Avatar";
 
 type ComposerProps = {
   disabled: boolean;
   busy: boolean;
   resumeTarget?: ResumeTarget | null;
   onCancelResume?: () => void;
+  /** Membros do time disponíveis para "Executar como". */
+  team?: TeamMember[];
+  runAs?: TeamMember | null;
+  onRunAsChange?: (member: TeamMember | null) => void;
   onSubmit: (prompt: string, options: { permissionMode: PermissionMode; maxTurns: number }) => void;
 };
 
@@ -19,7 +24,7 @@ const PERMISSION_LABELS: Record<PermissionMode, string> = {
   auto: "Classificador automático",
 };
 
-export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, onSubmit }: ComposerProps) {
+export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, team = [], runAs = null, onRunAsChange, onSubmit }: ComposerProps) {
   const [prompt, setPrompt] = useState("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
   const [maxTurns, setMaxTurns] = useState(40);
@@ -27,8 +32,8 @@ export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, 
 
   // Ao escolher retomar/bifurcar, o foco vai direto para a instrução.
   useEffect(() => {
-    if (resumeTarget) textareaRef.current?.focus();
-  }, [resumeTarget]);
+    if (resumeTarget || runAs) textareaRef.current?.focus();
+  }, [resumeTarget, runAs]);
 
   const submit = () => {
     const text = prompt.trim();
@@ -57,8 +62,19 @@ export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, 
           </button>
         </div>
       )}
+      {runAs && (
+        <div role="status" data-testid="run-as-banner" className="flex flex-wrap items-center gap-2.5 rounded-md border hairline bg-paper px-3.5 py-2 text-[13px]">
+          <Avatar initials={runAs.profile.avatarSeed} size={24} />
+          <span>
+            Tarefa para <strong>{runAs.profile.name}</strong> · {runAs.role.title}: as responsabilidades do cargo e os delegados entram no run.
+          </span>
+          <button type="button" onClick={() => onRunAsChange?.(null)} className="ml-auto rounded-sm border hairline-strong px-2.5 py-1 text-xs font-semibold text-ink hover:border-ink">
+            Sem membro
+          </button>
+        </div>
+      )}
       <label htmlFor="prompt" className="text-xs font-medium text-slate">
-        Instrução para o agente
+        {runAs ? `Instrução para ${runAs.profile.name}` : "Instrução para o agente"}
       </label>
       <div className="flex flex-wrap items-end gap-2.5">
         <textarea
@@ -83,6 +99,25 @@ export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, 
         </button>
       </div>
       <div className="flex flex-wrap items-center gap-3 text-xs text-slate">
+        {team.length > 0 && (
+          <label className="flex items-center gap-1.5">
+            Executar como
+            <select
+              value={runAs?.profile.id ?? ""}
+              onChange={(e) => onRunAsChange?.(team.find((m) => m.profile.id === e.target.value) ?? null)}
+              disabled={disabled}
+              className="rounded-sm border hairline-strong bg-surface px-2 py-1 text-xs text-ink"
+              data-testid="run-as-select"
+            >
+              <option value="">Agente avulso</option>
+              {team.map((m) => (
+                <option key={m.profile.id} value={m.profile.id}>
+                  {m.profile.name} · {m.role.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="flex items-center gap-1.5">
           Permissões
           <select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value as PermissionMode)} disabled={disabled} className="rounded-sm border hairline-strong bg-surface px-2 py-1 text-xs text-ink">

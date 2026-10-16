@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
+import { MemberDialog } from "./components/MemberDialog";
+import { MemberSheet } from "./components/MemberSheet";
+import { TeamView, type MemberStatus } from "./components/TeamView";
 import { OnboardingView, type OnboardingResult } from "./components/OnboardingView";
 import { SettingsView } from "./components/SettingsView";
 import { Composer } from "./components/Composer";
@@ -12,7 +15,7 @@ import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AppSettings, Approval, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
+import type { AgentTotals, AppSettings, Approval, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, TeamMember, TeamMemberInput } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -39,6 +42,12 @@ export function App({ transport }: AppProps) {
   const [checking, setChecking] = useState(false);
   const [snapshots, setSnapshots] = useState<BackupSnapshot[] | null>(null);
   const [runtime, setRuntime] = useState<HelloResult | null>(null);
+  const [team, setTeam] = useState<TeamMember[] | null>(null);
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [teamTotals, setTeamTotals] = useState<AgentTotals[]>([]);
+  const [openMemberId, setOpenMemberId] = useState<string | null>(null);
+  const [memberDialog, setMemberDialog] = useState<{ open: boolean; member: TeamMember | null }>({ open: false, member: null });
+  const [runAs, setRunAs] = useState<TeamMember | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -48,9 +57,14 @@ export function App({ transport }: AppProps) {
 
   const refreshRuns = useCallback(
     async (projectId: string) => {
-      const [list, projectTotals] = await Promise.all([transport.invoke("list_runs", { projectId, limit: 20 }), transport.invoke("get_project_totals", { projectId })]);
+      const [list, projectTotals, agentTotals] = await Promise.all([
+        transport.invoke("list_runs", { projectId, limit: 20 }),
+        transport.invoke("get_project_totals", { projectId }),
+        transport.invoke("team_totals", { projectId }),
+      ]);
       setRuns(list);
       setTotals(projectTotals);
+      setTeamTotals(agentTotals);
       const currentId = currentRunIdRef.current;
       if (currentId) {
         const fresh = list.find((r) => r.id === currentId) ?? (await transport.invoke("get_run", { runId: currentId }));
@@ -115,12 +129,29 @@ export function App({ transport }: AppProps) {
     [transport],
   );
 
+  const refreshTeam = useCallback(
+    async (projectId: string) => {
+      try {
+        const [members, roleList] = await Promise.all([transport.invoke("list_team", { projectId }), transport.invoke("list_roles", { projectId })]);
+        setTeam(members);
+        setRoles(roleList);
+        setRunAs((current) => (current ? (members.find((m) => m.profile.id === current.profile.id) ?? null) : null));
+      } catch (e) {
+        setToast(`Falha ao carregar o time: ${messageOf(e)}`);
+      }
+    },
+    [transport],
+  );
+
   useEffect(() => {
     if (!selectedProject) return;
     void refreshRuns(selectedProject.id);
     void refreshApprovals(selectedProject.id);
+    void refreshTeam(selectedProject.id);
     setSessions(null);
-  }, [selectedProject, refreshRuns, refreshApprovals]);
+    setTeam(null);
+    setOpenMemberId(null);
+  }, [selectedProject, refreshRuns, refreshApprovals, refreshTeam]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -177,6 +208,7 @@ export function App({ transport }: AppProps) {
         input: {
           projectId: selectedProject.id,
           prompt,
+          agentProfileId: runAs?.profile.id ?? null,
           options: {
             permissionMode: options.permissionMode,
             maxTurns: options.maxTurns,
@@ -354,6 +386,35 @@ export function App({ transport }: AppProps) {
     setView("run");
   };
 
+  const memberStatus = (agentProfileId: string): MemberStatus => {
+    const mine = runs.filter((r) => r.agentProfileId === agentProfileId);
+    if (mine.some((r) => r.status === "waiting_approval")) return "waiting";
+    if (mine.some((r) => r.status === "running" || r.status === "queued")) return "active";
+    return "idle";
+  };
+
+  const saveMember = async (input: TeamMemberInput) => {
+    if (!selectedProject) return;
+    if (memberDialog.member) await transport.invoke("update_team_member", { agentProfileId: memberDialog.member.profile.id, input });
+    else await transport.invoke("add_team_member", { projectId: selectedProject.id, input });
+    await refreshTeam(selectedProject.id);
+  };
+
+  const removeMember = async () => {
+    if (!selectedProject || !memberDialog.member) return;
+    await transport.invoke("remove_team_member", { agentProfileId: memberDialog.member.profile.id });
+    setOpenMemberId(null);
+    await refreshTeam(selectedProject.id);
+  };
+
+  const runAsMember = (member: TeamMember) => {
+    setRunAs(member);
+    setView("run");
+  };
+
+  const openMember = team?.find((m) => m.profile.id === openMemberId) ?? null;
+  const monthlyTeamCost = teamTotals.reduce((sum, t) => sum + t.costUsd, 0);
+
   const onboardingPending = settings !== null && settings["onboarding.completedAt"] === undefined;
 
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "waiting_approval" || r.status === "queued");
@@ -397,6 +458,7 @@ export function App({ transport }: AppProps) {
         setRunState(initialRunViewState());
         setResumeTarget(null);
         setTotals(null);
+        setRunAs(null);
       }}
       onAddProject={() => setAddOpen(true)}
       view={view}
@@ -432,6 +494,9 @@ export function App({ transport }: AppProps) {
             busy={starting || active}
             resumeTarget={resumeTarget}
             onCancelResume={() => setResumeTarget(null)}
+            team={team ?? []}
+            runAs={runAs}
+            onRunAsChange={setRunAs}
             onSubmit={(prompt, options) => void startRun(prompt, options)}
           />
         </>
@@ -460,6 +525,33 @@ export function App({ transport }: AppProps) {
             if (selectedProject) void refreshApprovals(selectedProject.id);
           }}
           readFile={readProjectFile}
+        />
+      )}
+
+      {view === "agents" && openMember && (
+        <MemberSheet
+          member={openMember}
+          team={team ?? []}
+          status={memberStatus(openMember.profile.id)}
+          totals={teamTotals.find((t) => t.agentProfileId === openMember.profile.id) ?? null}
+          runs={runs}
+          onBack={() => setOpenMemberId(null)}
+          onEdit={() => setMemberDialog({ open: true, member: openMember })}
+          onRunAs={() => runAsMember(openMember)}
+          onOpenRun={(run) => void openRun(run)}
+        />
+      )}
+      {view === "agents" && !openMember && (
+        <TeamView
+          project={selectedProject}
+          members={team}
+          roles={roles}
+          totals={teamTotals}
+          statusOf={memberStatus}
+          monthlyCost={monthlyTeamCost}
+          onAddMember={() => setMemberDialog({ open: true, member: null })}
+          onOpenMember={(member) => setOpenMemberId(member.profile.id)}
+          onRunAs={runAsMember}
         />
       )}
 
@@ -504,6 +596,15 @@ export function App({ transport }: AppProps) {
       )}
 
       <AddProjectDialog open={addOpen} onClose={() => setAddOpen(false)} onCreate={createProject} />
+      <MemberDialog
+        open={memberDialog.open}
+        roles={roles}
+        team={team ?? []}
+        member={memberDialog.member}
+        onClose={() => setMemberDialog((d) => ({ ...d, open: false }))}
+        onSave={saveMember}
+        onRemove={memberDialog.member ? removeMember : undefined}
+      />
     </Shell>
   );
 }

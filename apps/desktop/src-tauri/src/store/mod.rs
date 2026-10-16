@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod models;
+pub mod team;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -27,6 +28,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_settings_backups",
         include_str!("migrations/0003_settings_backups.sql"),
     ),
+    ("0004_team", include_str!("migrations/0004_team.sql")),
 ];
 
 pub struct Store {
@@ -160,6 +162,16 @@ impl Store {
     // ------------------------------------------------------------------ runs
 
     pub fn create_run(&self, project_id: &str, prompt: &str, options: &RunOptions) -> Result<Run> {
+        self.create_run_for_agent(project_id, prompt, options, None)
+    }
+
+    pub fn create_run_for_agent(
+        &self,
+        project_id: &str,
+        prompt: &str,
+        options: &RunOptions,
+        agent_profile_id: Option<&str>,
+    ) -> Result<Run> {
         let run = Run {
             id: new_id("run"),
             project_id: project_id.to_string(),
@@ -178,11 +190,12 @@ impl Store {
             stop_reason: None,
             result_text: None,
             error_message: None,
+            agent_profile_id: agent_profile_id.map(str::to_string),
         };
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
-            "INSERT INTO run (id, project_id, prompt, options_json, status, model, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO run (id, project_id, prompt, options_json, status, model, started_at, agent_profile_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 run.id,
                 run.project_id,
@@ -190,7 +203,8 @@ impl Store {
                 serde_json::to_string(&run.options)?,
                 run.status.as_str(),
                 run.model,
-                run.started_at
+                run.started_at,
+                run.agent_profile_id
             ],
         )?;
         Ok(run)
@@ -467,12 +481,13 @@ mod tests {
             vec![
                 "0001_init".to_string(),
                 "0002_approvals".to_string(),
-                "0003_settings_backups".to_string()
+                "0003_settings_backups".to_string(),
+                "0004_team".to_string()
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 3);
+        assert_eq!(s.applied_migrations().unwrap().len(), 4);
     }
 
     #[test]

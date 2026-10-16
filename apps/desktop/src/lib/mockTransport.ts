@@ -8,7 +8,7 @@ import subagentEvents from "@octopus/protocol/fixtures/run-events-subagent.notif
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { Approval, AppSettings, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Run, SessionSummary, StoredRunEvent } from "./types";
+import type { AgentProfile, Approval, AppSettings, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, StoredRunEvent, TeamMember, TeamMemberInput } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -24,6 +24,29 @@ export type MockOptions = {
   /** Resultado das checagens de ambiente (padrão: tudo ok). */
   environment?: Partial<{ node: boolean; claudeAuth: boolean }>;
 };
+
+/** Catálogo inicial de cargos, igual ao seed da migration 0004. */
+export function seedRoles(): Role[] {
+  const at = "2026-10-16T00:00:00Z";
+  const base = { scope: "global" as const, projectId: null, defaultModel: null, icon: null, createdAt: at, updatedAt: at };
+  return [
+    { ...base, id: "role_planejador", title: "Planejador", specialty: "Arquitetura e planos", responsibilitiesMd: "- Transformar o pedido em um plano com critérios de aceite claros.\n- Decompor o trabalho em tasks pequenas, com dependências explícitas.\n- Não alterar código: só ler, investigar e escrever o plano.", defaultPermissionMode: "plan", defaultTools: ["Read", "Glob", "Grep"], position: 1 },
+    { ...base, id: "role_implementador", title: "Implementador", specialty: "Código e migrações", responsibilitiesMd: "- Executar uma task por vez, dentro da pasta do projeto.\n- Escrever testes junto com o código, nunca depois.\n- Pedir aprovação antes de comandos fora do projeto ou com rede.\n- Ao concluir, resumir o que mudou e por quê.", defaultPermissionMode: "acceptEdits", defaultTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], position: 2 },
+    { ...base, id: "role_revisor", title: "Revisor", specialty: "Revisão de código e riscos", responsibilitiesMd: "- Revisar diffs em busca de bugs, riscos de segurança e desvios dos critérios de aceite.\n- Apontar problemas com arquivo e linha; sugerir a correção.\n- Nunca editar o código revisado.", defaultPermissionMode: "plan", defaultTools: ["Read", "Glob", "Grep", "Bash"], position: 3 },
+    { ...base, id: "role_testador", title: "Testador", specialty: "Testes e qualidade", responsibilitiesMd: "- Rodar a suíte de testes e ampliar a cobertura das mudanças recentes.\n- Reportar falhas com passos para reproduzir.\n- Editar apenas arquivos de teste.", defaultPermissionMode: "acceptEdits", defaultTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], position: 4 },
+    { ...base, id: "role_pesquisador", title: "Pesquisador", specialty: "Investigação e síntese", responsibilitiesMd: "- Investigar o código, a documentação e a web para responder a uma pergunta específica.\n- Entregar uma síntese curta com fontes e incertezas.\n- Não alterar arquivos do projeto.", defaultPermissionMode: "plan", defaultTools: ["Read", "Glob", "Grep", "WebSearch", "WebFetch"], position: 5 },
+    { ...base, id: "role_documentador", title: "Documentador", specialty: "Documentação e comunicação", responsibilitiesMd: "- Manter README, docs e comentários alinhados ao código.\n- Escrever em português claro, com exemplos curtos.\n- Editar apenas documentação, salvo pedido explícito.", defaultPermissionMode: "acceptEdits", defaultTools: ["Read", "Glob", "Grep", "Edit", "Write"], position: 6 },
+    { ...base, id: "role_seguranca", title: "Segurança", specialty: "Segurança e conformidade", responsibilitiesMd: "- Procurar segredos expostos, dependências vulneráveis e permissões excessivas.\n- Classificar o risco de cada achado e propor a mitigação.\n- Nunca executar comandos destrutivos.", defaultPermissionMode: "plan", defaultTools: ["Read", "Glob", "Grep", "Bash"], position: 7 },
+  ];
+}
+
+export function initials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "";
+  const first = words[0]!;
+  if (words.length === 1) return first.slice(0, 2).toUpperCase();
+  return (first[0]! + words[words.length - 1]![0]!).toUpperCase();
+}
 
 /** Export de demonstração que o mock "lê" de qualquer caminho terminado em `.json`. */
 export function demoConfigExport(): ConfigExport {
@@ -80,6 +103,43 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString() },
   ]);
   const settings: AppSettings = fresh ? {} : { "onboarding.completedAt": "2026-10-15T10:00:00.000Z", defaultAuthMode: "subscription" };
+  const roles: Role[] = seedRoles();
+  const members: TeamMember[] = [];
+  let memberCounter = 0;
+  const findMember = (agentProfileId: string) => members.find((m) => m.profile.id === agentProfileId);
+  const buildMember = (projectId: string, input: TeamMemberInput, existing?: TeamMember): TeamMember => {
+    const role = roles.find((r) => r.id === input.roleId);
+    if (!role) throw new Error(`Cargo ${input.roleId} não encontrado`);
+    if (!input.name.trim()) throw new Error("Informe o nome do membro");
+    if (input.reportsToAgentId) {
+      if (existing && input.reportsToAgentId === existing.profile.id) throw new Error("Um membro não pode reportar a si mesmo");
+      if (!members.some((m) => m.projectId === projectId && m.profile.id === input.reportsToAgentId)) throw new Error("O membro a quem reportar não está neste time");
+    }
+    const id = existing?.profile.id ?? `agent_${++memberCounter}`;
+    const profile: AgentProfile = {
+      id,
+      projectId,
+      roleId: role.id,
+      name: input.name.trim(),
+      avatarSeed: initials(input.name),
+      instructionsMd: input.instructionsMd?.trim() || null,
+      model: input.model ?? null,
+      permissionMode: input.permissionMode ?? null,
+      allowedTools: input.allowedTools ?? null,
+      maxTurns: input.maxTurns ?? null,
+      maxBudgetUsd: input.maxBudgetUsd ?? null,
+      createdAt: existing?.profile.createdAt ?? new Date().toISOString(),
+    };
+    return {
+      id: existing?.id ?? `member_${memberCounter}`,
+      projectId,
+      profile,
+      role,
+      reportsToAgentId: input.reportsToAgentId ?? null,
+      position: existing?.position ?? members.filter((m) => m.projectId === projectId).length + 1,
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+    };
+  };
   const snapshots: BackupSnapshot[] = [];
   const snapshotFiles = new Map<string, ConfigExport>();
   let snapshotCounter = 0;
@@ -318,11 +378,30 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const project = projects.find((p) => p.id === input.projectId);
       if (!project) throw new Error(`Projeto ${input.projectId} não encontrado`);
       if (!input.prompt.trim()) throw new Error("O prompt não pode ser vazio");
+      const member = input.agentProfileId ? findMember(input.agentProfileId) : undefined;
+      if (input.agentProfileId && !member) throw new Error(`Membro ${input.agentProfileId} não encontrado`);
+      const requested = input.options ?? {};
+      const options = member
+        ? {
+            ...requested,
+            systemPromptAppend: [`Você é ${member.profile.name}, ${member.role.title} do time deste projeto. Especialidade: ${member.role.specialty}.`, "", "Responsabilidades:", member.role.responsibilitiesMd, member.profile.instructionsMd ? `\nInstruções específicas:\n${member.profile.instructionsMd}` : "", requested.systemPromptAppend ?? ""].join("\n").trim(),
+            permissionMode: requested.permissionMode ?? member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined,
+            allowedTools: requested.allowedTools ?? member.profile.allowedTools ?? member.role.defaultTools ?? undefined,
+            maxBudgetUsd: requested.maxBudgetUsd ?? member.profile.maxBudgetUsd ?? undefined,
+            agents: Object.fromEntries(
+              members
+                .filter((m) => m.reportsToAgentId === member.profile.id)
+                .map((m) => [m.profile.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "membro", { description: `${m.role.title} · ${m.role.specialty}`, prompt: `Você é ${m.profile.name}, ${m.role.title} do time deste projeto.`, tools: m.profile.allowedTools ?? m.role.defaultTools ?? undefined }]),
+            ),
+          }
+        : requested;
+      if (options.agents && Object.keys(options.agents).length === 0) delete options.agents;
       const run: Run = {
         id: `run_mock_${++runCounter}`,
         projectId: project.id,
         prompt: input.prompt,
-        options: input.options ?? {},
+        options,
+        agentProfileId: member?.profile.id ?? null,
         status: "running",
         claudeSessionId: null,
         model: input.options?.model ?? null,
@@ -436,6 +515,82 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return result;
     },
     config_backup_reveal: async () => null,
+    list_roles: async ({ projectId }) => roles.filter((r) => r.scope === "global" || r.projectId === projectId).map((r) => ({ ...r })),
+    create_role: async ({ input }) => {
+      if (!input.input.title.trim()) throw new Error("Informe o título do cargo");
+      const at = new Date().toISOString();
+      const role: Role = {
+        id: `role_${roles.length + 1}`,
+        scope: input.projectId ? "project" : "global",
+        projectId: input.projectId ?? null,
+        title: input.input.title.trim(),
+        specialty: input.input.specialty ?? "",
+        responsibilitiesMd: input.input.responsibilitiesMd ?? "",
+        defaultModel: input.input.defaultModel ?? null,
+        defaultPermissionMode: input.input.defaultPermissionMode ?? null,
+        defaultTools: input.input.defaultTools ?? null,
+        icon: input.input.icon ?? null,
+        position: roles.length + 1,
+        createdAt: at,
+        updatedAt: at,
+      };
+      roles.push(role);
+      writeSnapshot("auto");
+      return { ...role };
+    },
+    update_role: async ({ roleId, input }) => {
+      const role = roles.find((r) => r.id === roleId);
+      if (!role) throw new Error(`Cargo ${roleId} não encontrado`);
+      if (!input.title.trim()) throw new Error("Informe o título do cargo");
+      Object.assign(role, { title: input.title.trim(), specialty: input.specialty ?? role.specialty, responsibilitiesMd: input.responsibilitiesMd ?? role.responsibilitiesMd, defaultModel: input.defaultModel ?? null, defaultPermissionMode: input.defaultPermissionMode ?? null, defaultTools: input.defaultTools ?? null, icon: input.icon ?? null, updatedAt: new Date().toISOString() });
+      for (const m of members) if (m.role.id === roleId) m.role = { ...role };
+      writeSnapshot("auto");
+      return { ...role };
+    },
+    delete_role: async ({ roleId }) => {
+      if (members.some((m) => m.role.id === roleId)) throw new Error("O cargo tem membro(s); mude o cargo deles antes de remover");
+      const index = roles.findIndex((r) => r.id === roleId);
+      if (index === -1) return false;
+      roles.splice(index, 1);
+      return true;
+    },
+    list_team: async ({ projectId }) => members.filter((m) => m.projectId === projectId).map((m) => ({ ...m, profile: { ...m.profile }, role: { ...m.role } })),
+    add_team_member: async ({ projectId, input }) => {
+      const member = buildMember(projectId, input);
+      members.push(member);
+      writeSnapshot("auto");
+      return { ...member };
+    },
+    update_team_member: async ({ agentProfileId, input }) => {
+      const existing = findMember(agentProfileId);
+      if (!existing) throw new Error(`Membro ${agentProfileId} não encontrado`);
+      const updated = buildMember(existing.projectId, input, existing);
+      members.splice(members.indexOf(existing), 1, updated);
+      writeSnapshot("auto");
+      return { ...updated };
+    },
+    remove_team_member: async ({ agentProfileId }) => {
+      const existing = findMember(agentProfileId);
+      if (!existing) return false;
+      members.splice(members.indexOf(existing), 1);
+      for (const m of members) if (m.reportsToAgentId === agentProfileId) m.reportsToAgentId = null;
+      for (const r of runs.values()) if (r.agentProfileId === agentProfileId) r.agentProfileId = null;
+      writeSnapshot("auto");
+      return true;
+    },
+    team_totals: async ({ projectId }) => {
+      const byAgent = new Map<string, { runs: number; activeRuns: number; costUsd: number; lastRunAt: string | null }>();
+      for (const r of runs.values()) {
+        if (r.projectId !== projectId || !r.agentProfileId) continue;
+        const t = byAgent.get(r.agentProfileId) ?? { runs: 0, activeRuns: 0, costUsd: 0, lastRunAt: null };
+        t.runs++;
+        if (["queued", "running", "waiting_approval"].includes(r.status)) t.activeRuns++;
+        t.costUsd += r.costUsd ?? 0;
+        if (!t.lastRunAt || r.startedAt > t.lastRunAt) t.lastRunAt = r.startedAt;
+        byAgent.set(r.agentProfileId, t);
+      }
+      return [...byAgent].map(([agentProfileId, t]) => ({ agentProfileId, ...t }));
+    },
     list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
     rename_session: async ({ input }) => {
       const session = sessions.find((s) => s.sessionId === input.sessionId);

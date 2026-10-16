@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod commands_config;
+pub mod commands_team;
 pub mod protocol;
 pub mod sidecar;
 pub mod store;

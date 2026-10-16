@@ -31,6 +31,7 @@ export type QueryOptionsLike = {
   settingSources?: Array<"user" | "project" | "local">;
   env?: Record<string, string | undefined>;
   includePartialMessages?: boolean;
+  agents?: Record<string, { description: string; prompt: string; tools?: string[]; model?: string }>;
   abortController: AbortController;
   canUseTool: CanUseToolLike;
 };
@@ -140,6 +141,7 @@ export class RunManager {
     if (o.allowedTools) options.allowedTools = o.allowedTools;
     if (o.settingSources) options.settingSources = o.settingSources;
     if (o.env) options.env = { ...process.env, ...o.env };
+    if (o.agents && Object.keys(o.agents).length > 0) options.agents = o.agents;
     return options;
   }
 

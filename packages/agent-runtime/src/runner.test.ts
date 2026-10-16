@@ -63,6 +63,7 @@ describe("RunManager", () => {
         allowedTools: ["Read"],
         settingSources: ["project"],
         env: { ANTHROPIC_API_KEY: "sk-test" },
+        agents: { teo: { description: "Testador", prompt: "Você é Téo.", tools: ["Read"] } },
       },
     });
     await manager.drain();
@@ -78,6 +79,7 @@ describe("RunManager", () => {
       allowedTools: ["Read"],
       settingSources: ["project"],
       includePartialMessages: true,
+      agents: { teo: { description: "Testador", prompt: "Você é Téo.", tools: ["Read"] } },
     });
     expect(seen?.env?.ANTHROPIC_API_KEY).toBe("sk-test");
     expect(typeof seen?.canUseTool).toBe("function");
