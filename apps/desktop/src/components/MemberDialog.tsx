@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { PermissionMode, Role, TeamMember, TeamMemberInput } from "../lib/types";
+import type { McpServer, PermissionMode, Role, Skill, TeamMember, TeamMemberInput } from "../lib/types";
 
 type MemberDialogProps = {
   open: boolean;
@@ -10,6 +10,9 @@ type MemberDialogProps = {
   onClose: () => void;
   onSave: (input: TeamMemberInput) => Promise<void>;
   onRemove?: () => Promise<void>;
+  /** MCP servers e skills disponíveis no projeto (Harness); vazio = seção oculta. */
+  mcpServers?: McpServer[];
+  skills?: Skill[];
 };
 
 const PERMISSION_LABELS: Record<PermissionMode, string> = {
@@ -20,7 +23,7 @@ const PERMISSION_LABELS: Record<PermissionMode, string> = {
   auto: "Classificador automático",
 };
 
-export function MemberDialog({ open, roles, team, member = null, onClose, onSave, onRemove }: MemberDialogProps) {
+export function MemberDialog({ open, roles, team, member = null, onClose, onSave, onRemove, mcpServers = [], skills = [] }: MemberDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState("");
   const [roleId, setRoleId] = useState("");
@@ -28,6 +31,9 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
   const [instructions, setInstructions] = useState("");
   const [permissionMode, setPermissionMode] = useState<"" | PermissionMode>("");
   const [maxBudget, setMaxBudget] = useState("");
+  /** `null` = todos os ativos; lista = subconjunto escolhido. */
+  const [mcpSel, setMcpSel] = useState<string[] | null>(null);
+  const [skillSel, setSkillSel] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -43,6 +49,8 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
     setError(null);
     setName(member?.profile.name ?? "");
     setRoleId(member?.profile.roleId ?? roles[0]?.id ?? "");
+    setMcpSel(member?.profile.mcpServerIds ?? null);
+    setSkillSel(member?.profile.skillIds ?? null);
     setReportsTo(member?.reportsToAgentId ?? "");
     setInstructions(member?.profile.instructionsMd ?? "");
     setPermissionMode(member?.profile.permissionMode ?? "");
@@ -69,7 +77,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
     }
     setSaving(true);
     try {
-      await onSave({ name: name.trim(), roleId, reportsToAgentId: reportsTo || null, instructionsMd: instructions.trim() || null, permissionMode: permissionMode || null, maxBudgetUsd: budget });
+      await onSave({ name: name.trim(), roleId, reportsToAgentId: reportsTo || null, instructionsMd: instructions.trim() || null, permissionMode: permissionMode || null, maxBudgetUsd: budget, mcpServerIds: mcpSel, skillIds: skillSel });
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -162,6 +170,17 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
           </label>
         </div>
 
+        {(mcpServers.length > 0 || skills.length > 0) && (
+          <div className="grid grid-cols-2 gap-3">
+            {mcpServers.length > 0 && (
+              <HarnessPicker label="MCP servers" items={mcpServers.map((s) => ({ id: s.id, label: s.name, hint: s.enabled ? s.transport : `${s.transport} · desativado` }))} selection={mcpSel} onChange={setMcpSel} />
+            )}
+            {skills.length > 0 && (
+              <HarnessPicker label="Skills" items={skills.map((s) => ({ id: s.id, label: s.name, hint: s.enabled ? (s.projectId ? "projeto" : "usuário") : "desativada" }))} selection={skillSel} onChange={setSkillSel} />
+            )}
+          </div>
+        )}
+
         {error && (
           <div role="alert" className="rounded-md bg-brand-soft px-3 py-2 text-[13px] text-brand-hover">
             {error}
@@ -189,5 +208,34 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
         </div>
       </form>
     </dialog>
+  );
+}
+
+type PickerProps = {
+  label: string;
+  items: { id: string; label: string; hint: string }[];
+  /** `null` = todos os ativos. */
+  selection: string[] | null;
+  onChange: (selection: string[] | null) => void;
+};
+
+function HarnessPicker({ label, items, selection, onChange }: PickerProps) {
+  const all = selection === null;
+  return (
+    <fieldset className="m-0 flex flex-col gap-1.5 rounded-md border hairline p-3" data-testid={`picker-${label}`}>
+      <legend className="px-1 text-[13px] font-medium text-slate">{label}</legend>
+      <label className="flex items-center gap-2 text-[13px]">
+        <input type="checkbox" checked={all} onChange={(e) => onChange(e.target.checked ? null : [])} />
+        Todos os ativos do projeto
+      </label>
+      {!all &&
+        items.map((item) => (
+          <label key={item.id} className="flex items-center gap-2 pl-5 text-[13px]">
+            <input type="checkbox" checked={selection!.includes(item.id)} onChange={(e) => onChange(e.target.checked ? [...selection!, item.id] : selection!.filter((id) => id !== item.id))} />
+            <span className="font-medium">{item.label}</span>
+            <span className="text-xs text-slate">{item.hint}</span>
+          </label>
+        ))}
+    </fieldset>
   );
 }

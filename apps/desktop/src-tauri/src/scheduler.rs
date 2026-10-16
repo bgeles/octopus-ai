@@ -150,6 +150,15 @@ pub async fn tick(
                     options.mcp_servers =
                         store.mcp_servers_for_run(&project.id, agent_id.as_deref())?;
                 }
+                if options.plugins.is_none() {
+                    options.plugins = store
+                        .materialize_plugin(
+                            &project.id,
+                            agent_id.as_deref(),
+                            options.setting_sources.as_deref(),
+                        )?
+                        .map(|p| vec![p]);
+                }
             }
             let options = match crate::secrets::options_for_sidecar(&project, &options, secrets) {
                 Ok(o) => o,

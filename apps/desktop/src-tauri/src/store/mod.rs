@@ -12,6 +12,7 @@ pub mod models;
 pub mod orchestration;
 pub mod policy;
 pub mod security;
+pub mod skills;
 pub mod team;
 
 use std::path::{Path, PathBuf};
@@ -62,6 +63,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0013_mcp_servers",
         include_str!("migrations/0013_mcp_servers.sql"),
     ),
+    ("0014_skills", include_str!("migrations/0014_skills.sql")),
 ];
 
 pub struct Store {
@@ -726,11 +728,12 @@ mod tests {
                 "0011_run_kind".to_string(),
                 "0012_context_pin".to_string(),
                 "0013_mcp_servers".to_string(),
+                "0014_skills".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 13);
+        assert_eq!(s.applied_migrations().unwrap().len(), 14);
     }
 
     #[test]

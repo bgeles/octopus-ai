@@ -43,7 +43,14 @@
             "Authorization": "Bearer •••"
           }
         }
-      }
+      },
+      "plugins": [
+        {
+          "type": "local",
+          "path": "/Users/dev/Library/Application Support/ai.octopus.desktop/projects/proj_demo/harness/plugin-agent_ana",
+          "skipMcpDiscovery": true
+        }
+      ]
     }
   }
 }

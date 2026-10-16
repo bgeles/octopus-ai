@@ -1,7 +1,7 @@
-import { Plus, Server } from "lucide-react";
+import { Plus, RefreshCw, Server, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { Transport } from "../lib/transport";
-import type { McpServer, McpServerConfig, McpServerInput, Project } from "../lib/types";
+import type { McpServer, McpServerConfig, McpServerInput, Project, Skill } from "../lib/types";
 import { formatRelative } from "./SessionsView";
 
 export type HarnessTab = "mcp" | "skills" | "profile";
@@ -12,22 +12,28 @@ type HarnessViewProps = {
   availableTabs?: HarnessTab[];
 };
 
-export function HarnessView({ project, transport, availableTabs = ["mcp"] }: HarnessViewProps) {
+export function HarnessView({ project, transport, availableTabs = ["mcp", "skills"] }: HarnessViewProps) {
   const [tab, setTab] = useState<HarnessTab>("mcp");
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const [editing, setEditing] = useState<McpServer | "new" | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
+  const [skills, setSkills] = useState<Skill[] | null>(null);
+  const [skillEditor, setSkillEditor] = useState<{ skillId: string | null; name: string; content: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const projectId = project?.id ?? null;
 
   const refresh = useCallback(async () => {
     setServers(await transport.invoke("list_mcp_servers", { projectId }));
+    if (projectId) setSkills(await transport.invoke("list_skills", { projectId }));
+    else setSkills([]);
   }, [transport, projectId]);
 
   useEffect(() => {
     setServers(null);
+    setSkills(null);
     setEditing(null);
+    setSkillEditor(null);
     void refresh().catch((e) => setError(String(e)));
   }, [refresh]);
 
@@ -42,7 +48,7 @@ export function HarnessView({ project, transport, availableTabs = ["mcp"] }: Har
 
   const tabs: { id: HarnessTab; label: string }[] = [
     { id: "mcp", label: servers ? `MCPs · ${servers.length}` : "MCPs" },
-    { id: "skills", label: "Skills" },
+    { id: "skills", label: skills ? `Skills · ${skills.length}` : "Skills" },
     { id: "profile", label: "Perfil de execução" },
   ];
 
@@ -158,6 +164,124 @@ export function HarnessView({ project, transport, availableTabs = ["mcp"] }: Har
             <span className="text-slate">O sidecar abre o servidor com o cliente MCP oficial, faz o handshake e lista as tools. O resultado fica guardado como última saúde.</span>
           </div>
         </section>
+      )}
+
+      {tab === "skills" && (
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-5 max-[900px]:grid-cols-1">
+          <section aria-label="Skills" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-col gap-0.5">
+                <h2 className="m-0 font-display text-sm font-semibold">Skills</h2>
+                <span className="text-xs text-slate">pastas com SKILL.md em .claude/skills do projeto e em ~/.claude/skills. As do projeto o Claude Code carrega sozinho (quando as fontes de instruções incluem o projeto); as do usuário e as demais ativas entram num plugin local montado pelo Octopus, por membro ou para o projeto.</span>
+              </div>
+              <div className="ml-auto flex gap-2">
+                <button
+                  type="button"
+                  disabled={!projectId}
+                  onClick={() =>
+                    void run(async () => {
+                      if (!projectId) return;
+                      const list = await transport.invoke("scan_skills", { projectId });
+                      setSkills(list);
+                      setNotice(`Varredura concluída: ${list.length} ${list.length === 1 ? "skill" : "skills"}.`);
+                    })
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-sm border hairline-strong bg-surface px-3 py-2 text-[13px] font-medium disabled:opacity-40"
+                >
+                  <RefreshCw size={14} aria-hidden /> Rescanear
+                </button>
+                <button type="button" disabled={!projectId} onClick={() => setSkillEditor({ skillId: null, name: "", content: "" })} className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold text-paper disabled:opacity-40">
+                  <Sparkles size={14} aria-hidden /> Nova skill
+                </button>
+              </div>
+            </div>
+            <ul className="m-0 flex list-none flex-col p-0" data-testid="skill-list">
+              {(skills ?? []).map((sk) => (
+                <li key={sk.id} className="grid grid-cols-[30px_minmax(0,1fr)_minmax(0,1.4fr)_auto] items-center gap-3 border-b hairline py-2.5 text-[13px] last:border-b-0" data-testid="skill-row" data-name={sk.name} data-enabled={sk.enabled} data-source={sk.source}>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={sk.enabled}
+                    aria-label={`${sk.name} ativa`}
+                    onClick={() =>
+                      void run(async () => {
+                        await transport.invoke("set_skill_enabled", { skillId: sk.id, enabled: !sk.enabled });
+                        await refresh();
+                      })
+                    }
+                    className={["relative inline-block h-[18px] w-[30px] rounded-full", sk.enabled ? "bg-ink" : "bg-mist"].join(" ")}
+                  >
+                    <span className={["absolute top-0.5 size-3.5 rounded-full bg-surface", sk.enabled ? "right-0.5" : "left-0.5"].join(" ")} />
+                  </button>
+                  <span className="flex min-w-0 flex-col">
+                    <span className="font-semibold">{sk.name}</span>
+                    <span className="eyebrow text-slate">{sk.projectId ? (project?.name ?? "projeto") : "usuário"}</span>
+                  </span>
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate">{sk.description || "—"}</span>
+                    <code className="truncate font-mono text-[11px] text-slate" title={sk.path}>
+                      {sk.path.replace(/^\/Users\/[^/]+/, "~")}/SKILL.md
+                    </code>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void run(async () => {
+                        const content = await transport.invoke("read_skill", { skillId: sk.id });
+                        setSkillEditor({ skillId: sk.id, name: sk.name, content });
+                      })
+                    }
+                    className="rounded-sm border hairline-strong bg-surface px-2.5 py-1 text-xs font-medium hover:border-ink"
+                  >
+                    {sk.projectId ? "Editar" : "Ver"}
+                  </button>
+                </li>
+              ))}
+              {skills !== null && skills.length === 0 && <li className="py-2 text-[13px] text-slate">Nenhuma skill encontrada. Crie uma aqui ou adicione uma pasta com SKILL.md em .claude/skills do projeto e rescaneie.</li>}
+            </ul>
+          </section>
+          {skillEditor ? (
+            <form
+              aria-label={skillEditor.skillId ? "Editar skill" : "Nova skill"}
+              className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void run(async () => {
+                  if (!projectId) return;
+                  const saved = await transport.invoke("save_skill", { input: { skillId: skillEditor.skillId, projectId, name: skillEditor.name, content: skillEditor.content } });
+                  setSkillEditor(null);
+                  await refresh();
+                  setNotice(skillEditor.skillId ? `SKILL.md de ${saved.name} gravado.` : `Skill ${saved.name} criada em .claude/skills.`);
+                });
+              }}
+            >
+              <h2 className="m-0 font-display text-sm font-semibold">{skillEditor.skillId ? `SKILL.md · ${skillEditor.name}` : "Nova skill do projeto"}</h2>
+              {!skillEditor.skillId && (
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                  Nome
+                  <input aria-label="Nome da skill" value={skillEditor.name} onChange={(e) => setSkillEditor({ ...skillEditor, name: e.target.value })} placeholder="release-notes" className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px] text-ink" />
+                </label>
+              )}
+              <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                Conteúdo (SKILL.md, com frontmatter name/description)
+                <textarea aria-label="Conteúdo da skill" value={skillEditor.content} onChange={(e) => setSkillEditor({ ...skillEditor, content: e.target.value })} rows={16} className="rounded-sm border hairline-strong bg-surface px-2.5 py-2 font-mono text-xs text-ink" />
+              </label>
+              <div className="flex gap-2">
+                <button type="submit" disabled={!skillEditor.content.trim() || (!skillEditor.skillId && !skillEditor.name.trim())} className="rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold text-paper disabled:opacity-50">
+                  Salvar
+                </button>
+                <button type="button" onClick={() => setSkillEditor(null)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-[13px] font-medium">
+                  Fechar
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="flex flex-col items-center gap-2 rounded-xl border hairline bg-surface p-10 text-center text-[13px] text-slate">
+              <Sparkles size={22} aria-hidden />
+              <span>Escolha uma skill para ver ou editar o SKILL.md, ou crie uma nova dentro do projeto.</span>
+            </div>
+          )}
+        </div>
       )}
 
       {editing && (

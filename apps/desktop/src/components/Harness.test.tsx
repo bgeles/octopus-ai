@@ -84,4 +84,74 @@ describe("Harness · MCP servers", () => {
     expect(describeConfig({ type: "http", url: "https://x", headers: { Authorization: "t" } })).toBe("https://x · header Authorization");
     expect(describeConfig({ type: "stdio", command: "npx", args: ["a"] })).toBe("npx a");
   });
+
+  it("skills: lista as encontradas, liga/desliga, edita o SKILL.md e cria uma nova no projeto", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Harness" }));
+    await user.click(await screen.findByRole("tab", { name: /Skills · 3/ }));
+    const rows = await screen.findAllByTestId("skill-row");
+    expect(rows.map((r) => r.getAttribute("data-name"))).toEqual(["flyway-migration", "java-review", "commit-ptbr"]);
+    expect(rows[2]).toHaveAttribute("data-source", "user");
+
+    await user.click(within(rows[2]!).getByRole("switch", { name: "commit-ptbr ativa" }));
+    await waitFor(() => expect(screen.getAllByTestId("skill-row")[2]).toHaveAttribute("data-enabled", "false"));
+
+    await user.click(within(screen.getAllByTestId("skill-row")[0]!).getByRole("button", { name: "Editar" }));
+    const editor = await screen.findByRole("form", { name: "Editar skill" });
+    const textarea = within(editor).getByLabelText("Conteúdo da skill");
+    expect((textarea as HTMLTextAreaElement).value).toContain("name: flyway-migration");
+    await user.type(textarea, "\n3. Rode MigrationIT.");
+    await user.click(within(editor).getByRole("button", { name: "Salvar" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("SKILL.md de flyway-migration gravado.");
+    expect(await transport.invoke("read_skill", { skillId: "skill_flyway-migration" })).toContain("3. Rode MigrationIT.");
+
+    await user.click(screen.getByRole("button", { name: "Nova skill" }));
+    const form = await screen.findByRole("form", { name: "Nova skill" });
+    await user.type(within(form).getByLabelText("Nome da skill"), "Release notes");
+    await user.type(within(form).getByLabelText("Conteúdo da skill"), "Gera notas de versão a partir do git log.");
+    await user.click(within(form).getByRole("button", { name: "Salvar" }));
+    await waitFor(() => expect(screen.getAllByTestId("skill-row")).toHaveLength(4));
+    const created = (await transport.invoke("list_skills", { projectId: "proj_demo" })).find((s) => s.name === "Release notes")!;
+    expect(created.path).toBe("/Users/dev/projetos/chat-core/.claude/skills/release-notes");
+    expect(created.description).toBe("Gera notas de versão a partir do git log.");
+    expect(await transport.invoke("read_skill", { skillId: created.id })).toMatch(/^---\nname: Release notes\n/);
+    await user.click(screen.getByRole("button", { name: "Rescanear" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Varredura concluída: 4 skills.");
+  });
+
+  it("a ficha do membro escolhe MCP servers e skills; o run dele leva só os escolhidos e o plugin com as skills do usuário", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await transport.invoke("save_mcp_server", { input: { projectId: null, name: "docs", config: { type: "stdio", command: "npx", args: ["-y", "srv"] } } });
+    await transport.invoke("save_mcp_server", { input: { projectId: "proj_demo", name: "jira", config: { type: "http", url: "https://mcp.example.com/jira" } } });
+
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    await screen.findByTestId("team-view");
+    await user.click(screen.getByRole("button", { name: "Adicionar membro" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Nome"), "Ana");
+    const roleSelect = within(dialog).getByLabelText("Cargo");
+    await user.selectOptions(roleSelect, within(roleSelect).getByRole("option", { name: /^Implementador ·/ }));
+    const mcpPicker = await within(dialog).findByTestId("picker-MCP servers");
+    await user.click(within(mcpPicker).getByRole("checkbox", { name: "Todos os ativos do projeto" }));
+    await user.click(within(mcpPicker).getByRole("checkbox", { name: /^docs/ }));
+    const skillPicker = within(dialog).getByTestId("picker-Skills");
+    await user.click(within(skillPicker).getByRole("checkbox", { name: "Todos os ativos do projeto" }));
+    await user.click(within(skillPicker).getByRole("checkbox", { name: /^commit-ptbr/ }));
+    await user.click(within(dialog).getByRole("button", { name: "Adicionar" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const [member] = await transport.invoke("list_team", { projectId: "proj_demo" });
+    expect(member?.profile.mcpServerIds).toHaveLength(1);
+    expect(member?.profile.skillIds).toEqual(["skill_commit-ptbr"]);
+
+    await user.click(within(screen.getByRole("article", { name: "Membro do time: Ana" })).getByRole("button", { name: "Dar uma tarefa" }));
+    await user.type(screen.getByLabelText("Instrução para Ana"), "oi");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    await screen.findByTestId("approval-card");
+    const [run] = await transport.invoke("list_runs", { projectId: "proj_demo" });
+    expect(Object.keys(run!.options.mcpServers ?? {})).toEqual(["docs"]);
+    expect(run!.options.plugins).toEqual([{ type: "local", path: `/mock/data/projects/proj_demo/harness/plugin-${member!.profile.id}`, skipMcpDiscovery: true }]);
+  });
 });
+

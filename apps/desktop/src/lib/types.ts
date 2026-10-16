@@ -227,6 +227,8 @@ export type AgentProfile = {
   createdAt: string;
   /** MCP servers escolhidos (null = todos os ativos do escopo). */
   mcpServerIds?: string[] | null;
+  /** Skills escolhidas (null = todas as ativas). */
+  skillIds?: string[] | null;
 };
 
 export type TeamMember = {
@@ -251,6 +253,7 @@ export type TeamMemberInput = {
   maxTurns?: number | null;
   maxBudgetUsd?: number | null;
   mcpServerIds?: string[] | null;
+  skillIds?: string[] | null;
 };
 
 export type AgentTotals = {
@@ -460,7 +463,27 @@ export type Commands = {
   delete_mcp_server: { args: { serverId: string }; result: boolean };
   /** Abre o servidor pelo sidecar, lista as tools e guarda a saúde. */
   check_mcp_server: { args: { serverId: string }; result: McpServer };
+  list_skills: { args: { projectId: string }; result: Skill[] };
+  /** Varre .claude/skills do projeto e ~/.claude/skills. */
+  scan_skills: { args: { projectId: string }; result: Skill[] };
+  set_skill_enabled: { args: { skillId: string; enabled: boolean }; result: Skill };
+  read_skill: { args: { skillId: string }; result: string };
+  save_skill: { args: { input: SkillInput }; result: Skill };
 };
+
+export type Skill = {
+  id: string;
+  /** null = skill do usuário (~/.claude/skills). */
+  projectId: string | null;
+  name: string;
+  path: string;
+  description: string;
+  source: "project" | "user" | "manual";
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+export type SkillInput = { skillId?: string | null; projectId: string; name: string; content: string };
 
 // ---------------------------------------------------------------------- harness
 
