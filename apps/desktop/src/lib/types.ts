@@ -2,9 +2,9 @@
  * Tipos da ponte UI <-> core Rust. Espelham `src-tauri/src/store/models.rs` e os comandos em `commands.rs`.
  * Eventos de run vêm de `@octopus/protocol`.
  */
-import type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
+import type { AgentDefinition, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 
-export type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
+export type { AgentDefinition, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -225,6 +225,8 @@ export type AgentProfile = {
   maxTurns: number | null;
   maxBudgetUsd: number | null;
   createdAt: string;
+  /** MCP servers escolhidos (null = todos os ativos do escopo). */
+  mcpServerIds?: string[] | null;
 };
 
 export type TeamMember = {
@@ -248,6 +250,7 @@ export type TeamMemberInput = {
   allowedTools?: string[] | null;
   maxTurns?: number | null;
   maxBudgetUsd?: number | null;
+  mcpServerIds?: string[] | null;
 };
 
 export type AgentTotals = {
@@ -322,6 +325,7 @@ export type ConfigExport = {
   appVersion: string;
   settings: AppSettings;
   projects: Project[];
+  mcpServers?: McpServer[];
 };
 
 export type ImportMode = "merge" | "replace";
@@ -449,7 +453,31 @@ export type Commands = {
   list_context_pins: { args: { projectId: string }; result: ContextPin[] };
   add_context_pin: { args: { projectId: string; input: ContextPinInput }; result: ContextPin };
   remove_context_pin: { args: { projectId: string; pinId: string }; result: boolean };
+  // Harness (Fase 5)
+  list_mcp_servers: { args: { projectId?: string | null }; result: McpServer[] };
+  save_mcp_server: { args: { input: McpServerInput }; result: McpServer };
+  set_mcp_server_enabled: { args: { serverId: string; enabled: boolean }; result: McpServer };
+  delete_mcp_server: { args: { serverId: string }; result: boolean };
+  /** Abre o servidor pelo sidecar, lista as tools e guarda a saúde. */
+  check_mcp_server: { args: { serverId: string }; result: McpServer };
 };
+
+// ---------------------------------------------------------------------- harness
+
+export type McpHealth = { ok: boolean; tools: McpToolInfo[]; error: string | null; latencyMs: number | null; serverVersion: string | null; checkedAt: string };
+export type McpServer = {
+  id: string;
+  /** null = global. */
+  projectId: string | null;
+  name: string;
+  transport: "stdio" | "sse" | "http";
+  config: McpServerConfig;
+  enabled: boolean;
+  lastHealth: McpHealth | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type McpServerInput = { id?: string | null; projectId?: string | null; name: string; config: McpServerConfig; enabled?: boolean };
 
 /** Pin de contexto: arquivo do projeto, página da memória ou texto, sempre injetado no brief. */
 export type ContextPinKind = "file" | "page" | "text";

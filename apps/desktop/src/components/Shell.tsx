@@ -1,9 +1,9 @@
-import { BookOpen, CheckCircle2, ChevronDown, History, KanbanSquare, Lock, Play, Settings, Users } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronDown, History, KanbanSquare, Lock, Play, Settings, Users, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Project, Run } from "../lib/types";
 import { THEME_LABELS, type ThemePreference } from "../lib/theme";
 
-export type View = "run" | "sessions" | "approvals" | "agents" | "board" | "memory" | "security" | "settings";
+export type View = "run" | "sessions" | "approvals" | "agents" | "board" | "memory" | "harness" | "security" | "settings";
 
 type NavItem = { id: View; label: string; icon: ReactNode; badge?: number; live?: boolean; disabled?: boolean };
 
@@ -33,6 +33,7 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
     { id: "agents", label: "Time", icon: <Users size={16} aria-hidden /> },
     { id: "board", label: "Board", icon: <KanbanSquare size={16} aria-hidden />, badge: pendingGates },
     { id: "memory", label: "Memória", icon: <BookOpen size={16} aria-hidden /> },
+    { id: "harness", label: "Harness", icon: <Wrench size={16} aria-hidden /> },
     { id: "security", label: "Segurança", icon: <Lock size={16} aria-hidden /> },
   ];
 

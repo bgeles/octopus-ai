@@ -175,6 +175,12 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
                 .project_setting_sources(&project.id)
                 .map_err(err)?;
         }
+        if options.mcp_servers.is_none() {
+            options.mcp_servers = state
+                .store
+                .mcp_servers_for_run(&project.id, input.agent_profile_id.as_deref())
+                .map_err(err)?;
+        }
     }
     // A chave de API (quando o projeto usa uma) entra só aqui, a caminho do sidecar;
     // o run gravado acima fica com as opções sem segredo.

@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod commands_config;
+pub mod commands_harness;
 pub mod commands_memory;
 pub mod commands_orchestration;
 pub mod commands_security;
@@ -369,6 +370,11 @@ pub fn run() {
             commands_memory::list_context_pins,
             commands_memory::add_context_pin,
             commands_memory::remove_context_pin,
+            commands_harness::list_mcp_servers,
+            commands_harness::save_mcp_server,
+            commands_harness::set_mcp_server_enabled,
+            commands_harness::delete_mcp_server,
+            commands_harness::check_mcp_server,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");

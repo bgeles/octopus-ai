@@ -64,6 +64,7 @@ describe("RunManager", () => {
         systemPromptAppend: "Fale em português.",
         allowedTools: ["Read"],
         disallowedTools: ["Bash"],
+        mcpServers: { docs: { type: "stdio", command: "npx", args: ["-y", "srv"] } },
         settingSources: ["project"],
         env: { ANTHROPIC_API_KEY: "sk-test" },
         agents: { teo: { description: "Testador", prompt: "Você é Téo.", tools: ["Read"] } },
