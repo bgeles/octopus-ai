@@ -85,6 +85,7 @@ pub async fn tick(
                 include_partial_messages: Some(true),
                 task_context: Some(Store::task_context(&task, &stage)),
                 policy_hooks: Some(true),
+                memory: Some(Default::default()),
                 ..Default::default()
             };
             let mut options = match agent_id.as_deref() {

@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod memory;
 pub mod models;
 pub mod orchestration;
 pub mod policy;
@@ -43,12 +44,15 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0008_sandbox_budget",
         include_str!("migrations/0008_sandbox_budget.sql"),
     ),
+    ("0009_memory", include_str!("migrations/0009_memory.sql")),
 ];
 
 pub struct Store {
     conn: Mutex<Connection>,
     /// Pasta das cópias de configuração (`<dados>/backups`); `None` em memória.
     backup_dir: Option<PathBuf>,
+    /// Pasta de dados do app (wiki de memória em `projects/<id>/memory/wiki`); `None` em memória.
+    data_dir: Option<PathBuf>,
 }
 
 impl Store {
@@ -59,7 +63,15 @@ impl Store {
                 .with_context(|| format!("criando {}", parent.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("abrindo {}", path.display()))?;
-        Self::from_connection(conn, config::default_backup_dir(path))
+        let mut store = Self::from_connection(conn, config::default_backup_dir(path))?;
+        store.data_dir = path.parent().map(Path::to_path_buf);
+        Ok(store)
+    }
+
+    /// Define a pasta de dados (testes com a wiki em uma pasta temporária).
+    pub fn with_data_dir(mut self, dir: PathBuf) -> Self {
+        self.data_dir = Some(dir);
+        self
     }
 
     /// Banco em memória, para testes.
@@ -76,6 +88,7 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
             backup_dir,
+            data_dir: None,
         };
         store.migrate()?;
         Ok(store)
@@ -425,6 +438,46 @@ impl Store {
                     ],
                 )?;
             }
+            RunEvent::Observation {
+                kind,
+                title,
+                body,
+                tool_name,
+                ..
+            } => {
+                if let Some(project_id) = run_project_id(&tx, run_id)? {
+                    Self::record_observation_in(
+                        &tx,
+                        &project_id,
+                        run_id,
+                        *kind,
+                        title,
+                        body,
+                        tool_name.as_deref(),
+                        at,
+                    )?;
+                }
+            }
+            RunEvent::Compaction {
+                phase,
+                trigger,
+                summary,
+            } => {
+                if let Some(project_id) = run_project_id(&tx, run_id)? {
+                    let kind = match phase {
+                        crate::protocol::CompactionPhase::Pre => "compaction_pre",
+                        crate::protocol::CompactionPhase::Post => "compaction_post",
+                    };
+                    Self::record_context_event_in(
+                        &tx,
+                        &project_id,
+                        run_id,
+                        kind,
+                        serde_json::json!({"trigger": trigger, "summary": summary}),
+                        at,
+                    )?;
+                }
+            }
             RunEvent::Error {
                 message,
                 fatal: true,
@@ -449,7 +502,17 @@ impl Store {
             }
             _ => {}
         }
+        // Fim do run: consolidação bruta das observações no log de tarefas.
+        let consolidated_page = if event.is_terminal() {
+            Self::consolidate_run_in(&tx, run_id)?
+        } else {
+            None
+        };
         tx.commit()?;
+        drop(conn);
+        if let Some(page_id) = consolidated_page {
+            self.flush_wiki_page(&page_id)?;
+        }
         Ok(())
     }
 
@@ -586,12 +649,13 @@ mod tests {
                 "0005_orchestration".to_string(),
                 "0006_audit".to_string(),
                 "0007_policy".to_string(),
-                "0008_sandbox_budget".to_string()
+                "0008_sandbox_budget".to_string(),
+                "0009_memory".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 8);
+        assert_eq!(s.applied_migrations().unwrap().len(), 9);
     }
 
     #[test]

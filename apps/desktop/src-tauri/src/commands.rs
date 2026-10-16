@@ -140,6 +140,7 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
         None => input.options,
     };
     options.policy_hooks = Some(true);
+    options.memory.get_or_insert_with(Default::default);
     options.sandbox = state.store.sandbox_for_project(&project).map_err(err)?;
     let options = state
         .store

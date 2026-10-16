@@ -90,6 +90,12 @@ export const SandboxSettingsSchema = z.object({
 });
 export type SandboxSettings = z.infer<typeof SandboxSettingsSchema>;
 
+/** Memória do projeto: captura observações por hooks (PostToolUse, Stop, SubagentStop, SessionEnd, Pre/PostCompact). */
+export const MemoryOptionsSchema = z.object({
+  capture: z.boolean().default(true),
+});
+export type MemoryOptions = z.infer<typeof MemoryOptionsSchema>;
+
 export const RunOptionsSchema = z.object({
   model: z.string().optional(),
   permissionMode: PermissionModeSchema.optional(),
@@ -111,6 +117,8 @@ export const RunOptionsSchema = z.object({
   policyHooks: z.boolean().optional(),
   /** Perfil de sandbox traduzido para `options.sandbox` do SDK. */
   sandbox: SandboxSettingsSchema.optional(),
+  /** Captura de memória por hooks; o core sanitiza e guarda as observações. */
+  memory: MemoryOptionsSchema.optional(),
 });
 export type RunOptions = z.infer<typeof RunOptionsSchema>;
 
@@ -228,6 +236,9 @@ export const REQUEST_SCHEMAS = {
 
 const parentToolUseId = z.string().nullable().default(null);
 
+export const ObservationKindSchema = z.enum(["tool_use", "turn_end", "subagent_end", "session_end"]);
+export type ObservationKind = z.infer<typeof ObservationKindSchema>;
+
 export const RunEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("session_init"),
@@ -296,6 +307,24 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     taskId: z.string(),
     status: TaskStatusUpdateSchema,
     note: z.string().nullable().default(null),
+  }),
+  /** Observação capturada por hook para a memória do projeto (sanitizada pelo core antes de gravar). */
+  z.object({
+    type: z.literal("observation"),
+    kind: ObservationKindSchema,
+    title: z.string(),
+    body: z.string(),
+    toolName: z.string().nullable().default(null),
+    toolUseId: z.string().nullable().default(null),
+    parentToolUseId,
+    agentId: z.string().nullable().default(null),
+  }),
+  /** Compactação do contexto pelo Claude Code (PreCompact sem resumo; PostCompact com o resumo gerado). */
+  z.object({
+    type: z.literal("compaction"),
+    phase: z.enum(["pre", "post"]),
+    trigger: z.enum(["manual", "auto"]),
+    summary: z.string().nullable().default(null),
   }),
 ]);
 export type RunEvent = z.infer<typeof RunEventSchema>;

@@ -426,7 +426,70 @@ export type Commands = {
   clear_project_api_key: { args: { projectId: string }; result: null };
   has_project_api_key: { args: { projectId: string }; result: boolean };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
+  // Memória (Fase 4)
+  list_memory_pages: { args: { projectId: string; includeArchived?: boolean }; result: MemoryPage[] };
+  /** Conta o acesso (sobe o score de recall). */
+  get_memory_page: { args: { pageId: string }; result: MemoryPage | null };
+  search_memory: { args: { projectId: string; query: string; limit?: number }; result: MemorySearchHit[] };
+  save_memory_page: { args: { input: MemoryPageInput }; result: MemoryPage };
+  set_memory_page_archived: { args: { pageId: string; archived: boolean }; result: MemoryPage };
+  list_memory_page_versions: { args: { pageId: string }; result: MemoryPageVersion[] };
+  list_memory_observations: { args: { projectId: string; runId?: string | null; limit?: number }; result: MemoryObservation[] };
+  list_context_events: { args: { runId: string }; result: ContextEvent[] };
+  /** Reconstrói o índice a partir dos arquivos .md da wiki; devolve quantas páginas entraram. */
+  rebuild_memory_index: { args: { projectId: string }; result: number };
 };
+
+// ---------------------------------------------------------------------- memória
+
+export type MemoryPageKind = "decisions" | "architecture" | "pitfalls" | "tasklog" | "handoff" | "note";
+export const MEMORY_PAGE_KINDS: MemoryPageKind[] = ["decisions", "architecture", "pitfalls", "tasklog", "handoff", "note"];
+export const MEMORY_KIND_LABELS: Record<MemoryPageKind, string> = {
+  decisions: "decisões",
+  architecture: "arquitetura",
+  pitfalls: "armadilhas",
+  tasklog: "log de tarefas",
+  handoff: "handoff",
+  note: "nota",
+};
+
+export type MemoryPage = {
+  id: string;
+  projectId: string;
+  kind: MemoryPageKind;
+  slug: string;
+  title: string;
+  bodyMd: string;
+  score: number;
+  accessCount: number;
+  lastAccessedAt: string | null;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  versions: number;
+};
+
+export type MemoryPageVersion = { id: string; pageId: string; title: string; bodyMd: string; reason: string; createdAt: string };
+export type MemorySearchHit = { page: MemoryPage; snippet: string; rank: number };
+export type MemoryPageInput = { projectId: string; pageId?: string | null; kind: MemoryPageKind; title: string; bodyMd: string };
+
+export type MemoryObservation = {
+  id: string;
+  projectId: string;
+  runId: string | null;
+  taskId: string | null;
+  agentProfileId: string | null;
+  kind: "tool_use" | "turn_end" | "subagent_end" | "session_end";
+  title: string;
+  body: string;
+  toolName: string | null;
+  redacted: boolean;
+  createdAt: string;
+  consolidatedAt: string | null;
+};
+
+export type ContextEvent = { id: string; projectId: string; runId: string; kind: string; payload: unknown; createdAt: string };
 
 export type CommandName = keyof Commands;
 
