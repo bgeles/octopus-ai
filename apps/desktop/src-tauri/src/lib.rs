@@ -366,6 +366,9 @@ pub fn run() {
             commands_memory::list_context_events,
             commands_memory::rebuild_memory_index,
             commands_memory::list_memory_handoffs,
+            commands_memory::list_context_pins,
+            commands_memory::add_context_pin,
+            commands_memory::remove_context_pin,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");

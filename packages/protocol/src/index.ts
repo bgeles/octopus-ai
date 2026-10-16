@@ -355,6 +355,13 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     chars: z.number().int().nonnegative(),
     items: z.array(z.string()).default([]),
   }),
+  /** Arquivo de instruções (CLAUDE.md, rules) carregado pelo Claude Code (hook InstructionsLoaded). */
+  z.object({
+    type: z.literal("instructions_loaded"),
+    filePath: z.string(),
+    memoryType: z.enum(["User", "Project", "Local", "Managed"]),
+    loadReason: z.string(),
+  }),
   /** Compactação do contexto pelo Claude Code (PreCompact sem resumo; PostCompact com o resumo gerado). */
   z.object({
     type: z.literal("compaction"),

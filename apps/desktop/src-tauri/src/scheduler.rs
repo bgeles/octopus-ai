@@ -143,6 +143,9 @@ pub async fn tick(
                     memory.brief = Some(b.text);
                     memory.brief_items = Some(b.items);
                 }
+                if options.setting_sources.is_none() {
+                    options.setting_sources = store.project_setting_sources(&project.id)?;
+                }
             }
             let options = match crate::secrets::options_for_sidecar(&project, &options, secrets) {
                 Ok(o) => o,

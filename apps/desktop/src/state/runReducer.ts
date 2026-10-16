@@ -53,6 +53,10 @@ export type RunViewState = {
   subagentIds: string[];
   /** Brief de memória injetado no início do run (o que entrou no contexto). */
   brief: { chars: number; items: string[] } | null;
+  /** Arquivos de instruções carregados pelo Claude Code (CLAUDE.md, rules). */
+  instructions: { filePath: string; memoryType: string; loadReason: string }[];
+  /** Compactações do contexto neste run (só as concluídas, com resumo). */
+  compactions: { trigger: string; summary: string | null; at: string }[];
 };
 
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -72,7 +76,9 @@ export function initialRunViewState(runId: string | null = null): RunViewState {
     lastSeq: -1,
     toolCounts: {},
     subagentIds: [],
-    brief: null
+    brief: null,
+    instructions: [],
+    compactions: []
   };
 }
 
@@ -203,8 +209,13 @@ function applyEvent(state: RunViewState, event: RunEvent, at: string): RunViewSt
     case "brief_injected":
       return { ...state, brief: { chars: event.chars, items: event.items } };
 
-    case "observation":
+    case "instructions_loaded":
+      return state.instructions.some((i) => i.filePath === event.filePath) ? state : { ...state, instructions: [...state.instructions, { filePath: event.filePath, memoryType: event.memoryType, loadReason: event.loadReason }] };
+
     case "compaction":
+      return event.phase === "post" ? { ...state, compactions: [...state.compactions, { trigger: event.trigger, summary: event.summary, at }] } : state;
+
+    case "observation":
       // Vão para a memória/contexto no core; o transcript não muda (a compactação ganha vista na Fase 4, iteração 04).
       return state;
   }

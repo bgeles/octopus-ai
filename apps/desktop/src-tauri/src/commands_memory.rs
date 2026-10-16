@@ -5,8 +5,8 @@ use tauri::State;
 use crate::commands::AppState;
 use crate::commands_security::audit;
 use crate::store::memory::{
-    ContextEvent, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageVersion,
-    MemorySearchHit,
+    ContextEvent, ContextPin, ContextPinInput, MemoryHandoff, MemoryObservation, MemoryPage,
+    MemoryPageInput, MemoryPageVersion, MemorySearchHit,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -150,4 +150,53 @@ pub fn rebuild_memory_index(state: State<'_, AppState>, project_id: String) -> C
         serde_json::json!({"pages": n}),
     );
     Ok(n)
+}
+
+#[tauri::command]
+pub fn list_context_pins(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<ContextPin>> {
+    state.store.list_context_pins(&project_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn add_context_pin(
+    state: State<'_, AppState>,
+    project_id: String,
+    input: ContextPinInput,
+) -> CmdResult<ContextPin> {
+    let pin = state
+        .store
+        .add_context_pin(&project_id, &input)
+        .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "context.pin.added",
+        Some(&project_id),
+        serde_json::json!({"pinId": pin.id, "kind": pin.kind, "label": pin.label}),
+    );
+    crate::commands_config::auto_backup(&state);
+    Ok(pin)
+}
+
+#[tauri::command]
+pub fn remove_context_pin(
+    state: State<'_, AppState>,
+    project_id: String,
+    pin_id: String,
+) -> CmdResult<bool> {
+    let removed = state.store.remove_context_pin(&pin_id).map_err(err)?;
+    if removed {
+        audit(
+            &state,
+            "você",
+            "context.pin.removed",
+            Some(&project_id),
+            serde_json::json!({"pinId": pin_id}),
+        );
+        crate::commands_config::auto_backup(&state);
+    }
+    Ok(removed)
 }

@@ -175,5 +175,40 @@ describe("Memória", () => {
     const audit = await transport.invoke("list_audit_events", { projectId: "proj_demo", limit: 50 });
     expect(audit.some((e) => e.kind === "memory.consolidation.started")).toBe(true);
   });
+
+  it("pins de contexto entram no brief; a aba Contexto mostra instruções e compactações do último run", async () => {
+    const { user, transport } = setup(memoryEvents.map((n) => n.params as unknown as RunEventNotification));
+    await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Memória" }));
+    await user.click(await screen.findByRole("tab", { name: /Contexto/ }));
+    await user.type(screen.getByLabelText("Referência do pin"), "Prefira Java 21 e records.");
+    await user.type(screen.getByLabelText("Rótulo do pin"), "Regra Java");
+    await user.click(screen.getByRole("button", { name: "Adicionar pin" }));
+    const row = await screen.findByTestId("pin-row");
+    expect(row).toHaveAttribute("data-kind", "text");
+    expect(row).toHaveTextContent("Regra Java");
+    expect(screen.getByRole("tab", { name: /Contexto · 1 pin/ })).toBeInTheDocument();
+
+    await user.click(within(screen.getByTestId("setting-sources")).getByRole("radio", { name: "Só o projeto" }));
+    await waitFor(() => expect(screen.getByTestId("setting-sources")).toHaveAttribute("data-choice", "project"));
+    expect((await transport.invoke("get_settings", {}))["project.proj_demo.settingSources"]).toEqual(["project", "local"]);
+
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
+    await user.type(screen.getByLabelText("Instrução para o agente"), "crie a V12");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    const chip = await screen.findByTestId("brief-chip");
+    expect(chip).toHaveTextContent("pin: Regra Java");
+    await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
+    expect(screen.getByTestId("compaction-history")).toHaveTextContent("1 compactação neste run");
+    expect(screen.getByTestId("compaction-history")).toHaveTextContent("automática · Contexto da task T-21");
+    expect(screen.getByTestId("instructions-loaded")).toHaveTextContent("chat-core/CLAUDE.md · projeto");
+
+    await user.click(screen.getByRole("button", { name: "Memória" }));
+    await user.click(await screen.findByRole("tab", { name: /Contexto/ }));
+    const events = await screen.findAllByTestId("context-event");
+    expect(events.map((e) => e.getAttribute("data-kind"))).toEqual(expect.arrayContaining(["brief", "instructions", "compaction_pre", "compaction_post"]));
+    await user.click(screen.getByRole("button", { name: "Remover pin Regra Java" }));
+    await waitFor(() => expect(screen.queryByTestId("pin-row")).toBeNull());
+  });
 });
 

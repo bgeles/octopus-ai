@@ -1,7 +1,7 @@
 import { Archive, BookOpen, History, Plus, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { Transport } from "../lib/transport";
-import { CONSOLIDATION_MODEL, CONSOLIDATION_SETTING, MEMORY_KIND_LABELS, MEMORY_PAGE_KINDS, type ConsolidationMode, type MemoryHandoff, type MemoryObservation, type MemoryPage, type MemoryPageKind, type MemoryPageVersion, type MemorySearchHit, type Project, type Task } from "../lib/types";
+import { CONSOLIDATION_MODEL, CONSOLIDATION_SETTING, MEMORY_KIND_LABELS, MEMORY_PAGE_KINDS, settingSourcesKey, type ConsolidationMode, type ContextEvent, type ContextPin, type ContextPinKind, type MemoryHandoff, type Run, type SettingSourcesChoice, type MemoryObservation, type MemoryPage, type MemoryPageKind, type MemoryPageVersion, type MemorySearchHit, type Project, type Task } from "../lib/types";
 import { formatRelative } from "./SessionsView";
 
 export type MemoryTab = "pages" | "observations" | "handoffs" | "context";
@@ -21,12 +21,16 @@ const KIND_COLOR: Record<MemoryPageKind, string> = {
   note: "text-slate",
 };
 
-export function MemoryView({ project, transport, availableTabs = ["pages", "observations", "handoffs"] }: MemoryViewProps) {
+export function MemoryView({ project, transport, availableTabs = ["pages", "observations", "handoffs", "context"] }: MemoryViewProps) {
   const [tab, setTab] = useState<MemoryTab>("pages");
   const [pages, setPages] = useState<MemoryPage[] | null>(null);
   const [observations, setObservations] = useState<MemoryObservation[] | null>(null);
   const [handoffs, setHandoffs] = useState<MemoryHandoff[] | null>(null);
   const [consolidation, setConsolidation] = useState<ConsolidationMode | null>(null);
+  const [pins, setPins] = useState<ContextPin[] | null>(null);
+  const [pinDraft, setPinDraft] = useState<{ kind: ContextPinKind; ref: string; label: string }>({ kind: "text", ref: "", label: "" });
+  const [sources, setSources] = useState<SettingSourcesChoice | null>(null);
+  const [lastRun, setLastRun] = useState<{ run: Run; events: ContextEvent[] } | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<MemorySearchHit[] | null>(null);
@@ -59,9 +63,31 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
   useEffect(() => {
     transport
       .invoke("get_settings", {})
-      .then((s) => setConsolidation(s[CONSOLIDATION_SETTING] === "haiku" ? "haiku" : "raw"))
-      .catch(() => setConsolidation("raw"));
-  }, [transport]);
+      .then((s) => {
+        setConsolidation(s[CONSOLIDATION_SETTING] === "haiku" ? "haiku" : "raw");
+        if (projectId) {
+          const raw = s[settingSourcesKey(projectId)];
+          setSources(Array.isArray(raw) ? (raw.length === 0 ? "none" : "project") : "default");
+        }
+      })
+      .catch(() => {
+        setConsolidation("raw");
+        setSources("default");
+      });
+  }, [transport, projectId]);
+
+  const refreshContext = useCallback(async () => {
+    if (!projectId) return;
+    const [pinList, runs] = await Promise.all([transport.invoke("list_context_pins", { projectId }), transport.invoke("list_runs", { projectId, limit: 10 })]);
+    setPins(pinList);
+    const latest = runs.find((r) => r.kind === "agent") ?? null;
+    if (latest) {
+      const events = await transport.invoke("list_context_events", { runId: latest.id });
+      setLastRun({ run: latest, events });
+    } else {
+      setLastRun(null);
+    }
+  }, [transport, projectId]);
 
   useEffect(() => {
     setPages(null);
@@ -73,7 +99,13 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
     void refreshPages().catch((e) => setError(String(e)));
     void refreshObservations().catch((e) => setError(String(e)));
     void refreshHandoffs().catch((e) => setError(String(e)));
-  }, [refreshPages, refreshObservations, refreshHandoffs]);
+    void refreshContext().catch((e) => setError(String(e)));
+  }, [refreshPages, refreshObservations, refreshHandoffs, refreshContext]);
+
+  useEffect(() => {
+    if (tab === "context") void refreshContext().catch((e) => setError(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -117,7 +149,7 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
     { id: "pages", label: pages ? `Páginas · ${pages.length}` : "Páginas" },
     { id: "observations", label: observations ? `Observações · ${observations.length}` : "Observações" },
     { id: "handoffs", label: handoffs ? `Handoffs · ${handoffs.filter((h) => !h.consumedAt).length} ${handoffs.filter((h) => !h.consumedAt).length === 1 ? "pendente" : "pendentes"}` : "Handoffs" },
-    { id: "context", label: "Contexto" },
+    { id: "context", label: pins ? `Contexto · ${pins.length} ${pins.length === 1 ? "pin" : "pins"}` : "Contexto" },
   ];
   const listed: { page: MemoryPage; snippet: string | null }[] = hits ? hits.map((h) => ({ page: h.page, snippet: h.snippet })) : (pages ?? []).map((page) => ({ page, snippet: null }));
 
@@ -363,6 +395,138 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
             {handoffs !== null && handoffs.length === 0 && <li className="py-2 text-[13px] text-slate">Nenhum handoff ainda. Eles aparecem quando um run de task termina sem concluir ou quando o agente chama memory_handoff.</li>}
           </ul>
         </section>
+      )}
+
+      {tab === "context" && (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(420px,100%),1fr))] gap-5">
+          <section aria-label="Pins de contexto" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5">
+            <div className="flex items-baseline gap-3">
+              <h2 className="m-0 font-display text-sm font-semibold">Pins de contexto</h2>
+              <span className="text-xs text-slate">sempre injetados no início de cada run deste projeto (até 1.500 caracteres cada)</span>
+            </div>
+            <ul className="m-0 flex list-none flex-col p-0" data-testid="pin-list">
+              {(pins ?? []).map((pin) => (
+                <li key={pin.id} className="grid grid-cols-[70px_minmax(0,1fr)_auto] items-center gap-3 border-b hairline py-2 text-[13px] last:border-b-0" data-testid="pin-row" data-kind={pin.kind}>
+                  <span className="eyebrow text-slate">{pin.kind === "file" ? "arquivo" : pin.kind === "page" ? "página" : "texto"}</span>
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate font-semibold">{pin.label}</span>
+                    <span className="truncate font-mono text-xs text-slate">{pin.ref}</span>
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Remover pin ${pin.label}`}
+                    onClick={async () => {
+                      if (!projectId) return;
+                      await transport.invoke("remove_context_pin", { projectId, pinId: pin.id });
+                      await refreshContext();
+                    }}
+                    className="rounded-sm border hairline-strong bg-surface px-2 py-1 text-xs text-slate hover:text-brand-hover"
+                  >
+                    Remover
+                  </button>
+                </li>
+              ))}
+              {pins !== null && pins.length === 0 && <li className="py-2 text-[13px] text-slate">Nenhum pin. Fixe um arquivo do projeto (ex.: CLAUDE.md), uma página da memória ou um texto curto.</li>}
+            </ul>
+            <form
+              aria-label="Adicionar pin"
+              className="flex flex-wrap items-end gap-2 border-t hairline pt-3"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!projectId) return;
+                setError(null);
+                try {
+                  await transport.invoke("add_context_pin", { projectId, input: { kind: pinDraft.kind, ref: pinDraft.ref, label: pinDraft.label.trim() || null } });
+                  setPinDraft({ kind: "text", ref: "", label: "" });
+                  await refreshContext();
+                  setNotice("Pin adicionado: entra no brief do próximo run.");
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : String(err));
+                }
+              }}
+            >
+              <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                Tipo
+                <select aria-label="Tipo do pin" value={pinDraft.kind} onChange={(e) => setPinDraft({ ...pinDraft, kind: e.target.value as ContextPinKind })} className="rounded-sm border hairline-strong bg-surface px-2 py-1.5 text-[13px] text-ink">
+                  <option value="text">texto</option>
+                  <option value="file">arquivo do projeto</option>
+                  <option value="page">página da memória</option>
+                </select>
+              </label>
+              <label className="flex min-w-[200px] flex-1 flex-col gap-1 text-xs font-medium text-slate">
+                {pinDraft.kind === "file" ? "Caminho relativo" : pinDraft.kind === "page" ? "Id da página" : "Texto"}
+                <input aria-label="Referência do pin" value={pinDraft.ref} onChange={(e) => setPinDraft({ ...pinDraft, ref: e.target.value })} placeholder={pinDraft.kind === "file" ? "CLAUDE.md" : pinDraft.kind === "page" ? "page_…" : "Prefira Java 21."} className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px] text-ink" />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                Rótulo (opcional)
+                <input aria-label="Rótulo do pin" value={pinDraft.label} onChange={(e) => setPinDraft({ ...pinDraft, label: e.target.value })} className="w-40 rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px] text-ink" />
+              </label>
+              <button type="submit" disabled={!project || !pinDraft.ref.trim()} className="rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold text-paper disabled:opacity-40">
+                Adicionar pin
+              </button>
+            </form>
+          </section>
+
+          <section aria-label="Instruções do Claude Code" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5">
+            <div className="flex items-baseline gap-3">
+              <h2 className="m-0 font-display text-sm font-semibold">Instruções do Claude Code</h2>
+              <span className="text-xs text-slate">quais CLAUDE.md e rules entram nos runs deste projeto (settingSources)</span>
+            </div>
+            <div role="radiogroup" aria-label="Fontes de instruções" className="flex rounded-md border hairline-strong p-0.5 text-[13px]" data-testid="setting-sources" data-choice={sources ?? undefined}>
+              {(
+                [
+                  ["default", "Projeto + usuário"],
+                  ["project", "Só o projeto"],
+                  ["none", "Nenhuma"],
+                ] as [SettingSourcesChoice, string][]
+              ).map(([choice, label]) => (
+                <button
+                  key={choice}
+                  type="button"
+                  role="radio"
+                  aria-checked={sources === choice}
+                  disabled={!projectId || sources === null}
+                  onClick={async () => {
+                    if (!projectId) return;
+                    const value = choice === "default" ? null : choice === "project" ? ["project", "local"] : [];
+                    await transport.invoke("set_setting", { key: settingSourcesKey(projectId), value });
+                    setSources(choice);
+                  }}
+                  className={["flex-1 rounded-sm px-3 py-1.5 font-medium disabled:opacity-40", sources === choice ? "bg-ink text-paper" : "text-slate hover:text-ink"].join(" ")}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-slate">{sources === "none" ? "O agente não carrega CLAUDE.md nem rules: só o brief de memória e os pins." : sources === "project" ? "Só o CLAUDE.md e as rules dentro da pasta do projeto (sem ~/.claude)." : "Padrão do Claude Code: instruções do usuário (~/.claude) e do projeto."}</span>
+          </section>
+
+          <section aria-label="O que entrou no último run" className="col-span-full flex flex-col gap-2 rounded-xl border hairline bg-surface p-5" data-testid="last-run-context">
+            <div className="flex items-baseline gap-3">
+              <h2 className="m-0 font-display text-sm font-semibold">O que entrou no último run</h2>
+              <span className="text-xs text-slate">{lastRun ? `${lastRun.run.prompt.slice(0, 80)} · ${formatRelative(lastRun.run.startedAt)}` : "nenhum run ainda"}</span>
+            </div>
+            {lastRun && (
+              <ul className="m-0 flex list-none flex-col p-0 text-[13px]">
+                {lastRun.events.map((ev) => {
+                  const payload = ev.payload as Record<string, unknown>;
+                  return (
+                    <li key={ev.id} className="grid grid-cols-[110px_minmax(0,1fr)] gap-3 border-b hairline py-1.5 last:border-b-0" data-testid="context-event" data-kind={ev.kind}>
+                      <span className="eyebrow text-slate">{ev.kind === "brief" ? "brief" : ev.kind === "instructions" ? "instruções" : ev.kind.startsWith("compaction") ? "compactação" : ev.kind}</span>
+                      <span className="min-w-0 truncate">
+                        {ev.kind === "brief" && `${String(payload.chars)} caracteres · ${((payload.items as string[] | undefined) ?? []).join(" · ")}`}
+                        {ev.kind === "instructions" && `${String(payload.filePath)} · ${String(payload.memoryType).toLowerCase()}`}
+                        {ev.kind === "compaction_pre" && `início (${String(payload.trigger)})`}
+                        {ev.kind === "compaction_post" && `concluída (${String(payload.trigger)})${payload.summary ? ` · ${String(payload.summary)}` : ""}`}
+                      </span>
+                    </li>
+                  );
+                })}
+                {lastRun.events.length === 0 && <li className="py-1.5 text-slate">Sem brief, instruções registradas nem compactações neste run.</li>}
+              </ul>
+            )}
+          </section>
+        </div>
       )}
 
       {tab === "observations" && (

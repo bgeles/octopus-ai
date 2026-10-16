@@ -5,9 +5,11 @@ type RunSidebarProps = {
   state: RunViewState;
   run: Run | null;
   elapsedMs: number;
+  /** Retoma a sessão com `/compact` (experimental). */
+  onCompact?: (() => void) | null;
 };
 
-export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
+export function RunSidebar({ state, run, elapsedMs, onCompact = null }: RunSidebarProps) {
   const ctx = contextUsage(state);
   const percent = Math.round(ctx.fraction * 100);
   const level = ctx.fraction >= 0.9 ? "critical" : ctx.fraction >= 0.7 ? "warning" : "ok";
@@ -35,6 +37,40 @@ export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
           <span>Cache lido: {formatTokens(state.usage?.cacheReadTokens ?? 0)}</span>
           <span>Saída: {formatTokens(state.usage?.outputTokens ?? 0)}</span>
         </div>
+        {level !== "ok" && (
+          <div role="alert" className={["flex flex-col gap-1.5 rounded-md px-2.5 py-2 text-xs", level === "critical" ? "bg-brand-soft text-brand-hover" : "bg-warning-soft text-warning-ink"].join(" ")} data-testid="context-alert" data-level={level}>
+            <span className="font-semibold">{level === "critical" ? "Contexto crítico: acima de 90% da janela." : "Contexto alto: acima de 70% da janela."}</span>
+            <span>{level === "critical" ? "O Claude Code vai compactar sozinho em breve; compacte agora para escolher o momento, ou bifurque a sessão para começar limpo." : "Considere compactar ao fechar esta etapa."}</span>
+            {onCompact && (
+              <button type="button" onClick={onCompact} className="self-start rounded-full bg-ink px-2.5 py-1 text-[11px] font-semibold text-paper" title="Retoma a sessão enviando /compact (experimental)">
+                Compactar agora
+              </button>
+            )}
+          </div>
+        )}
+        {state.compactions.length > 0 && (
+          <div className="flex flex-col gap-0.5 text-xs text-slate" data-testid="compaction-history">
+            <span className="font-semibold text-ink">
+              {state.compactions.length} {state.compactions.length === 1 ? "compactação" : "compactações"} neste run
+            </span>
+            {state.compactions.map((c, i) => (
+              <span key={i} className="truncate" title={c.summary ?? undefined}>
+                {c.trigger === "manual" ? "manual" : "automática"}
+                {c.summary ? ` · ${c.summary}` : ""}
+              </span>
+            ))}
+          </div>
+        )}
+        {state.instructions.length > 0 && (
+          <div className="flex flex-col gap-0.5 text-xs text-slate" data-testid="instructions-loaded">
+            <span className="font-semibold text-ink">Instruções carregadas</span>
+            {state.instructions.map((i) => (
+              <span key={i.filePath} className="truncate font-mono" title={`${i.filePath} · ${i.loadReason}`}>
+                {i.filePath.split("/").slice(-2).join("/")} · {i.memoryType === "User" ? "usuário" : i.memoryType === "Project" ? "projeto" : i.memoryType.toLowerCase()}
+              </span>
+            ))}
+          </div>
+        )}
         {state.brief && (
           <div className="flex flex-col gap-0.5 rounded-md border hairline bg-paper px-2.5 py-2 text-xs" data-testid="brief-chip">
             <span className="font-semibold text-ink">Memória injetada · {state.brief.chars.toLocaleString("pt-BR")} caracteres</span>

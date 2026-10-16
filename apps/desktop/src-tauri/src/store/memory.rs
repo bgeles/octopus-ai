@@ -315,6 +315,37 @@ impl MemoryHandoff {
     }
 }
 
+/// Pin de contexto: arquivo do projeto, página da memória ou texto, sempre injetado no brief.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPin {
+    pub id: String,
+    pub project_id: String,
+    pub kind: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub label: String,
+    pub position: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPinInput {
+    pub kind: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Tamanho máximo do conteúdo de um pin dentro do brief.
+pub const MAX_PIN_CHARS: usize = 1_500;
+/// Chave de preferência por projeto: `project.<id>.settingSources`.
+pub fn setting_sources_key(project_id: &str) -> String {
+    format!("project.{project_id}.settingSources")
+}
+
 /// O que entra no contexto do agente no início do run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -885,6 +916,120 @@ impl Store {
         Ok(Some(id))
     }
 
+    // ------------------------------------------------------------------ pins de contexto
+
+    pub fn list_context_pins(&self, project_id: &str) -> Result<Vec<ContextPin>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, kind, ref, label, position, created_at FROM context_pin WHERE project_id = ?1 ORDER BY position, created_at",
+        )?;
+        let rows = stmt.query_map(params![project_id], |r| {
+            Ok(ContextPin {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                kind: r.get(2)?,
+                reference: r.get(3)?,
+                label: r.get(4)?,
+                position: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn add_context_pin(&self, project_id: &str, input: &ContextPinInput) -> Result<ContextPin> {
+        if !["file", "page", "text"].contains(&input.kind.as_str()) {
+            anyhow::bail!("Tipo de pin inválido: {}", input.kind);
+        }
+        let reference = input.reference.trim().to_string();
+        if reference.is_empty() {
+            anyhow::bail!("O pin precisa de um arquivo, página ou texto");
+        }
+        if input.kind == "page" && self.get_page(&reference)?.is_none() {
+            anyhow::bail!("Página {reference} não encontrada");
+        }
+        let label = input
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| match input.kind.as_str() {
+                "page" => self
+                    .get_page(&reference)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.title)
+                    .unwrap_or_else(|| reference.clone()),
+                "text" => first_chars(&reference, 60),
+                _ => reference.clone(),
+            });
+        let (reference, _) = sanitize(&reference);
+        let id = new_id("pin");
+        let conn = self.conn.lock().expect("store mutex");
+        let position: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM context_pin WHERE project_id = ?1",
+            params![project_id],
+            |r| r.get(0),
+        )?;
+        let created_at = now();
+        conn.execute(
+            "INSERT INTO context_pin (id, project_id, kind, ref, label, position, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, project_id, input.kind, reference, label, position, created_at],
+        )?;
+        Ok(ContextPin {
+            id,
+            project_id: project_id.to_string(),
+            kind: input.kind.clone(),
+            reference,
+            label,
+            position,
+            created_at,
+        })
+    }
+
+    pub fn remove_context_pin(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex");
+        Ok(conn.execute("DELETE FROM context_pin WHERE id = ?1", params![id])? > 0)
+    }
+
+    /// Conteúdo de um pin para o brief (arquivo da pasta do projeto, página ou texto), sanitizado e truncado.
+    fn pin_content(&self, project_path: &str, pin: &ContextPin) -> Option<String> {
+        let raw = match pin.kind.as_str() {
+            "file" => {
+                let base = std::path::Path::new(project_path);
+                let candidate = base.join(pin.reference.trim_start_matches('/'));
+                let canonical = candidate.canonicalize().ok()?;
+                let base_c = base.canonicalize().ok()?;
+                if !canonical.starts_with(&base_c) {
+                    return None;
+                }
+                std::fs::read_to_string(canonical).ok()?
+            }
+            "page" => self.get_page(&pin.reference).ok().flatten()?.body_md,
+            _ => pin.reference.clone(),
+        };
+        let (clean, _) = sanitize(raw.trim());
+        if clean.is_empty() {
+            return None;
+        }
+        Some(first_chars(&clean, MAX_PIN_CHARS))
+    }
+
+    /// `settingSources` escolhidos para o projeto (`None` = padrão do SDK).
+    pub fn project_setting_sources(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<Vec<crate::protocol::SettingSource>>> {
+        let Some(value) = self.get_setting(&setting_sources_key(project_id))? else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(value)?))
+    }
+
     // ------------------------------------------------------------------ handoffs e recall
 
     pub(crate) fn create_handoff_in(
@@ -997,14 +1142,33 @@ impl Store {
                 .query_map(params![project_id], MemoryPage::from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
         }
-        if handoff.is_none() && pages.is_empty() {
+        let project_path: String = {
+            let conn = self.conn.lock().expect("store mutex");
+            conn.query_row(
+                "SELECT path FROM project WHERE id = ?1",
+                params![project_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default()
+        };
+        let pins: Vec<(ContextPin, String)> = self
+            .list_context_pins(project_id)?
+            .into_iter()
+            .filter_map(|pin| self.pin_content(&project_path, &pin).map(|c| (pin, c)))
+            .collect();
+        if handoff.is_none() && pages.is_empty() && pins.is_empty() {
             return Ok(None);
         }
-        let mut text = String::from(
-            "## Memória do projeto (Octopus)
-",
-        );
+        let mut text = String::from("## Memória do projeto (Octopus)\n");
         let mut items = Vec::new();
+        if !pins.is_empty() {
+            text.push_str("\n### Pins de contexto (sempre presentes)\n");
+            for (pin, content) in &pins {
+                text.push_str(&format!("#### {}\n{}\n", pin.label, content));
+                items.push(format!("pin: {}", pin.label));
+            }
+        }
         if let Some(h) = &handoff {
             text.push_str(
                 "
@@ -1049,12 +1213,12 @@ Use a tool memory_search para mais contexto, memory_write para registrar decisõ
         op: MemoryOp,
         args: &serde_json::Value,
     ) -> Result<MemoryCallResult> {
-        let (project_id, task_id): (String, Option<String>) = {
+        let (project_id, task_id, run_kind): (String, Option<String>, String) = {
             let conn = self.conn.lock().expect("store mutex");
             conn.query_row(
-                "SELECT project_id, task_id FROM run WHERE id = ?1",
+                "SELECT project_id, task_id, kind FROM run WHERE id = ?1",
                 params![run_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
             .with_context(|| format!("run {run_id} não encontrado"))?
@@ -1126,7 +1290,8 @@ Use a tool memory_search para mais contexto, memory_write para registrar decisõ
                     title,
                     body_md: str_arg("body"),
                 };
-                let source = if str_arg("source") == "haiku" {
+                // Páginas vindas do run de consolidação ficam marcadas como "haiku" (o SDK descarta args fora do schema da tool).
+                let source = if run_kind == "consolidation" {
                     "haiku"
                 } else {
                     "agent"
@@ -1666,13 +1831,118 @@ mod tests {
             .create_run(&project.id, "x", &RunOptions::default())
             .unwrap();
         store.handle_memory_call(&run.id, MemoryOp::Write, &serde_json::json!({"kind": "decisions", "title": "Migrações em Flyway", "body": "v1"})).unwrap();
-        let r = store.handle_memory_call(&run.id, MemoryOp::Write, &serde_json::json!({"kind": "decisions", "title": "Migrações em Flyway", "body": "v2 com Contradição", "source": "haiku"})).unwrap();
+        let crun = store
+            .create_consolidation_run(&project.id, "consolidar", &RunOptions::default())
+            .unwrap();
+        let r = store.handle_memory_call(&crun.id, MemoryOp::Write, &serde_json::json!({"kind": "decisions", "title": "Migrações em Flyway", "body": "v2 com Contradição"})).unwrap();
         assert!(r.content.contains("atualizada"), "{}", r.content);
         let pages = store.list_pages(&project.id, false).unwrap();
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].body_md, "v2 com Contradição");
         assert_eq!(pages[0].versions, 2);
         assert_eq!(pages[0].source, "haiku");
+    }
+
+    #[test]
+    fn pins_are_always_injected_and_files_stay_inside_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "Prefira Java 21. TOKEN=abcdef123456",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let project = store
+            .create_project("p", dir.path().to_str().unwrap())
+            .unwrap();
+        assert!(store
+            .memory_brief(&project.id, None, "oi", "r0")
+            .unwrap()
+            .is_none());
+        let file = store
+            .add_context_pin(
+                &project.id,
+                &ContextPinInput {
+                    kind: "file".into(),
+                    reference: "CLAUDE.md".into(),
+                    label: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(file.label, "CLAUDE.md");
+        store
+            .add_context_pin(
+                &project.id,
+                &ContextPinInput {
+                    kind: "text".into(),
+                    reference: "Nada de Lombok novo.".into(),
+                    label: Some("Regra".into()),
+                },
+            )
+            .unwrap();
+        let outside = store
+            .add_context_pin(
+                &project.id,
+                &ContextPinInput {
+                    kind: "file".into(),
+                    reference: "../../etc/passwd".into(),
+                    label: None,
+                },
+            )
+            .unwrap();
+        assert!(store
+            .add_context_pin(
+                &project.id,
+                &ContextPinInput {
+                    kind: "page".into(),
+                    reference: "page_nope".into(),
+                    label: None
+                }
+            )
+            .is_err());
+        assert!(store
+            .add_context_pin(
+                &project.id,
+                &ContextPinInput {
+                    kind: "x".into(),
+                    reference: "y".into(),
+                    label: None
+                }
+            )
+            .is_err());
+        let brief = store
+            .memory_brief(&project.id, None, "oi", "r1")
+            .unwrap()
+            .unwrap();
+        assert!(brief.text.contains("Pins de contexto"));
+        assert!(brief.text.contains("Prefira Java 21."));
+        assert!(
+            brief.text.contains("TOKEN=[redigido]"),
+            "pins também são sanitizados"
+        );
+        assert!(brief.text.contains("Nada de Lombok novo."));
+        assert!(
+            !brief.text.contains("root:"),
+            "arquivo fora do projeto é ignorado"
+        );
+        assert_eq!(brief.items, vec!["pin: CLAUDE.md", "pin: Regra"]);
+        assert!(store.remove_context_pin(&outside.id).unwrap());
+        assert_eq!(store.list_context_pins(&project.id).unwrap().len(), 2);
+        // Preferência de settingSources por projeto.
+        assert!(store
+            .project_setting_sources(&project.id)
+            .unwrap()
+            .is_none());
+        store
+            .set_setting(
+                &setting_sources_key(&project.id),
+                &serde_json::json!(["project"]),
+            )
+            .unwrap();
+        assert_eq!(
+            store.project_setting_sources(&project.id).unwrap(),
+            Some(vec![crate::protocol::SettingSource::Project])
+        );
     }
 
     #[test]

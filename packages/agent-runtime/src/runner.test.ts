@@ -177,7 +177,7 @@ describe("RunManager", () => {
     manager.start({ runId: "r1", cwd: "/p", prompt: "oi", options: { memory: { capture: true }, policyHooks: false } });
     await manager.drain();
     const hooks = seen?.hooks ?? {};
-    expect(Object.keys(hooks).sort()).toEqual(["PostCompact", "PostToolUse", "PreCompact", "SessionEnd", "Stop", "SubagentStop"]);
+    expect(Object.keys(hooks).sort()).toEqual(["InstructionsLoaded", "PostCompact", "PostToolUse", "PreCompact", "SessionEnd", "Stop", "SubagentStop"]);
     const post = hooks.PostToolUse?.[0]?.hooks[0] as HookCallbackLike;
     const signal = new AbortController().signal;
     expect(await post({ hook_event_name: "PostToolUse", tool_name: "Write", tool_input: { file_path: "a.sql" }, tool_response: "ok", tool_use_id: "t1" }, "t1", { signal })).toEqual({});

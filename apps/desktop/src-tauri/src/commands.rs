@@ -169,6 +169,12 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
             memory.brief = Some(b.text);
             memory.brief_items = Some(b.items);
         }
+        if options.setting_sources.is_none() {
+            options.setting_sources = state
+                .store
+                .project_setting_sources(&project.id)
+                .map_err(err)?;
+        }
     }
     // A chave de API (quando o projeto usa uma) entra só aqui, a caminho do sidecar;
     // o run gravado acima fica com as opções sem segredo.
