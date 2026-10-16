@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, Approval, AppSettings, AuditEvent, BackupSnapshot, PolicyDecision, PolicyRule, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, Approval, AppSettings, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, PolicyDecision, PolicyRule, SandboxProfile, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -112,6 +112,16 @@ const TEMPLATE_INSTRUCTIONS: Record<string, string> = {
   Sintetizar: "Sintetize os achados em um documento curto, claro, em português.",
 };
 
+/** Perfis de sandbox iguais ao seed da migration 0008. */
+export function seedSandboxProfiles(): SandboxProfile[] {
+  const creds = { envVars: [{ name: "ANTHROPIC_API_KEY", mode: "mask" as const, injectHosts: ["api.anthropic.com"] }] };
+  return [
+    { id: "sandbox_strict", name: "Estrito", description: "Comandos só dentro do sandbox; escrita só no projeto; sem rede fora da allowlist (vazia); leitura de credenciais negada.", builtin: true, position: 1, settings: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, network: { allowedDomains: [], strictAllowlist: true }, filesystem: { allowWrite: ["${PROJECT}", "${PROJECT}/.octopus/worktrees"], denyRead: ["~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.kube"] }, credentials: creds } },
+    { id: "sandbox_dev", name: "Dev padrão", description: "Escrita só no projeto e leitura de credenciais negada; rede liberada para hosts comuns de desenvolvimento.", builtin: true, position: 2, settings: { enabled: true, failIfUnavailable: false, allowUnsandboxedCommands: false, network: { allowedDomains: ["github.com", "registry.npmjs.org", "pypi.org", "crates.io", "repo.maven.apache.org", "registry-1.docker.io"], strictAllowlist: false }, filesystem: { allowWrite: ["${PROJECT}", "${PROJECT}/.octopus/worktrees"], denyRead: ["~/.ssh", "~/.aws", "~/.gnupg", "~/.kube"] }, credentials: creds } },
+    { id: "sandbox_readonly", name: "Somente leitura", description: "Nenhuma escrita em disco pelos comandos; sem rede; leitura de credenciais negada. Para investigar e planejar.", builtin: true, position: 3, settings: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, network: { allowedDomains: [], strictAllowlist: true }, filesystem: { allowWrite: [], denyWrite: ["${PROJECT}"], denyRead: ["~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.kube"] }, credentials: creds } },
+  ];
+}
+
 /** Regras de política iguais ao seed da migration 0007. */
 export function seedPolicyRules(): PolicyRule[] {
   const at = "2026-10-16T00:00:00Z";
@@ -180,7 +190,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const listeners = new Map<EventName, Set<(payload: never) => void>>();
   const fresh = options.freshInstall ?? false;
   const projects: Project[] = options.projects ?? (fresh ? [] : [
-    { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString() },
+    { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString(), sandboxProfileId: "sandbox_dev" },
   ]);
   const settings: AppSettings = fresh ? {} : { "onboarding.completedAt": "2026-10-15T10:00:00.000Z", defaultAuthMode: "subscription" };
   const roles: Role[] = seedRoles();
@@ -286,6 +296,43 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     return out;
   };
   const rules: PolicyRule[] = seedPolicyRules();
+  const sandboxProfiles = seedSandboxProfiles();
+  const budgets: BudgetPolicy[] = [];
+  const monthStart = () => {
+    const d = new Date();
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-01T00:00:00Z`;
+  };
+  const spentThisMonth = (projectId: string, agentId: string | null) => {
+    let spent = 0;
+    let count = 0;
+    for (const r of runs.values()) {
+      if (r.projectId !== projectId || r.startedAt < monthStart() || (agentId && r.agentProfileId !== agentId)) continue;
+      spent += r.costUsd ?? 0;
+      count++;
+    }
+    return { spent, count };
+  };
+  const budgetLine = (scope: BudgetLine["scope"], scopeId: string, label: string, projectId: string, agentId: string | null): BudgetLine => {
+    const policy = budgets.find((b) => b.scope === scope && b.scopeId === scopeId) ?? null;
+    const { spent, count } = spentThisMonth(projectId, agentId);
+    const level = policy?.hardUsd != null && spent >= policy.hardUsd ? "hard" : policy?.softUsd != null && spent >= policy.softUsd ? "soft" : "ok";
+    return { scope, scopeId, label, spentUsd: spent, softUsd: policy?.softUsd ?? null, hardUsd: policy?.hardUsd ?? null, maxTurns: policy?.maxTurns ?? null, runs: count, level };
+  };
+  const budgetStatus = (projectId: string) => {
+    const project = projects.find((p) => p.id === projectId);
+    if (!project) throw new Error(`Projeto ${projectId} não encontrado`);
+    return {
+      month: monthStart().slice(0, 7),
+      project: budgetLine("project", projectId, project.name, projectId, null),
+      agents: members.filter((m) => m.projectId === projectId).map((m) => budgetLine("agent", m.profile.id, `${m.profile.name} · ${m.role.title}`, projectId, m.profile.id)),
+    };
+  };
+  const applyBudget = (projectId: string, agentId: string | null) => {
+    const status = budgetStatus(projectId);
+    for (const line of [status.project, ...(agentId ? status.agents.filter((a) => a.scopeId === agentId) : [])]) {
+      if (line.hardUsd != null && line.spentUsd >= line.hardUsd) throw new Error(`Orçamento mensal esgotado para ${line.label}: US$ ${line.spentUsd.toFixed(2)} gastos de US$ ${line.hardUsd.toFixed(2)}. Aumente o limite em Segurança → Orçamentos.`);
+    }
+  };
   let ruleCounter = 0;
   const auditLog: AuditEvent[] = [];
   let tampered: number | null = null;
@@ -539,6 +586,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         path: input.path,
         authMode: "subscription",
         createdAt: new Date().toISOString(),
+        sandboxProfileId: "sandbox_dev",
       };
       projects.unshift(project);
       audit("você", "config.project.created", project.id, { name: project.name, path: project.path });
@@ -576,6 +624,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!input.prompt.trim()) throw new Error("O prompt não pode ser vazio");
       const member = input.agentProfileId ? findMember(input.agentProfileId) : undefined;
       if (input.agentProfileId && !member) throw new Error(`Membro ${input.agentProfileId} não encontrado`);
+      applyBudget(project.id, member?.profile.id ?? null);
       const requested = input.options ?? {};
       const options = member
         ? {
@@ -592,6 +641,9 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           }
         : requested;
       if (options.agents && Object.keys(options.agents).length === 0) delete options.agents;
+      const profile = sandboxProfiles.find((sp) => sp.id === (project.sandboxProfileId ?? "sandbox_dev"));
+      if (profile) options.sandbox = profile.settings;
+      options.policyHooks = true;
       const run: Run = {
         id: `run_mock_${++runCounter}`,
         projectId: project.id,
@@ -1006,6 +1058,36 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const decision = evaluatePolicyMock(rules.filter((r) => r.scope === "global" || r.projectId === projectId), project.path, toolName, input);
       if (decision.behavior !== "pass") audit("política", `policy.${decision.behavior}`, projectId, { tool: toolName, input, ruleId: decision.ruleId, reason: decision.reason });
       return decision;
+    },
+    list_sandbox_profiles: async () => sandboxProfiles.map((p) => ({ ...p })),
+    set_project_sandbox: async ({ projectId, profileId }) => {
+      const project = projects.find((p) => p.id === projectId);
+      if (!project) throw new Error(`Projeto ${projectId} não encontrado`);
+      if (!sandboxProfiles.some((p) => p.id === profileId)) throw new Error(`Perfil de sandbox ${profileId} não existe`);
+      project.sandboxProfileId = profileId;
+      audit("você", "config.sandbox", projectId, { profileId });
+      writeSnapshot("auto");
+      return { ...project };
+    },
+    get_budget_status: async ({ projectId }) => budgetStatus(projectId),
+    set_budget_policy: async ({ input }) => {
+      const { scope, scopeId } = input;
+      const v = input.input;
+      for (const n of [v.softUsd, v.hardUsd]) if (n != null && !(n > 0)) throw new Error("Valores de orçamento devem ser positivos");
+      if (v.softUsd != null && v.hardUsd != null && v.softUsd > v.hardUsd) throw new Error("O aviso (soft) não pode ser maior que o limite (hard)");
+      const index = budgets.findIndex((b) => b.scope === scope && b.scopeId === scopeId);
+      if (v.softUsd == null && v.hardUsd == null && v.maxTurns == null) {
+        if (index >= 0) budgets.splice(index, 1);
+        audit("você", "config.budget", null, { scope, scopeId, removed: true });
+        return null;
+      }
+      const at = new Date().toISOString();
+      const policy: BudgetPolicy = { id: index >= 0 ? budgets[index]!.id : `budget_${budgets.length + 1}`, scope, scopeId, softUsd: v.softUsd ?? null, hardUsd: v.hardUsd ?? null, maxTurns: v.maxTurns ?? null, createdAt: index >= 0 ? budgets[index]!.createdAt : at, updatedAt: at };
+      if (index >= 0) budgets.splice(index, 1, policy);
+      else budgets.push(policy);
+      audit("você", "config.budget", null, { scope, scopeId, softUsd: policy.softUsd, hardUsd: policy.hardUsd, maxTurns: policy.maxTurns });
+      writeSnapshot("auto");
+      return { ...policy };
     },
     list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
     rename_session: async ({ input }) => {

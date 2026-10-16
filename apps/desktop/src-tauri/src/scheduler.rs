@@ -82,7 +82,7 @@ pub async fn tick(store: &Store, sidecar: &Sidecar) -> Result<TickReport> {
                 policy_hooks: Some(true),
                 ..Default::default()
             };
-            let options = match agent_id.as_deref() {
+            let mut options = match agent_id.as_deref() {
                 Some(agent) => match store.agent_run_options(agent, &base) {
                     Ok(o) => o,
                     Err(e) => {
@@ -94,6 +94,21 @@ pub async fn tick(store: &Store, sidecar: &Sidecar) -> Result<TickReport> {
                     }
                 },
                 None => base,
+            };
+            options.sandbox = store.sandbox_for_project(&project)?;
+            let options = match store.apply_budget(&project.id, agent_id.as_deref(), options) {
+                Ok(o) => o,
+                Err(e) => {
+                    let msg = format!("Orçamento: {e}");
+                    store.move_task(
+                        &task.id,
+                        None,
+                        crate::store::orchestration::TaskStatus::Blocked,
+                        Some(&msg),
+                    )?;
+                    report.failed.push((task.id.clone(), msg));
+                    continue;
+                }
             };
             let prompt = Store::task_prompt(&task, &stage, &workflow);
             let run = store.create_run_full(
@@ -231,6 +246,22 @@ mod tests {
             .contains("Você é Pedro"));
         assert_eq!(run.options.task_context.as_ref().unwrap().stage, "Planejar");
         assert!(run.prompt.contains("# Primeira"));
+        assert_eq!(run.options.policy_hooks, Some(true));
+        let sandbox = run
+            .options
+            .sandbox
+            .as_ref()
+            .expect("perfil Dev padrão aplicado");
+        assert_eq!(
+            sandbox
+                .filesystem
+                .as_ref()
+                .unwrap()
+                .allow_write
+                .as_ref()
+                .unwrap()[0],
+            project.path
+        );
 
         // Segundo tick: nada (slot ocupado, t2 depende de t1).
         let again = tick(&store, &sidecar).await.unwrap();
@@ -245,6 +276,76 @@ mod tests {
             .set_setting(PAUSED_SETTING, &serde_json::json!(true))
             .unwrap();
         assert!(tick(&store, &sidecar).await.unwrap().paused);
+        sidecar.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn tick_blocks_task_when_budget_is_exhausted() {
+        use crate::store::security::{BudgetInput, BudgetScope};
+        let Some(command) = fake_sidecar_command() else {
+            return;
+        };
+        let (sidecar, _n) = Sidecar::spawn(command).await.unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = store
+            .create_project("p", dir.path().to_str().unwrap())
+            .unwrap();
+        store
+            .set_budget_policy(
+                BudgetScope::Project,
+                &project.id,
+                &BudgetInput {
+                    hard_usd: Some(0.5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Gasta o orçamento do mês com um run já concluído.
+        let spent = store
+            .create_run(&project.id, "antes", &RunOptions::default())
+            .unwrap();
+        store
+            .record_run_event(
+                &spent.id,
+                0,
+                "t",
+                &crate::protocol::RunEvent::Result {
+                    session_id: "s".into(),
+                    subtype: "success".into(),
+                    is_error: false,
+                    cost_usd: Some(0.9),
+                    duration_ms: None,
+                    num_turns: Some(1),
+                    usage: None,
+                    stop_reason: None,
+                    result_text: None,
+                },
+            )
+            .unwrap();
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        let t = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "X".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let report = tick(&store, &sidecar).await.unwrap();
+        assert!(report.started.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        let t_now = store.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(t_now.status, TaskStatus::Blocked);
+        assert!(t_now
+            .last_note
+            .as_deref()
+            .unwrap()
+            .contains("Orçamento mensal esgotado"));
         sidecar.shutdown().await;
     }
 

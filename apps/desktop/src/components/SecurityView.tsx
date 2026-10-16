@@ -1,8 +1,10 @@
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { isTauri } from "../lib/transport";
-import type { AuditEvent, AuditVerification, PolicyDecision, PolicyRule, PolicyRuleInput, Project } from "../lib/types";
+import type { AuditEvent, AuditVerification, BudgetInput, BudgetLine, BudgetStatus, PolicyDecision, PolicyRule, PolicyRuleInput, Project, SandboxProfile } from "../lib/types";
+import { BudgetTab } from "./BudgetTab";
 import { PolicyTab } from "./PolicyTab";
+import { SandboxSection } from "./SandboxSection";
 import { formatRelative } from "./SessionsView";
 
 export type SecurityTab = "policy" | "budgets" | "audit";
@@ -25,6 +27,11 @@ type SecurityViewProps = {
   onCreateRule: (scope: "global" | "project", input: PolicyRuleInput) => Promise<void>;
   onDeleteRule: (rule: PolicyRule) => Promise<void>;
   onSimulate: (toolName: string, input: unknown) => Promise<PolicyDecision>;
+  sandboxProfiles: SandboxProfile[];
+  onSelectSandbox: (profileId: string) => Promise<void>;
+  budget: BudgetStatus | null;
+  onRefreshBudget: () => void;
+  onSaveBudget: (line: BudgetLine, input: BudgetInput) => Promise<void>;
 };
 
 const FILTERS: { id: string | null; label: string }[] = [
@@ -36,7 +43,7 @@ const FILTERS: { id: string | null; label: string }[] = [
   { id: "config.", label: "Configuração" },
 ];
 
-export function SecurityView({ project, tab, onChangeTab, audit, verification, onRefreshAudit, onVerify, onExport, availableTabs = ["policy", "audit"], rules, policyEvents, onRefreshPolicy, onToggleRule, onCreateRule, onDeleteRule, onSimulate }: SecurityViewProps) {
+export function SecurityView({ project, tab, onChangeTab, audit, verification, onRefreshAudit, onVerify, onExport, availableTabs = ["policy", "budgets", "audit"], rules, policyEvents, onRefreshPolicy, onToggleRule, onCreateRule, onDeleteRule, onSimulate, sandboxProfiles, onSelectSandbox, budget, onRefreshBudget, onSaveBudget }: SecurityViewProps) {
   const [filter, setFilter] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -49,6 +56,7 @@ export function SecurityView({ project, tab, onChangeTab, audit, verification, o
   useEffect(() => {
     if (tab === "audit" && verification === null) void onVerify();
     if (tab === "policy") onRefreshPolicy();
+    if (tab === "budgets") onRefreshBudget();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -104,7 +112,13 @@ export function SecurityView({ project, tab, onChangeTab, audit, verification, o
         </div>
       </div>
 
-      {tab === "policy" && <PolicyTab project={project} rules={rules} lastBlocks={policyEvents} onToggle={onToggleRule} onCreate={onCreateRule} onDelete={onDeleteRule} onSimulate={onSimulate} />}
+      {tab === "policy" && (
+        <>
+          <SandboxSection project={project} profiles={sandboxProfiles} onSelect={onSelectSandbox} />
+          <PolicyTab project={project} rules={rules} lastBlocks={policyEvents} onToggle={onToggleRule} onCreate={onCreateRule} onDelete={onDeleteRule} onSimulate={onSimulate} />
+        </>
+      )}
+      {tab === "budgets" && <BudgetTab status={budget} onSave={onSaveBudget} />}
 
       {tab === "audit" && (
         <>

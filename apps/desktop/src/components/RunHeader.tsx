@@ -1,5 +1,5 @@
 import { History, Lock, Square } from "lucide-react";
-import type { Project, ProjectTotals, Run } from "../lib/types";
+import type { BudgetStatus, Project, ProjectTotals, Run } from "../lib/types";
 import type { RunViewState } from "../state/runReducer";
 import { formatUsd } from "./RunSidebar";
 
@@ -14,9 +14,13 @@ type RunHeaderProps = {
   onContinue?: () => void;
   /** Custo acumulado do projeto (todos os runs). */
   totals?: ProjectTotals | null;
+  /** Nome do perfil de sandbox do projeto. */
+  sandboxName?: string | null;
+  /** Orçamento do mês (aviso soft/hard). */
+  budget?: BudgetStatus | null;
 };
 
-export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue, totals = null }: RunHeaderProps) {
+export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue, totals = null, sandboxName = null, budget = null }: RunHeaderProps) {
   const status = statusOf(run, state, active);
   const sessionId = state.sessionId ?? run?.claudeSessionId ?? null;
   const canContinue = Boolean(run && !active && sessionId && onContinue);
@@ -31,9 +35,16 @@ export function RunHeader({ project, run, state, active, onInterrupt, interrupti
           {status.dot && <span className={["size-1.5 rounded-full", status.dot].join(" ")} />}
           {status.label}
         </span>
-        <span className="inline-flex items-center gap-1.5 rounded-full border hairline-strong px-2.5 py-1.5 text-xs font-medium text-ink">
-          <Lock size={13} aria-hidden /> Sandbox padrão
+        <span className="inline-flex items-center gap-1.5 rounded-full border hairline-strong px-2.5 py-1.5 text-xs font-medium text-ink" data-testid="sandbox-chip">
+          <Lock size={13} aria-hidden /> Sandbox {sandboxName ?? "Dev padrão"}
         </span>
+        {budget && budget.project.level !== "ok" && (
+          <span className={["inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-semibold", budget.project.level === "hard" ? "bg-brand-soft text-brand-hover" : "bg-warning-soft text-warning-ink"].join(" ")} data-testid="budget-chip" data-level={budget.project.level}>
+            <span className={["size-1.5 rounded-full", budget.project.level === "hard" ? "bg-brand" : "bg-warning"].join(" ")} />
+            {budget.project.level === "hard" ? "Orçamento do mês esgotado" : "Passou do aviso de orçamento"} · {formatUsd(budget.project.spentUsd)}
+            {budget.project.hardUsd != null ? ` / ${formatUsd(budget.project.hardUsd)}` : ""}
+          </span>
+        )}
         {state.model && <span className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">{state.model}</span>}
         {totals && totals.runs > 0 && (
           <span data-testid="project-cost" title="Custo acumulado de todos os runs deste projeto" className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">

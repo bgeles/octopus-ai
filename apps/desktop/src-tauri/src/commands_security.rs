@@ -6,7 +6,11 @@ use tauri::State;
 
 use crate::commands::AppState;
 use crate::store::audit::{AuditEvent, AuditVerification};
+use crate::store::models::Project;
 use crate::store::policy::{PolicyDecision, PolicyRule, PolicyRuleInput};
+use crate::store::security::{
+    BudgetInput, BudgetPolicy, BudgetScope, BudgetStatus, SandboxProfile,
+};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -180,4 +184,68 @@ pub fn evaluate_policy(
             &input,
         )
         .map_err(err)
+}
+
+// ---------------------------------------------------------------------- sandbox e orçamentos
+
+#[tauri::command]
+pub fn list_sandbox_profiles(state: State<'_, AppState>) -> CmdResult<Vec<SandboxProfile>> {
+    state.store.list_sandbox_profiles().map_err(err)
+}
+
+#[tauri::command]
+pub fn set_project_sandbox(
+    state: State<'_, AppState>,
+    project_id: String,
+    profile_id: String,
+) -> CmdResult<Project> {
+    let project = state
+        .store
+        .set_project_sandbox(&project_id, &profile_id)
+        .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "config.sandbox",
+        Some(&project_id),
+        serde_json::json!({"profileId": profile_id}),
+    );
+    crate::commands_config::auto_backup(&state);
+    Ok(project)
+}
+
+#[tauri::command]
+pub fn get_budget_status(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<BudgetStatus> {
+    state.store.budget_status(&project_id).map_err(err)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetBudgetInput {
+    pub scope: BudgetScope,
+    pub scope_id: String,
+    pub input: BudgetInput,
+}
+
+#[tauri::command]
+pub fn set_budget_policy(
+    state: State<'_, AppState>,
+    input: SetBudgetInput,
+) -> CmdResult<Option<BudgetPolicy>> {
+    let policy = state
+        .store
+        .set_budget_policy(input.scope, &input.scope_id, &input.input)
+        .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "config.budget",
+        None,
+        serde_json::json!({"scope": input.scope, "scopeId": input.scope_id, "softUsd": input.input.soft_usd, "hardUsd": input.input.hard_usd, "maxTurns": input.input.max_turns}),
+    );
+    crate::commands_config::auto_backup(&state);
+    Ok(policy)
 }

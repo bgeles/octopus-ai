@@ -2,9 +2,9 @@
  * Tipos da ponte UI <-> core Rust. Espelham `src-tauri/src/store/models.rs` e os comandos em `commands.rs`.
  * Eventos de run vêm de `@octopus/protocol`.
  */
-import type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
+import type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 
-export type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary, TaskContext, TaskStatusUpdate };
+export type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -14,6 +14,8 @@ export type Project = {
   path: string;
   authMode: AuthMode;
   createdAt: string;
+  /** Perfil de sandbox do projeto (padrão sandbox_dev). */
+  sandboxProfileId?: string | null;
 };
 
 export type RunStatus = "queued" | "running" | "waiting_approval" | "completed" | "failed" | "interrupted";
@@ -125,6 +127,14 @@ export type AuditEvent = {
   prevHash: string;
   hash: string;
 };
+
+export type SandboxProfile = { id: string; name: string; description: string; builtin: boolean; settings: SandboxSettings; position: number };
+
+export type BudgetScope = "project" | "agent";
+export type BudgetPolicy = { id: string; scope: BudgetScope; scopeId: string; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; createdAt: string; updatedAt: string };
+export type BudgetInput = { softUsd?: number | null; hardUsd?: number | null; maxTurns?: number | null };
+export type BudgetLine = { scope: BudgetScope; scopeId: string; label: string; spentUsd: number; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; runs: number; level: "ok" | "soft" | "hard" };
+export type BudgetStatus = { month: string; project: BudgetLine; agents: BudgetLine[] };
 
 export type RuleKind = "command" | "write" | "tool" | "mcp";
 export type RuleAction = "allow" | "deny" | "ask";
@@ -405,6 +415,10 @@ export type Commands = {
   set_policy_rule_enabled: { args: { ruleId: string; enabled: boolean }; result: PolicyRule };
   delete_policy_rule: { args: { ruleId: string }; result: boolean };
   evaluate_policy: { args: { projectId: string; toolName: string; input: unknown }; result: PolicyDecision };
+  list_sandbox_profiles: { args: Record<string, never>; result: SandboxProfile[] };
+  set_project_sandbox: { args: { projectId: string; profileId: string }; result: Project };
+  get_budget_status: { args: { projectId: string }; result: BudgetStatus };
+  set_budget_policy: { args: { input: { scope: BudgetScope; scopeId: string; input: BudgetInput } }; result: BudgetPolicy | null };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 

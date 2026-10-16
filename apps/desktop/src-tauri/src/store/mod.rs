@@ -9,6 +9,7 @@ pub mod config;
 pub mod models;
 pub mod orchestration;
 pub mod policy;
+pub mod security;
 pub mod team;
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
     ("0006_audit", include_str!("migrations/0006_audit.sql")),
     ("0007_policy", include_str!("migrations/0007_policy.sql")),
+    (
+        "0008_sandbox_budget",
+        include_str!("migrations/0008_sandbox_budget.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -130,11 +135,12 @@ impl Store {
             path: path.to_string(),
             auth_mode: models::AuthMode::Subscription,
             created_at: now(),
+            sandbox_profile_id: Some("sandbox_dev".into()),
         };
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
-            "INSERT INTO project (id, name, path, auth_mode, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![project.id, project.name, project.path, project.auth_mode.as_str(), project.created_at],
+            "INSERT INTO project (id, name, path, auth_mode, created_at, sandbox_profile_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project.id, project.name, project.path, project.auth_mode.as_str(), project.created_at, project.sandbox_profile_id],
         )?;
         Ok(project)
     }
@@ -142,7 +148,7 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let conn = self.conn.lock().expect("store mutex");
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, auth_mode, created_at FROM project ORDER BY created_at DESC",
+            "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id FROM project ORDER BY created_at DESC",
         )?;
         let rows = stmt
             .query_map([], Project::from_row)?
@@ -154,7 +160,7 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex");
         let project = conn
             .query_row(
-                "SELECT id, name, path, auth_mode, created_at FROM project WHERE id = ?1",
+                "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id FROM project WHERE id = ?1",
                 params![id],
                 Project::from_row,
             )
@@ -565,12 +571,13 @@ mod tests {
                 "0004_team".to_string(),
                 "0005_orchestration".to_string(),
                 "0006_audit".to_string(),
-                "0007_policy".to_string()
+                "0007_policy".to_string(),
+                "0008_sandbox_budget".to_string()
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 7);
+        assert_eq!(s.applied_migrations().unwrap().len(), 8);
     }
 
     #[test]
