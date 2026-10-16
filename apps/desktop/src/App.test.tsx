@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "./App";
-import { createMockTransport, editApprovalRunEvents } from "./lib/mockTransport";
+import { createMockTransport, editApprovalRunEvents, subagentRunEvents } from "./lib/mockTransport";
 
 function setup(options: Parameters<typeof createMockTransport>[0] = {}) {
   const transport = createMockTransport({ tickMs: 5, ...options });
@@ -276,5 +276,42 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
     await user.click(screen.getByRole("button", { name: /Run ao vivo/ }));
     await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
+  });
+
+  it("mostra a árvore de subagentes no transcript e na lateral", async () => {
+    const { user } = setup({ events: subagentRunEvents() });
+    await screen.findByDisplayValue("chat-core");
+    await user.type(screen.getByLabelText("Instrução para o agente"), "Mapeie as migrações");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
+
+    const group = screen.getByTestId("subagent-group");
+    expect(group).toHaveAttribute("data-status", "done");
+    expect(group).toHaveTextContent("Procurando arquivos V*.sql.");
+    expect(within(group).getByText("Grep")).toBeInTheDocument();
+    // A chamada Agent é o único tool-call de nível superior; o Grep fica aninhado.
+    const toolCalls = screen.getAllByTestId("tool-call");
+    expect(toolCalls[0]).toHaveTextContent("Subagente");
+    expect(toolCalls[0]).toHaveTextContent("Mapear migrações Flyway");
+    expect(toolCalls[0]).toHaveTextContent("1 ferramenta · 1 mensagem");
+
+    const node = screen.getByTestId("subagent-node");
+    expect(node).toHaveAttribute("data-status", "done");
+    expect(node).toHaveTextContent("Mapear migrações Flyway");
+  });
+
+  it("o header acumula o custo do projeto ao longo dos runs", async () => {
+    const { user } = setup();
+    await screen.findByDisplayValue("chat-core");
+    expect(screen.queryByTestId("project-cost")).not.toBeInTheDocument();
+
+    for (const prompt of ["um", "dois"]) {
+      await user.type(screen.getByLabelText("Instrução para o agente"), prompt);
+      await user.click(screen.getByRole("button", { name: "Enviar" }));
+      const approval = await screen.findByTestId("approval-card");
+      await user.click(within(approval).getByRole("button", { name: "Permitir uma vez" }));
+      await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
+    }
+    expect(screen.getByTestId("project-cost")).toHaveTextContent("Projeto US$ 0,08 em 2 runs");
   });
 });

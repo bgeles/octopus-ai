@@ -4,6 +4,7 @@
  * sem Tauri, sem Claude e sem rede. Também é o backend dos testes Playwright.
  */
 import editApprovalEvents from "@octopus/protocol/fixtures/run-events-edit-approval.notifications.json";
+import subagentEvents from "@octopus/protocol/fixtures/run-events-subagent.notifications.json";
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
@@ -27,6 +28,11 @@ export function fixtureRunEvents(): RunEventNotification[] {
 /** Roteiro alternativo: aprovações de Edit e Write (preview com diff). */
 export function editApprovalRunEvents(): RunEventNotification[] {
   return (editApprovalEvents as FixtureNotification[]).map((n) => n.params);
+}
+
+/** Roteiro alternativo: agente principal delega a um subagente (parentToolUseId). */
+export function subagentRunEvents(): RunEventNotification[] {
+  return (subagentEvents as FixtureNotification[]).map((n) => n.params);
 }
 
 /** Conteúdo "atual" de arquivos do projeto de demonstração, para o diff de Write. */
@@ -199,6 +205,17 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
         .slice(0, limit ?? 50),
     get_run: async ({ runId }) => runs.get(runId) ?? null,
+    get_project_totals: async ({ projectId }) => {
+      const list = [...runs.values()].filter((r) => r.projectId === projectId);
+      return {
+        projectId,
+        runs: list.length,
+        costUsd: list.reduce((sum, r) => sum + (r.costUsd ?? 0), 0),
+        inputTokens: list.reduce((sum, r) => sum + r.inputTokens, 0),
+        outputTokens: list.reduce((sum, r) => sum + r.outputTokens, 0),
+        cacheReadTokens: list.reduce((sum, r) => sum + r.cacheReadTokens, 0),
+      };
+    },
     list_run_events: async ({ runId }) => [...(events.get(runId) ?? [])],
     start_run: async ({ input }) => {
       const project = projects.find((p) => p.id === input.projectId);

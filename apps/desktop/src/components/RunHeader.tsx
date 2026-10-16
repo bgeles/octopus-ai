@@ -1,6 +1,7 @@
 import { History, Lock, Square } from "lucide-react";
-import type { Project, Run } from "../lib/types";
+import type { Project, ProjectTotals, Run } from "../lib/types";
 import type { RunViewState } from "../state/runReducer";
+import { formatUsd } from "./RunSidebar";
 
 type RunHeaderProps = {
   project: Project | null;
@@ -11,9 +12,11 @@ type RunHeaderProps = {
   interrupting: boolean;
   /** Retomar a sessão deste run (disponível quando o run terminou e tem sessão). */
   onContinue?: () => void;
+  /** Custo acumulado do projeto (todos os runs). */
+  totals?: ProjectTotals | null;
 };
 
-export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue }: RunHeaderProps) {
+export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue, totals = null }: RunHeaderProps) {
   const status = statusOf(run, state, active);
   const sessionId = state.sessionId ?? run?.claudeSessionId ?? null;
   const canContinue = Boolean(run && !active && sessionId && onContinue);
@@ -32,6 +35,11 @@ export function RunHeader({ project, run, state, active, onInterrupt, interrupti
           <Lock size={13} aria-hidden /> Sandbox padrão
         </span>
         {state.model && <span className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">{state.model}</span>}
+        {totals && totals.runs > 0 && (
+          <span data-testid="project-cost" title="Custo acumulado de todos os runs deste projeto" className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">
+            {`Projeto ${formatUsd(totals.costUsd)} em ${totals.runs} ${totals.runs === 1 ? "run" : "runs"}`}
+          </span>
+        )}
         {canContinue && (
           <button
             type="button"

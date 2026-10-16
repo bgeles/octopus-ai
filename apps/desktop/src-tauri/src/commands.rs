@@ -11,7 +11,7 @@ use crate::protocol::{
     SessionSummary, SessionsRenameParams, SessionsTagParams,
 };
 use crate::sidecar::Sidecar;
-use crate::store::models::{Approval, Project, Run, RunStatus, StoredRunEvent};
+use crate::store::models::{Approval, Project, ProjectTotals, Run, RunStatus, StoredRunEvent};
 use crate::store::Store;
 
 pub struct AppState {
@@ -277,6 +277,14 @@ pub async fn tag_session(state: State<'_, AppState>, input: TagSessionInput) -> 
         .await
         .map_err(err)?;
     Ok(result.ok)
+}
+
+#[tauri::command]
+pub fn get_project_totals(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<ProjectTotals> {
+    state.store.project_totals(&project_id).map_err(err)
 }
 
 #[tauri::command]

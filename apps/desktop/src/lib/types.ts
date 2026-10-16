@@ -71,6 +71,16 @@ export type Approval = {
   decidedAt: string | null;
 };
 
+/** Espelha `store::models::ProjectTotals`: custo e tokens acumulados de todos os runs do projeto. */
+export type ProjectTotals = {
+  projectId: string;
+  runs: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+};
+
 /** Espelha `commands::FilePreview`. */
 export type FilePreview = {
   path: string;
@@ -97,6 +107,7 @@ export type Commands = {
   rename_session: { args: { input: { projectId: string; sessionId: string; title: string } }; result: boolean };
   tag_session: { args: { input: { projectId: string; sessionId: string; tag: string | null } }; result: boolean };
   list_approvals: { args: { projectId: string; limit?: number }; result: Approval[] };
+  get_project_totals: { args: { projectId: string }; result: ProjectTotals };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 

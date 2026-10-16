@@ -9,7 +9,7 @@ import { SessionsView } from "./components/SessionsView";
 import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import type { Transport } from "./lib/transport";
-import type { Approval, FilePreview, PermissionDecision, Project, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
+import type { Approval, FilePreview, PermissionDecision, Project, ProjectTotals, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -29,6 +29,7 @@ export function App({ transport }: AppProps) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [resumeTarget, setResumeTarget] = useState<ResumeTarget | null>(null);
   const [approvals, setApprovals] = useState<Approval[] | null>(null);
+  const [totals, setTotals] = useState<ProjectTotals | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -38,8 +39,9 @@ export function App({ transport }: AppProps) {
 
   const refreshRuns = useCallback(
     async (projectId: string) => {
-      const list = await transport.invoke("list_runs", { projectId, limit: 20 });
+      const [list, projectTotals] = await Promise.all([transport.invoke("list_runs", { projectId, limit: 20 }), transport.invoke("get_project_totals", { projectId })]);
       setRuns(list);
+      setTotals(projectTotals);
       const currentId = currentRunIdRef.current;
       if (currentId) {
         const fresh = list.find((r) => r.id === currentId) ?? (await transport.invoke("get_run", { runId: currentId }));
@@ -271,6 +273,7 @@ export function App({ transport }: AppProps) {
         setCurrentRun(null);
         setRunState(initialRunViewState());
         setResumeTarget(null);
+        setTotals(null);
       }}
       onAddProject={() => setAddOpen(true)}
       view={view}
@@ -287,6 +290,7 @@ export function App({ transport }: AppProps) {
             active={active}
             onInterrupt={() => void interrupt()}
             interrupting={interrupting}
+            totals={totals}
             onContinue={() => {
               const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
               if (sessionId) beginResume({ sessionId, title: currentRun?.prompt ?? null }, false);

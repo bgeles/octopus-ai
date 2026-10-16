@@ -226,3 +226,15 @@ impl Approval {
         })
     }
 }
+
+/// Totais acumulados de todos os runs de um projeto.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTotals {
+    pub project_id: String,
+    pub runs: u64,
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+}
