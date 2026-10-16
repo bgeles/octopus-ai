@@ -148,7 +148,7 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
 }
 
 /// Avalia a política do projeto do run para um hook PreToolUse e registra na auditoria.
-fn decide_hook(store: &Store, hook: &protocol::RunHookNotification) -> protocol::HookDecision {
+pub fn decide_hook(store: &Store, hook: &protocol::RunHookNotification) -> protocol::HookDecision {
     let project = store
         .get_run(&hook.run_id)
         .ok()

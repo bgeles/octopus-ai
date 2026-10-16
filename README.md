@@ -2,7 +2,7 @@
 
 Orquestrador de projetos com agentes de IA para macOS. App Tauri 2 (React + Rust) com um sidecar Node que hospeda o Claude Agent SDK.
 
-Estado atual: **Fase 2** (onboarding, time e orquestração) concluída na branch `fase-2/onboarding-time-orquestracao`, sobre a Fase 1 (tag `fase-1`). Um projeto aponta para uma pasta; você monta um **time** de agentes com cargos, especialidades e responsabilidades (organograma com delegação), define um **workflow** com estágios e gate humano, e o **scheduler** executa as tasks do board como o membro responsável, respeitando dependências e paralelismo. Cada run mostra streaming, chamadas de ferramenta, subagentes, pedidos de permissão com diff e custo. Onboarding na primeira abertura e backup local das configurações. Tudo persistido em SQLite.
+Estado atual: **Fase 3** (segurança de execução) concluída na branch `fase-3/seguranca`, sobre a Fase 2 (`fase-2/onboarding-time-orquestracao`) e a Fase 1 (tag `fase-1`). Um projeto aponta para uma pasta; você monta um **time** de agentes com cargos, especialidades e responsabilidades (organograma com delegação), define um **workflow** com estágios e gate humano, e o **scheduler** executa as tasks do board como o membro responsável, respeitando dependências e paralelismo. Cada run mostra streaming, chamadas de ferramenta, subagentes, pedidos de permissão com diff e custo. Onboarding na primeira abertura e backup local das configurações. Segurança em camadas: sandbox por projeto, motor de política `PreToolUse` em Rust, orçamentos mensais, auditoria com cadeia de hashes e API key no Keychain. Tudo persistido em SQLite (segredos só no Keychain).
 
 O plano completo (arquitetura, modelo de dados, fases 1 a 7) está em `docs/plano.md`. A proposta visual aprovada está no Claude Design.
 
@@ -65,6 +65,7 @@ Regras: PRs de iteração entram na branch da fase com a suíte de testes verde 
 | Aprovações | Pendentes (decidíveis fora do transcript) e decididas com motivo. |
 | Time | Cargos (catálogo com 7 seeds + cargos do projeto), membros com organograma (quem reporta a quem vira subagente), ficha com responsabilidades, "como trabalha" e runs. |
 | Board | Workflows por modelo ("Planejar → Implementar → Revisar → Aprovar", "Pesquisa paralela → Síntese"), tasks com dependências e critérios de aceite, Kanban por estágio, gates humanos, histórico. O scheduler roda a cada 4 s (ou em "Rodar agora"); o agente move a própria task pela tool MCP `task_update`. Worktree git por task opcional. |
+| Segurança | **Política**: perfil de sandbox do projeto (Estrito, Dev padrão, Somente leitura → `options.sandbox` do SDK), autenticação do projeto (login do Claude Code ou API key guardada no Keychain), regras `PreToolUse` globais e do projeto (deny/ask; as do projeto só apertam) com simulador. **Orçamentos**: aviso e limite mensais por projeto e por membro, turnos por run; limite esgotado bloqueia novos runs e tasks. **Auditoria**: eventos encadeados por SHA-256 (runs, aprovações, hooks, configurações, segredos sem valor), verificação de integridade e exportação JSONL. |
 | Configurações | Checagem do ambiente (Node, runtime, login do Claude Code), autenticação padrão, tema, backup local das configurações (exportar/importar, cópias automáticas, restaurar com prévia), refazer onboarding. |
 
 ## Build de teste (.app / .dmg)
@@ -85,7 +86,8 @@ Gera `apps/desktop/src-tauri/target/release/bundle/macos/Octopus AI.app` e o `.d
 |---|---|
 | `OCTOPUS_SIDECAR_PROGRAM` / `OCTOPUS_SIDECAR_ARGS` | Força o comando do sidecar (ex.: `node` + caminho do `main.js`). |
 | `RUST_LOG` | Filtro de logs do core (padrão `info,octopus_desktop_lib=debug`). |
-| `ANTHROPIC_API_KEY` | Usada pelo sidecar quando o projeto estiver em modo `api_key`. |
+| `OCTOPUS_SECRETS=memory` | Guarda as API keys em memória em vez do Keychain (testes/CI). |
+| `ANTHROPIC_API_KEY` | Não precisa estar no ambiente: para projetos em modo `api_key`, o core lê a chave do Keychain (serviço `ai.octopus.desktop`) e a injeta só na chamada ao sidecar. |
 
 ## Aviso de licença
 

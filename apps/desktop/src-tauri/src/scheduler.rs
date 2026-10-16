@@ -510,6 +510,19 @@ mod tests {
                 .expect("timeout esperando o run")
                 .expect("canal fechado");
             match n {
+                // Como o app: o hook PreToolUse é decidido pelo motor de política em Rust.
+                SidecarNotification::Hook(hook) => {
+                    let decision = crate::decide_hook(&store, &hook);
+                    eprintln!("hook {} → {:?}", hook.tool_name, decision.behavior);
+                    sidecar
+                        .decide_hook(crate::protocol::HookDecideParams {
+                            run_id: hook.run_id.clone(),
+                            hook_id: hook.hook_id.clone(),
+                            decision,
+                        })
+                        .await
+                        .unwrap();
+                }
                 SidecarNotification::RunEvent(ev) if ev.run_id == run_id => {
                     eprintln!("[{}] {}", ev.seq, ev.event.kind());
                     if let RunEvent::PermissionRequest {
