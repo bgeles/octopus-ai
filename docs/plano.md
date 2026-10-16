@@ -107,6 +107,8 @@ octopus-ai/
 - `context_pin` (id, project_id, kind `file|page|text`, ref, always_inject)
 - `audit_event` (seq, ts, actor, kind, payload_json, prev_hash, hash)
 - `budget_policy` (scope `project|agent|task`, scope_id, soft_usd, hard_usd, max_turns)
+- `app_setting` (key PK, value_json, updated_at): preferências e estado do onboarding (`onboarding.completed_at`, `onboarding.checks_json`)
+- `backup_snapshot` (id, created_at, path, schema_version, reason `auto|manual|pre-restore`, size_bytes)
 
 ## Funcionalidades por domínio
 
@@ -161,6 +163,19 @@ O Paperclip apresenta agentes como funcionários de uma empresa: organograma com
 ### Autenticação
 - Por projeto: `subscription` usa o login existente do Claude Code (sidecar herda keychain do usuário) ou `api_key` (do Keychain do app, passado via `env.ANTHROPIC_API_KEY`). Tela de settings mostra qual modo está ativo e o aviso de licença para distribuição.
 
+### Onboarding e backup local de configurações (decidido em 16/10/2026)
+
+Com o build de teste em mãos, quem instala o app precisa ser guiado e poder guardar o que configurou. "Por hora" tudo é local: sincronização e nuvem ficam fora de escopo.
+
+- **Onboarding** (primeira abertura, ou sempre que um pré-requisito faltar): tela de boas-vindas em 4 passos no tema Grafite.
+  1. *Ambiente*: Node encontrado (reusa `find_node()` do supervisor; mostra o caminho ou instrui a instalar e permite apontar via `OCTOPUS_NODE`), sidecar respondendo (`runtime.hello`) e Claude Code autenticado (teste real: `run.start` curto em modo `plan` com `maxTurns: 1`, ou o estado de auth do SDK quando houver), com o aviso de licença do login pessoal.
+  2. *Autenticação padrão*: assinatura ou API key (a chave vai para o Keychain na Fase 3; até lá só o modo).
+  3. *Primeiro projeto*: reusa `AddProjectDialog`, com a opção "importar um backup" em vez de começar do zero.
+  4. *Tema*: Sistema, Claro ou Escuro.
+  Entrada "Refazer onboarding" em Settings; cada checagem vira depois um item de status na tela Segurança/Settings.
+- **Backup local de configurações**: exportar/importar `octopus-config-<data>.json` legível, com `schemaVersion`, contendo `project` (sem segredos), `role`, `agent_profile`, `team_member`, `workflow`, `mcp_server` (config sem credenciais), `skill`, `budget_policy`, `context_pin` e preferências do app (tema, modo de auth padrão, último projeto). Nunca inclui runs, eventos, aprovações, API keys ou memória. Cópias automáticas versionadas em `~/Library/Application Support/ai.octopus.desktop/backups/` a cada mudança de configuração (com debounce), mantendo as últimas 20; restauração com preview (o que entra, o que conflita por id/path) nos modos "mesclar" e "substituir configurações". Comandos Rust `config_export`, `config_import`, `config_backups_list`, `config_backup_restore`; o formato do export é a base do futuro sync.
+- **Fora de escopo por decisão (16/10/2026)**: backup em nuvem/sincronização entre máquinas e backup de runs e memória (reavaliar depois da Fase 4).
+
 ## Fases de implementação
 
 Dois princípios transversais, definidos pelo usuário:
@@ -204,9 +219,10 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 - `canUseTool` → aprovação na UI com diff/preview do input; `permissionMode` por run.
 - Árvore de tool calls e subagentes, medidor de custo/tokens.
 
-### Fase 2 — Projetos, time e orquestração
-- **2a — Time (telas aprovadas no Design na Fase 1, iteração 03)**: catálogo de cargos com seed, CRUD de membros do time, tela Time com organograma (xyflow) e cards de membro, Ficha do membro, Board Kanban com responsável por card; nav "Agentes" vira "Time". Perfil de agente vira `options` do SDK (instruções do cargo + do membro em `systemPrompt.append`, `agents` para os delegados).
-- **2b — Orquestração**: CRUD de projetos, workflows e tasks; scheduler (locks, DAG, concorrência, worktrees, gates humanos); templates de workflow; grafo de estágios.
+### Fase 2 — Onboarding, time e orquestração
+- **2a — Onboarding e backup local (primeira iteração; prancha no Design antes: `Onboarding.dc.html` com os 4 passos e `Backup.dc.html` com lista de cópias, exportar/importar e preview de restauração)**: tabelas `app_setting` e `backup_snapshot`, tela de boas-vindas com as checagens de ambiente, export/import e cópias automáticas.
+- **2b — Time (telas aprovadas no Design na Fase 1, iteração 03)**: catálogo de cargos com seed, CRUD de membros do time, tela Time com organograma (xyflow) e cards de membro, Ficha do membro, Board Kanban com responsável por card; nav "Agentes" vira "Time". Perfil de agente vira `options` do SDK (instruções do cargo + do membro em `systemPrompt.append`, `agents` para os delegados).
+- **2c — Orquestração**: CRUD de projetos, workflows e tasks; scheduler (locks, DAG, concorrência, worktrees, gates humanos); templates de workflow; grafo de estágios.
 - MCP in-process com `task_update` para o agente mover a própria task.
 
 ### Fase 3 — Segurança de execução
@@ -228,7 +244,7 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 
 - **Fase 0**: `npm run tauri dev` abre o app; prompt "liste os arquivos" em uma pasta de teste produz streaming e um registro em `run` com `claude_session_id` e `cost_usd`; `sqlite3 octopus.db 'select * from run'` confirma.
 - **Fase 1**: retomar a sessão e perguntar "o que fizemos antes?" responde com contexto; pedir uma escrita de arquivo gera aprovação na UI; negar impede a escrita.
-- **Fase 2**: montar um time com 3 membros (Planejador → Implementador → Revisor) e ver o organograma com os três ligados ao gestor; abrir a ficha do Implementador e conferir que as responsabilidades do cargo entram no `system/init`; criar workflow de 3 estágios com 2 tasks dependentes; scheduler só inicia a segunda após a primeira ficar `done`; gate humano segura a task em `waiting_approval`; worktree criado em `.octopus/worktrees/<task>`.
+- **Fase 2**: apagar o banco, abrir o app e concluir o onboarding (as 3 checagens verdes, projeto criado); exportar as configurações, apagar o banco de novo e restaurar o backup recria projetos, time e preferências; montar um time com 3 membros (Planejador → Implementador → Revisor) e ver o organograma com os três ligados ao gestor; abrir a ficha do Implementador e conferir que as responsabilidades do cargo entram no `system/init`; criar workflow de 3 estágios com 2 tasks dependentes; scheduler só inicia a segunda após a primeira ficar `done`; gate humano segura a task em `waiting_approval`; worktree criado em `.octopus/worktrees/<task>`.
 - **Fase 3**: com perfil `estrito`, pedir `curl https://example.com` falha (host fora da allowlist) e `cat ~/.ssh/id_rsa` falha; pedir `rm -rf /tmp/x` fora do projeto é negado pelo motor Rust com motivo visível; alterar manualmente uma linha do audit log quebra a verificação de hash.
 - **Fase 4**: após um run, páginas aparecem em `memory/wiki`; novo run na mesma task recebe o handoff; busca na UI encontra a decisão registrada; medidor de contexto sobe conforme o run avança e registra a compactação.
 - **Fase 5**: adicionar um MCP server inválido mostra erro de health; agente com skill vinculada a vê no `system/init`.
