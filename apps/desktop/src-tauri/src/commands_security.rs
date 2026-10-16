@@ -5,8 +5,9 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::commands::AppState;
+use crate::secrets::project_api_key_name;
 use crate::store::audit::{AuditEvent, AuditVerification};
-use crate::store::models::Project;
+use crate::store::models::{AuthMode, Project};
 use crate::store::policy::{PolicyDecision, PolicyRule, PolicyRuleInput};
 use crate::store::security::{
     BudgetInput, BudgetPolicy, BudgetScope, BudgetStatus, SandboxProfile,
@@ -248,4 +249,81 @@ pub fn set_budget_policy(
     );
     crate::commands_config::auto_backup(&state);
     Ok(policy)
+}
+
+// ---------------------------------------------------------------------- autenticação do projeto
+
+#[tauri::command]
+pub fn update_project_auth(
+    state: State<'_, AppState>,
+    project_id: String,
+    auth_mode: AuthMode,
+) -> CmdResult<Project> {
+    let project = state
+        .store
+        .update_project_auth(&project_id, auth_mode)
+        .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "config.project",
+        Some(&project_id),
+        serde_json::json!({"authMode": auth_mode}),
+    );
+    crate::commands_config::auto_backup(&state);
+    Ok(project)
+}
+
+/// Guarda a chave no Keychain. A auditoria registra só que houve troca: o valor nunca é gravado.
+#[tauri::command]
+pub fn set_project_api_key(
+    state: State<'_, AppState>,
+    project_id: String,
+    api_key: String,
+) -> CmdResult<()> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("A chave não pode ser vazia".into());
+    }
+    state
+        .store
+        .get_project(&project_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Projeto {project_id} não encontrado"))?;
+    state
+        .secrets
+        .set(&project_api_key_name(&project_id), key)
+        .map_err(|e| format!("{e:#}"))?;
+    audit(
+        &state,
+        "você",
+        "secret.set",
+        Some(&project_id),
+        serde_json::json!({"key": "ANTHROPIC_API_KEY", "value": "valor não registrado"}),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_project_api_key(state: State<'_, AppState>, project_id: String) -> CmdResult<()> {
+    state
+        .secrets
+        .delete(&project_api_key_name(&project_id))
+        .map_err(|e| format!("{e:#}"))?;
+    audit(
+        &state,
+        "você",
+        "secret.cleared",
+        Some(&project_id),
+        serde_json::json!({"key": "ANTHROPIC_API_KEY"}),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn has_project_api_key(state: State<'_, AppState>, project_id: String) -> CmdResult<bool> {
+    state
+        .secrets
+        .has(&project_api_key_name(&project_id))
+        .map_err(|e| format!("{e:#}"))
 }

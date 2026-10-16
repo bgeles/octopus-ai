@@ -215,7 +215,7 @@ pub fn list_task_events(state: State<'_, AppState>, task_id: String) -> CmdResul
 /// Tick imediato do scheduler (a UI chama depois de criar/mover tasks).
 #[tauri::command]
 pub async fn scheduler_tick(app: AppHandle, state: State<'_, AppState>) -> CmdResult<TickReport> {
-    let report = scheduler::tick(&state.store, &state.sidecar)
+    let report = scheduler::tick(&state.store, &state.sidecar, state.secrets.as_ref())
         .await
         .map_err(err)?;
     if report.changed() {

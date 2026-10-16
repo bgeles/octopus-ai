@@ -419,6 +419,12 @@ export type Commands = {
   set_project_sandbox: { args: { projectId: string; profileId: string }; result: Project };
   get_budget_status: { args: { projectId: string }; result: BudgetStatus };
   set_budget_policy: { args: { input: { scope: BudgetScope; scopeId: string; input: BudgetInput } }; result: BudgetPolicy | null };
+  /** Modo de autenticação do projeto (a chave em si fica no Keychain). */
+  update_project_auth: { args: { projectId: string; authMode: AuthMode }; result: Project };
+  /** Guarda a API key no Keychain; a auditoria registra só que houve troca. */
+  set_project_api_key: { args: { projectId: string; apiKey: string }; result: null };
+  clear_project_api_key: { args: { projectId: string }; result: null };
+  has_project_api_key: { args: { projectId: string }; result: boolean };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 

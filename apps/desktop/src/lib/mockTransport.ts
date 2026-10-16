@@ -341,6 +341,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     for (const ch of seed) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
     return h.toString(16).padStart(8, "0").repeat(8);
   };
+  /** Keychain de mentira: só para a UI; os valores nunca saem daqui. */
+  const secrets = new Map<string, string>();
   const audit = (actor: string, kind: string, projectId: string | null, payload: unknown) => {
     const prevHash = auditLog[auditLog.length - 1]?.hash ?? "0".repeat(64);
     const ts = new Date().toISOString();
@@ -625,6 +627,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const member = input.agentProfileId ? findMember(input.agentProfileId) : undefined;
       if (input.agentProfileId && !member) throw new Error(`Membro ${input.agentProfileId} não encontrado`);
       applyBudget(project.id, member?.profile.id ?? null);
+      // Projetos em modo API key precisam da chave no "Keychain" (aqui, em memória); ela nunca entra no run gravado.
+      if (project.authMode === "api_key" && !secrets.has(project.id)) throw new Error(`O projeto ${project.name} usa API key, mas nenhuma chave está no Keychain. Informe em Segurança → Autenticação ou mude para o login do Claude Code.`);
       const requested = input.options ?? {};
       const options = member
         ? {
@@ -1060,6 +1064,27 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return decision;
     },
     list_sandbox_profiles: async () => sandboxProfiles.map((p) => ({ ...p })),
+    update_project_auth: async ({ projectId, authMode }) => {
+      const project = projects.find((p) => p.id === projectId);
+      if (!project) throw new Error(`Projeto ${projectId} não encontrado`);
+      project.authMode = authMode;
+      audit("você", "config.project", projectId, { authMode });
+      writeSnapshot("auto");
+      return { ...project };
+    },
+    set_project_api_key: async ({ projectId, apiKey }) => {
+      if (!apiKey.trim()) throw new Error("A chave não pode ser vazia");
+      if (!projects.some((p) => p.id === projectId)) throw new Error(`Projeto ${projectId} não encontrado`);
+      secrets.set(projectId, apiKey.trim());
+      audit("você", "secret.set", projectId, { key: "ANTHROPIC_API_KEY", value: "valor não registrado" });
+      return null;
+    },
+    clear_project_api_key: async ({ projectId }) => {
+      secrets.delete(projectId);
+      audit("você", "secret.cleared", projectId, { key: "ANTHROPIC_API_KEY" });
+      return null;
+    },
+    has_project_api_key: async ({ projectId }) => secrets.has(projectId),
     set_project_sandbox: async ({ projectId, profileId }) => {
       const project = projects.find((p) => p.id === projectId);
       if (!project) throw new Error(`Projeto ${projectId} não encontrado`);

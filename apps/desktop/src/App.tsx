@@ -63,6 +63,7 @@ export function App({ transport }: AppProps) {
   const [policyEvents, setPolicyEvents] = useState<AuditEvent[]>([]);
   const [sandboxProfiles, setSandboxProfiles] = useState<SandboxProfile[]>([]);
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [audit, setAudit] = useState<AuditEvent[] | null>(null);
   const [auditVerification, setAuditVerification] = useState<AuditVerification | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
@@ -187,6 +188,15 @@ export function App({ transport }: AppProps) {
       .invoke("list_sandbox_profiles", {})
       .then(setSandboxProfiles)
       .catch(() => {});
+  }, [transport]);
+
+  const refreshAuth = useCallback(() => {
+    const projectId = selectedProjectRef.current?.id;
+    if (!projectId) return;
+    transport
+      .invoke("has_project_api_key", { projectId })
+      .then(setHasApiKey)
+      .catch(() => setHasApiKey(null));
   }, [transport]);
 
   const refreshBudget = useCallback(() => {
@@ -806,6 +816,25 @@ export function App({ transport }: AppProps) {
           onSaveBudget={async (line, input) => {
             await transport.invoke("set_budget_policy", { input: { scope: line.scope, scopeId: line.scopeId, input } });
             refreshBudget();
+          }}
+          hasApiKey={hasApiKey}
+          onRefreshAuth={refreshAuth}
+          onChangeAuthMode={async (authMode) => {
+            if (!selectedProject) return;
+            const updated = await transport.invoke("update_project_auth", { projectId: selectedProject.id, authMode });
+            setProjects((list) => list.map((p) => (p.id === updated.id ? updated : p)));
+            setSelectedProject(updated);
+            refreshAuth();
+          }}
+          onSaveApiKey={async (apiKey) => {
+            if (!selectedProject) return;
+            await transport.invoke("set_project_api_key", { projectId: selectedProject.id, apiKey });
+            refreshAuth();
+          }}
+          onClearApiKey={async () => {
+            if (!selectedProject) return;
+            await transport.invoke("clear_project_api_key", { projectId: selectedProject.id });
+            refreshAuth();
           }}
         />
       )}

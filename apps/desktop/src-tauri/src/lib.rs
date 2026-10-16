@@ -10,6 +10,7 @@ pub mod commands_security;
 pub mod commands_team;
 pub mod protocol;
 pub mod scheduler;
+pub mod secrets;
 pub mod sidecar;
 pub mod store;
 
@@ -55,6 +56,7 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
     let db_path = Store::default_path()?;
     info!(path = %db_path.display(), "abrindo store");
     let store = Arc::new(Store::open(&db_path)?);
+    let secrets: Arc<dyn secrets::SecretStore> = Arc::from(secrets::default_secret_store());
 
     let exe_dir = std::env::current_exe()
         .ok()
@@ -120,11 +122,12 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
         let app = app.clone();
         let store = store.clone();
         let sidecar = sidecar.clone();
+        let secrets = secrets.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(4));
             loop {
                 interval.tick().await;
-                match scheduler::tick(&store, &sidecar).await {
+                match scheduler::tick(&store, &sidecar, secrets.as_ref()).await {
                     Ok(report) if report.changed() => {
                         let _ = app.emit(commands_orchestration::BOARD_CHANGED, &report);
                     }
@@ -139,6 +142,7 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
         store,
         sidecar,
         runtime,
+        secrets,
     });
     Ok(())
 }
@@ -224,6 +228,58 @@ pub fn run() {
             commands::list_approvals,
             commands::get_project_totals,
             commands::read_project_file,
+            commands_config::get_settings,
+            commands_config::set_setting,
+            commands_config::check_environment,
+            commands_config::config_export,
+            commands_config::config_export_json,
+            commands_config::config_import_preview,
+            commands_config::config_import,
+            commands_config::config_backups_list,
+            commands_config::config_backup_preview,
+            commands_config::config_backup_restore,
+            commands_config::config_backup_reveal,
+            commands_team::list_roles,
+            commands_team::create_role,
+            commands_team::update_role,
+            commands_team::delete_role,
+            commands_team::list_team,
+            commands_team::add_team_member,
+            commands_team::update_team_member,
+            commands_team::remove_team_member,
+            commands_team::team_totals,
+            commands_orchestration::list_workflow_templates,
+            commands_orchestration::list_workflows,
+            commands_orchestration::create_workflow,
+            commands_orchestration::create_workflow_from_template,
+            commands_orchestration::update_workflow,
+            commands_orchestration::delete_workflow,
+            commands_orchestration::list_tasks,
+            commands_orchestration::create_task,
+            commands_orchestration::update_task,
+            commands_orchestration::delete_task,
+            commands_orchestration::move_task,
+            commands_orchestration::approve_task,
+            commands_orchestration::return_task,
+            commands_orchestration::list_task_events,
+            commands_orchestration::scheduler_tick,
+            commands_security::list_audit_events,
+            commands_security::verify_audit,
+            commands_security::export_audit,
+            commands_security::list_policy_rules,
+            commands_security::create_policy_rule,
+            commands_security::update_policy_rule,
+            commands_security::set_policy_rule_enabled,
+            commands_security::delete_policy_rule,
+            commands_security::evaluate_policy,
+            commands_security::list_sandbox_profiles,
+            commands_security::set_project_sandbox,
+            commands_security::get_budget_status,
+            commands_security::set_budget_policy,
+            commands_security::update_project_auth,
+            commands_security::set_project_api_key,
+            commands_security::clear_project_api_key,
+            commands_security::has_project_api_key,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");
