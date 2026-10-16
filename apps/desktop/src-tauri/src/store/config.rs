@@ -37,6 +37,9 @@ pub struct ConfigExport {
     pub agent_profiles: Vec<AgentProfile>,
     #[serde(default)]
     pub team_members: Vec<TeamMemberRecord>,
+    /// MCP servers (globais e dos projetos) sem valores de env/headers.
+    #[serde(default)]
+    pub mcp_servers: Vec<super::harness::McpServer>,
 }
 
 /// Linha crua de `team_member` (o export não resolve perfil/cargo, só ids).
@@ -76,6 +79,8 @@ pub struct ImportPreview {
     pub roles: usize,
     #[serde(default)]
     pub team_members: usize,
+    #[serde(default)]
+    pub mcp_servers: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -89,6 +94,8 @@ pub struct ImportResult {
     pub roles_applied: usize,
     #[serde(default)]
     pub team_members_applied: usize,
+    #[serde(default)]
+    pub mcp_servers_applied: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,7 +188,24 @@ impl Store {
             roles: self.all_roles()?,
             agent_profiles: self.all_agent_profiles()?,
             team_members: self.all_team_member_records()?,
+            mcp_servers: self
+                .list_all_mcp_servers()?
+                .iter()
+                .map(|s| s.redacted())
+                .collect(),
         })
+    }
+
+    fn list_all_mcp_servers(&self) -> Result<Vec<super::harness::McpServer>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare(&format!(
+            "{} ORDER BY (project_id IS NOT NULL), name",
+            super::harness::McpServer::SELECT
+        ))?;
+        let rows = stmt
+            .query_map([], super::harness::McpServer::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     fn all_roles(&self) -> Result<Vec<Role>> {
@@ -195,7 +219,7 @@ impl Store {
 
     fn all_agent_profiles(&self) -> Result<Vec<AgentProfile>> {
         let conn = self.conn.lock().expect("store mutex");
-        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at FROM agent_profile ORDER BY created_at")?;
+        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json FROM agent_profile ORDER BY created_at")?;
         let rows = stmt
             .query_map([], AgentProfile::from_row_pub)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -228,6 +252,7 @@ impl Store {
             settings: export.settings.len(),
             roles: export.roles.len(),
             team_members: export.team_members.len(),
+            mcp_servers: export.mcp_servers.len(),
             ..Default::default()
         };
         for incoming in &export.projects {
@@ -480,6 +505,38 @@ impl Store {
                     }
                 }
             }
+            for server in &export.mcp_servers {
+                if let Some(pid) = &server.project_id {
+                    let exists: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM project WHERE id = ?1",
+                        params![pid],
+                        |r| r.get(0),
+                    )?;
+                    if exists == 0 {
+                        continue;
+                    }
+                }
+                let existing: Option<String> = tx
+                    .query_row(
+                        "SELECT config_json FROM mcp_server WHERE id = ?1",
+                        params![server.id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let config = match existing
+                    .and_then(|c| serde_json::from_str::<crate::protocol::McpServerConfig>(&c).ok())
+                {
+                    Some(current) => merge_secrets(&server.config, &current),
+                    None => server.config.clone(),
+                };
+                tx.execute(
+                    "INSERT INTO mcp_server (id, project_id, name, transport, config_json, enabled, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, name = excluded.name, transport = excluded.transport, config_json = excluded.config_json, enabled = excluded.enabled, updated_at = excluded.updated_at",
+                    params![server.id, server.project_id, server.name, server.transport, serde_json::to_string(&config)?, server.enabled as i64, server.created_at, now()],
+                )?;
+                result.mcp_servers_applied += 1;
+            }
             tx.commit()?;
         }
         Ok(result)
@@ -643,6 +700,48 @@ impl AuthMode {
     }
 }
 
+/// Mantém os valores de env/headers já guardados quando o arquivo importado vem com eles em branco.
+fn merge_secrets(
+    incoming: &crate::protocol::McpServerConfig,
+    current: &crate::protocol::McpServerConfig,
+) -> crate::protocol::McpServerConfig {
+    use crate::protocol::McpServerConfig as C;
+    let fill = |inc: &Option<std::collections::BTreeMap<String, String>>,
+                cur: &Option<std::collections::BTreeMap<String, String>>| {
+        inc.as_ref().map(|m| {
+            m.iter()
+                .map(|(k, v)| {
+                    let value = if v.is_empty() {
+                        cur.as_ref()
+                            .and_then(|c| c.get(k))
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), value)
+                })
+                .collect()
+        })
+    };
+    match (incoming, current) {
+        (C::Stdio { command, args, env }, C::Stdio { env: cur, .. }) => C::Stdio {
+            command: command.clone(),
+            args: args.clone(),
+            env: fill(env, cur),
+        },
+        (C::Sse { url, headers }, C::Sse { headers: cur, .. }) => C::Sse {
+            url: url.clone(),
+            headers: fill(headers, cur),
+        },
+        (C::Http { url, headers }, C::Http { headers: cur, .. }) => C::Http {
+            url: url.clone(),
+            headers: fill(headers, cur),
+        },
+        (other, _) => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +889,7 @@ mod tests {
             roles: vec![],
             agent_profiles: vec![],
             team_members: vec![],
+            mcp_servers: vec![],
         };
         assert!(s.import_config(&export, ImportMode::Merge).is_err());
     }

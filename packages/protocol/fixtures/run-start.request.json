@@ -25,6 +25,24 @@
             "Bash"
           ]
         }
+      },
+      "mcpServers": {
+        "docs": {
+          "type": "stdio",
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "/Users/dev/Docs"
+          ]
+        },
+        "jira": {
+          "type": "http",
+          "url": "https://mcp.example.com/jira",
+          "headers": {
+            "Authorization": "Bearer •••"
+          }
+        }
       }
     }
   }

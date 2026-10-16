@@ -12,6 +12,7 @@ import { createSdkMcpServer, listSessions, query, renameSession, tagSession, too
 import { RpcServer } from "./rpc.js";
 import { RunManager, type QueryFn } from "./runner.js";
 import { toSessionSummary } from "./sessions.js";
+import { checkMcpServer, defaultMcpDeps } from "./mcpCheck.js";
 import { createOctopusToolsFactory } from "./octopusTools.js";
 
 const require = createRequire(import.meta.url);
@@ -87,6 +88,11 @@ server.register("hook.decide", async ({ runId, hookId, decision }) => ({
 server.register("memory.result", async ({ runId, callId, result }) => ({
   applied: runs.resolveMemoryCall(runId, callId, result),
 }));
+
+server.register("mcp.check", async ({ name, config }) => {
+  log("info", `testando MCP server ${name} (${config.type})`);
+  return checkMcpServer(config, await defaultMcpDeps());
+});
 
 server.register("sessions.list", async ({ cwd }) => {
   const sessions = await listSessions({ dir: cwd });

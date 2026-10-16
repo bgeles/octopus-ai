@@ -214,6 +214,10 @@ impl Sidecar {
         self.request("memory.result", params).await
     }
 
+    pub async fn mcp_check(&self, params: McpCheckParams) -> Result<McpCheckResult> {
+        self.request("mcp.check", params).await
+    }
+
     pub async fn list_sessions(&self, cwd: &str) -> Result<SessionsListResult> {
         self.request("sessions.list", SessionsListParams { cwd: cwd.into() })
             .await

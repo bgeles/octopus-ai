@@ -90,6 +90,14 @@ export const SandboxSettingsSchema = z.object({
 });
 export type SandboxSettings = z.infer<typeof SandboxSettingsSchema>;
 
+/** MCP server externo (stdio, SSE ou HTTP), como o `McpServerConfig` do SDK sem a variante in-process. */
+export const McpServerConfigSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
+]);
+export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
+
 /** Memória do projeto: captura observações por hooks (PostToolUse, Stop, SubagentStop, SessionEnd, Pre/PostCompact). */
 export const MemoryOptionsSchema = z.object({
   capture: z.boolean().default(true),
@@ -127,6 +135,8 @@ export const RunOptionsSchema = z.object({
   sandbox: SandboxSettingsSchema.optional(),
   /** Captura de memória por hooks; o core sanitiza e guarda as observações. */
   memory: MemoryOptionsSchema.optional(),
+  /** MCP servers externos por nome (o sidecar acrescenta o `octopus` in-process). */
+  mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
 });
 export type RunOptions = z.infer<typeof RunOptionsSchema>;
 
@@ -235,6 +245,20 @@ export const MemoryResultParamsSchema = z.object({
 export type MemoryResultParams = z.infer<typeof MemoryResultParamsSchema>;
 export const MemoryResultResultSchema = z.object({ applied: z.boolean() });
 
+/** Teste de conexão de um MCP server: handshake + lista de tools. */
+export const McpCheckParamsSchema = z.object({ name: z.string(), config: McpServerConfigSchema });
+export type McpCheckParams = z.infer<typeof McpCheckParamsSchema>;
+export const McpToolInfoSchema = z.object({ name: z.string(), description: z.string().nullable().default(null) });
+export type McpToolInfo = z.infer<typeof McpToolInfoSchema>;
+export const McpCheckResultSchema = z.object({
+  ok: z.boolean(),
+  tools: z.array(McpToolInfoSchema).default([]),
+  error: z.string().nullable().default(null),
+  latencyMs: z.number().int().nonnegative().nullable().default(null),
+  serverVersion: z.string().nullable().default(null),
+});
+export type McpCheckResult = z.infer<typeof McpCheckResultSchema>;
+
 export const RequestMethodSchema = z.enum([
   "runtime.hello",
   "run.start",
@@ -245,6 +269,7 @@ export const RequestMethodSchema = z.enum([
   "sessions.tag",
   "hook.decide",
   "memory.result",
+  "mcp.check",
 ]);
 export type RequestMethod = z.infer<typeof RequestMethodSchema>;
 
@@ -258,6 +283,7 @@ export const REQUEST_SCHEMAS = {
   "sessions.tag": { params: SessionsTagParamsSchema, result: SessionMutationResultSchema },
   "hook.decide": { params: HookDecideParamsSchema, result: HookDecideResultSchema },
   "memory.result": { params: MemoryResultParamsSchema, result: MemoryResultResultSchema },
+  "mcp.check": { params: McpCheckParamsSchema, result: McpCheckResultSchema },
 } as const;
 
 // ---------------------------------------------------------------------------

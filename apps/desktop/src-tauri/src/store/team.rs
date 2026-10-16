@@ -113,10 +113,13 @@ pub struct AgentProfile {
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
     pub created_at: String,
+    /// MCP servers escolhidos para este membro (`None` = todos os ativos do escopo).
+    #[serde(default)]
+    pub mcp_server_ids: Option<Vec<String>>,
 }
 
 impl AgentProfile {
-    const SELECT: &'static str = "SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at FROM agent_profile";
+    const SELECT: &'static str = "SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json FROM agent_profile";
 
     pub(crate) fn from_row_pub(row: &Row<'_>) -> rusqlite::Result<Self> {
         Self::from_row(row)
@@ -138,6 +141,7 @@ impl AgentProfile {
             max_turns: row.get::<_, Option<i64>>(9)?.map(|n| n as u32),
             max_budget_usd: row.get(10)?,
             created_at: row.get(11)?,
+            mcp_server_ids: parse_json_list(row.get::<_, Option<String>>(12)?),
         })
     }
 }
@@ -175,6 +179,9 @@ pub struct TeamMemberInput {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub max_budget_usd: Option<f64>,
+    /// MCP servers do membro (`None` = todos os ativos).
+    #[serde(default)]
+    pub mcp_server_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -430,8 +437,8 @@ impl Store {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     profile_id,
                     project_id,
@@ -444,7 +451,8 @@ impl Store {
                     to_json_list(&input.allowed_tools),
                     input.max_turns.map(|n| n as i64),
                     input.max_budget_usd,
-                    ts
+                    ts,
+                    to_json_list(&input.mcp_server_ids)
                 ],
             )?;
             let position: i64 = tx.query_row(
@@ -490,7 +498,7 @@ impl Store {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
             tx.execute(
-                "UPDATE agent_profile SET role_id = ?2, name = ?3, avatar_seed = ?4, instructions_md = ?5, model = ?6, permission_mode = ?7, allowed_tools_json = ?8, max_turns = ?9, max_budget_usd = ?10 WHERE id = ?1",
+                "UPDATE agent_profile SET role_id = ?2, name = ?3, avatar_seed = ?4, instructions_md = ?5, model = ?6, permission_mode = ?7, allowed_tools_json = ?8, max_turns = ?9, max_budget_usd = ?10, mcp_server_ids_json = ?11 WHERE id = ?1",
                 params![
                     agent_profile_id,
                     input.role_id,
@@ -501,7 +509,8 @@ impl Store {
                     permission_str(&input.permission_mode),
                     to_json_list(&input.allowed_tools),
                     input.max_turns.map(|n| n as i64),
-                    input.max_budget_usd
+                    input.max_budget_usd,
+                    to_json_list(&input.mcp_server_ids)
                 ],
             )?;
             tx.execute(

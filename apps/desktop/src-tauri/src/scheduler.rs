@@ -146,6 +146,10 @@ pub async fn tick(
                 if options.setting_sources.is_none() {
                     options.setting_sources = store.project_setting_sources(&project.id)?;
                 }
+                if options.mcp_servers.is_none() {
+                    options.mcp_servers =
+                        store.mcp_servers_for_run(&project.id, agent_id.as_deref())?;
+                }
             }
             let options = match crate::secrets::options_for_sidecar(&project, &options, secrets) {
                 Ok(o) => o,

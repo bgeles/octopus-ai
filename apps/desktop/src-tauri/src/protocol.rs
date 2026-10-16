@@ -186,6 +186,93 @@ pub struct RunOptions {
     pub sandbox: Option<SandboxSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<std::collections::BTreeMap<String, McpServerConfig>>,
+}
+
+/// MCP server externo (stdio, SSE ou HTTP).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum McpServerConfig {
+    Stdio {
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env: Option<std::collections::BTreeMap<String, String>>,
+    },
+    Sse {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers: Option<std::collections::BTreeMap<String, String>>,
+    },
+    Http {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers: Option<std::collections::BTreeMap<String, String>>,
+    },
+}
+
+impl McpServerConfig {
+    pub fn transport(&self) -> &'static str {
+        match self {
+            McpServerConfig::Stdio { .. } => "stdio",
+            McpServerConfig::Sse { .. } => "sse",
+            McpServerConfig::Http { .. } => "http",
+        }
+    }
+
+    /// Cópia sem valores de `env`/`headers` (para export/backup e logs).
+    pub fn redacted(&self) -> McpServerConfig {
+        let blank = |m: &Option<std::collections::BTreeMap<String, String>>| {
+            m.as_ref()
+                .map(|m| m.keys().map(|k| (k.clone(), String::new())).collect())
+        };
+        match self {
+            McpServerConfig::Stdio { command, args, env } => McpServerConfig::Stdio {
+                command: command.clone(),
+                args: args.clone(),
+                env: blank(env),
+            },
+            McpServerConfig::Sse { url, headers } => McpServerConfig::Sse {
+                url: url.clone(),
+                headers: blank(headers),
+            },
+            McpServerConfig::Http { url, headers } => McpServerConfig::Http {
+                url: url.clone(),
+                headers: blank(headers),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCheckParams {
+    pub name: String,
+    pub config: McpServerConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCheckResult {
+    pub ok: bool,
+    #[serde(default)]
+    pub tools: Vec<McpToolInfo>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub latency_ms: Option<u64>,
+    #[serde(default)]
+    pub server_version: Option<String>,
 }
 
 /// Captura de memória por hooks do SDK.
@@ -907,6 +994,35 @@ mod tests {
         assert!(opts.memory.unwrap().capture);
         let opts: RunOptions = serde_json::from_value(serde_json::json!({"memory": {}})).unwrap();
         assert!(opts.memory.unwrap().capture);
+    }
+
+    #[test]
+    fn mcp_fixtures_roundtrip() {
+        let raw = read_fixture("mcp-check.request.json");
+        let params: McpCheckParams = serde_json::from_value(raw["params"].clone()).unwrap();
+        assert_eq!(params.name, "docs");
+        assert_eq!(params.config.transport(), "stdio");
+        assert_eq!(serde_json::to_value(&params).unwrap(), raw["params"]);
+        let redacted = params.config.redacted();
+        if let McpServerConfig::Stdio { env, .. } = &redacted {
+            assert_eq!(
+                env.as_ref().unwrap().get("LOG_LEVEL").map(String::as_str),
+                Some("")
+            );
+        } else {
+            panic!("stdio esperado");
+        }
+        let start = read_fixture("run-start.request.json");
+        let p: RunStartParams = serde_json::from_value(start["params"].clone()).unwrap();
+        let servers = p.options.mcp_servers.unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers["jira"].transport(), "http");
+        let result: McpCheckResult = serde_json::from_value(
+            serde_json::json!({"ok": true, "tools": [{"name": "read_file"}], "latencyMs": 120}),
+        )
+        .unwrap();
+        assert_eq!(result.tools[0].name, "read_file");
+        assert_eq!(result.latency_ms, Some(120));
     }
 
     #[test]

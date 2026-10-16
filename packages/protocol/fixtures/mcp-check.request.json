@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "method": "mcp.check",
+  "params": {
+    "name": "docs",
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/dev/Docs"
+      ],
+      "env": {
+        "LOG_LEVEL": "warn"
+      }
+    }
+  }
+}

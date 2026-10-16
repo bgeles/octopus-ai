@@ -56,6 +56,9 @@ rl.on("line", (line) => {
     case "sessions.tag":
       write({ jsonrpc: "2.0", id: req.id, result: { ok: true } });
       break;
+    case "mcp.check":
+      write({ jsonrpc: "2.0", id: req.id, result: { ok: req.params.config.type !== "sse", tools: req.params.config.type !== "sse" ? [{ name: "read_file", description: "Lê um arquivo" }, { name: "list_dir", description: null }] : [], error: req.params.config.type === "sse" ? "fake: sse indisponível" : null, latencyMs: 12, serverVersion: "fake 1.0" } });
+      break;
     case "hook.decide":
       write({ jsonrpc: "2.0", id: req.id, result: { applied: true } });
       break;

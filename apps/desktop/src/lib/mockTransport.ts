@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -219,6 +219,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       maxTurns: input.maxTurns ?? null,
       maxBudgetUsd: input.maxBudgetUsd ?? null,
       createdAt: existing?.profile.createdAt ?? new Date().toISOString(),
+      mcpServerIds: input.mcpServerIds ?? null,
     };
     return {
       id: existing?.id ?? `member_${memberCounter}`,
@@ -348,6 +349,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const contextEvents: ContextEvent[] = [];
   const handoffs: MemoryHandoff[] = [];
   const pins: ContextPin[] = [];
+  const mcpServers: McpServer[] = [];
+  const describeMcp = (c: McpServer["config"]) => (c.type === "stdio" ? c.command : c.url);
   const normMock = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   /** Brief do run, como o core: handoff pendente da task (claim único) + páginas que casam com o pedido. */
   const buildBriefMock = (projectId: string, taskId: string | null, prompt: string, runId: string): { text: string; items: string[] } | null => {
@@ -825,6 +828,11 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           }
         : requested;
       if (options.agents && Object.keys(options.agents).length === 0) delete options.agents;
+      {
+        const chosen = member?.profile.mcpServerIds ?? null;
+        const active = mcpServers.filter((s) => s.enabled && (s.projectId === null || s.projectId === project.id) && (!chosen || chosen.includes(s.id)));
+        if (active.length) options.mcpServers = Object.fromEntries(active.map((s) => [s.name, s.config]));
+      }
       const profile = sandboxProfiles.find((sp) => sp.id === (project.sandboxProfileId ?? "sandbox_dev"));
       if (profile) options.sandbox = profile.settings;
       options.policyHooks = true;
@@ -1325,6 +1333,51 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       pins.splice(index, 1);
       audit("você", "context.pin.removed", projectId, { pinId });
       return true;
+    },
+    list_mcp_servers: async ({ projectId }) => mcpServers.filter((s) => s.projectId === null || (projectId && s.projectId === projectId)).sort((a, b) => Number(a.projectId !== null) - Number(b.projectId !== null) || a.name.localeCompare(b.name)).map((s) => ({ ...s })),
+    save_mcp_server: async ({ input }) => {
+      const name = input.name.trim();
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) throw new Error("Nome inválido: use letras, números, hífen ou sublinhado (até 64)");
+      if (name === "octopus") throw new Error('O nome "octopus" é do servidor embutido');
+      if (input.config.type !== "stdio" && !/^https?:\/\//.test(input.config.url)) throw new Error("A URL precisa começar com http:// ou https://");
+      const clash = mcpServers.find((s) => s.name === name && (s.projectId ?? null) === (input.projectId ?? null) && s.id !== input.id);
+      if (clash) throw new Error(`Já existe um MCP server chamado ${name} neste escopo`);
+      const ts = new Date().toISOString();
+      let server = input.id ? mcpServers.find((s) => s.id === input.id) : undefined;
+      if (server) {
+        Object.assign(server, { name, projectId: input.projectId ?? null, transport: input.config.type, config: input.config, enabled: input.enabled ?? server.enabled, lastHealth: null, updatedAt: ts });
+      } else {
+        server = { id: `mcp_${Math.random().toString(36).slice(2, 10)}`, projectId: input.projectId ?? null, name, transport: input.config.type, config: input.config, enabled: input.enabled ?? true, lastHealth: null, createdAt: ts, updatedAt: ts };
+        mcpServers.push(server);
+      }
+      audit("você", input.id ? "harness.mcp.updated" : "harness.mcp.created", server.projectId, { serverId: server.id, name, transport: server.transport, config: describeMcp(server.config) });
+      writeSnapshot("auto");
+      return { ...server };
+    },
+    set_mcp_server_enabled: async ({ serverId, enabled }) => {
+      const server = mcpServers.find((s) => s.id === serverId);
+      if (!server) throw new Error(`MCP server ${serverId} não encontrado`);
+      server.enabled = enabled;
+      server.updatedAt = new Date().toISOString();
+      audit("você", "harness.mcp.enabled", server.projectId, { serverId, name: server.name, enabled });
+      return { ...server };
+    },
+    delete_mcp_server: async ({ serverId }) => {
+      const index = mcpServers.findIndex((s) => s.id === serverId);
+      if (index === -1) return false;
+      const [server] = mcpServers.splice(index, 1);
+      audit("você", "harness.mcp.deleted", server!.projectId, { serverId, name: server!.name });
+      return true;
+    },
+    check_mcp_server: async ({ serverId }) => {
+      const server = mcpServers.find((s) => s.id === serverId);
+      if (!server) throw new Error(`MCP server ${serverId} não encontrado`);
+      // Mock: falha quando o alvo contém "fail"; senão devolve duas tools.
+      const target = describeMcp(server.config);
+      const ok = !target.includes("fail");
+      server.lastHealth = ok ? { ok: true, tools: [{ name: "read_file", description: "Lê um arquivo" }, { name: "list_dir", description: null }], error: null, latencyMs: 42, serverVersion: "mock 1.0", checkedAt: new Date().toISOString() } : { ok: false, tools: [], error: "ECONNREFUSED", latencyMs: 5, serverVersion: null, checkedAt: new Date().toISOString() };
+      audit("você", "harness.mcp.checked", server.projectId, { serverId, name: server.name, ok, tools: server.lastHealth.tools.length, error: server.lastHealth.error });
+      return { ...server };
     },
     list_memory_handoffs: async ({ projectId }) => handoffs.filter((h) => h.projectId === projectId).sort((a, b) => Number(Boolean(a.consumedAt)) - Number(Boolean(b.consumedAt)) || b.createdAt.localeCompare(a.createdAt)).map((h) => ({ ...h })),
     rebuild_memory_index: async ({ projectId }) => {

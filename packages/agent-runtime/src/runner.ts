@@ -216,6 +216,7 @@ export class RunManager {
     if (o.env) options.env = { ...process.env, ...o.env };
     if (o.agents && Object.keys(o.agents).length > 0) options.agents = o.agents;
     if (o.sandbox) options.sandbox = o.sandbox;
+    if (o.mcpServers && Object.keys(o.mcpServers).length > 0) options.mcpServers = { ...o.mcpServers };
     if (o.policyHooks && this.emitHook) {
       options.hooks = { PreToolUse: [{ hooks: [(input, toolUseId) => this.preToolUse(run, input, toolUseId)] }] };
     }
@@ -252,7 +253,7 @@ export class RunManager {
         task: ctx ? { ctx, onUpdate: (status, note) => this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note }) } : undefined,
         memory: wantsMemoryTools ? { call: (op, args) => this.memoryCall(run, op, args) } : undefined,
       });
-      options.mcpServers = { octopus: server as never };
+      options.mcpServers = { ...(options.mcpServers ?? {}), octopus: server as never };
       const extra = [...(ctx ? [TASK_UPDATE_TOOL] : []), ...(wantsMemoryTools ? MEMORY_TOOLS : [])];
       if (options.allowedTools) {
         const allowed = options.allowedTools;

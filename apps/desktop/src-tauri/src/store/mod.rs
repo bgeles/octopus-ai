@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod harness;
 pub mod memory;
 pub mod models;
 pub mod orchestration;
@@ -56,6 +57,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0012_context_pin",
         include_str!("migrations/0012_context_pin.sql"),
+    ),
+    (
+        "0013_mcp_servers",
+        include_str!("migrations/0013_mcp_servers.sql"),
     ),
 ];
 
@@ -720,11 +725,12 @@ mod tests {
                 "0010_memory_handoff".to_string(),
                 "0011_run_kind".to_string(),
                 "0012_context_pin".to_string(),
+                "0013_mcp_servers".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 12);
+        assert_eq!(s.applied_migrations().unwrap().len(), 13);
     }
 
     #[test]
