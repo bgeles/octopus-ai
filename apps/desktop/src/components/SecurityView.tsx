@@ -1,7 +1,8 @@
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { isTauri } from "../lib/transport";
-import type { AuditEvent, AuditVerification, Project } from "../lib/types";
+import type { AuditEvent, AuditVerification, PolicyDecision, PolicyRule, PolicyRuleInput, Project } from "../lib/types";
+import { PolicyTab } from "./PolicyTab";
 import { formatRelative } from "./SessionsView";
 
 export type SecurityTab = "policy" | "budgets" | "audit";
@@ -17,6 +18,13 @@ type SecurityViewProps = {
   onExport: (destination: string | null) => Promise<string>;
   /** Abas que ainda não existem ficam desabilitadas (chegam nas próximas iterações). */
   availableTabs?: SecurityTab[];
+  rules: PolicyRule[] | null;
+  policyEvents: AuditEvent[];
+  onRefreshPolicy: () => void;
+  onToggleRule: (rule: PolicyRule, enabled: boolean) => Promise<void>;
+  onCreateRule: (scope: "global" | "project", input: PolicyRuleInput) => Promise<void>;
+  onDeleteRule: (rule: PolicyRule) => Promise<void>;
+  onSimulate: (toolName: string, input: unknown) => Promise<PolicyDecision>;
 };
 
 const FILTERS: { id: string | null; label: string }[] = [
@@ -28,7 +36,7 @@ const FILTERS: { id: string | null; label: string }[] = [
   { id: "config.", label: "Configuração" },
 ];
 
-export function SecurityView({ project, tab, onChangeTab, audit, verification, onRefreshAudit, onVerify, onExport, availableTabs = ["audit"] }: SecurityViewProps) {
+export function SecurityView({ project, tab, onChangeTab, audit, verification, onRefreshAudit, onVerify, onExport, availableTabs = ["policy", "audit"], rules, policyEvents, onRefreshPolicy, onToggleRule, onCreateRule, onDeleteRule, onSimulate }: SecurityViewProps) {
   const [filter, setFilter] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -40,6 +48,7 @@ export function SecurityView({ project, tab, onChangeTab, audit, verification, o
 
   useEffect(() => {
     if (tab === "audit" && verification === null) void onVerify();
+    if (tab === "policy") onRefreshPolicy();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -94,6 +103,8 @@ export function SecurityView({ project, tab, onChangeTab, audit, verification, o
           })}
         </div>
       </div>
+
+      {tab === "policy" && <PolicyTab project={project} rules={rules} lastBlocks={policyEvents} onToggle={onToggleRule} onCreate={onCreateRule} onDelete={onDeleteRule} onSimulate={onSimulate} />}
 
       {tab === "audit" && (
         <>

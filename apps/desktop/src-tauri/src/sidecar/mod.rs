@@ -28,6 +28,8 @@ pub use command::SidecarCommand;
 #[derive(Debug, Clone)]
 pub enum SidecarNotification {
     RunEvent(RunEventNotification),
+    /// Hook PreToolUse bloqueante: o core precisa responder com `decide_hook`.
+    Hook(RunHookNotification),
     Log(RuntimeLog),
     /// O processo terminou (código de saída, se houver).
     Exited(Option<i32>),
@@ -202,6 +204,10 @@ impl Sidecar {
         self.request("permission.decide", params).await
     }
 
+    pub async fn decide_hook(&self, params: HookDecideParams) -> Result<HookDecideResult> {
+        self.request("hook.decide", params).await
+    }
+
     pub async fn list_sessions(&self, cwd: &str) -> Result<SessionsListResult> {
         self.request("sessions.list", SessionsListParams { cwd: cwd.into() })
             .await
@@ -275,6 +281,14 @@ async fn dispatch_line(
                         let _ = notify_tx.send(SidecarNotification::RunEvent(n)).await;
                     }
                     Err(e) => error!("run.event inválido: {e}"),
+                }
+            }
+            "run.hook" => {
+                match serde_json::from_value::<RunHookNotification>(params.unwrap_or(Value::Null)) {
+                    Ok(n) => {
+                        let _ = notify_tx.send(SidecarNotification::Hook(n)).await;
+                    }
+                    Err(e) => error!("run.hook inválido: {e}"),
                 }
             }
             "runtime.log" => {
@@ -374,6 +388,7 @@ mod tests {
                     }
                 }
                 SidecarNotification::Log(_) => saw_log = true,
+                SidecarNotification::Hook(_) => {}
                 SidecarNotification::Exited(_) => panic!("sidecar saiu cedo demais"),
             }
         }

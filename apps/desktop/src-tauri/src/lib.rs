@@ -76,6 +76,7 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
     {
         let app = app.clone();
         let store = store.clone();
+        let sidecar = sidecar.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(n) = notifications.recv().await {
                 match n {
@@ -87,6 +88,19 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         }
                         if let Err(e) = app.emit(RUN_EVENT, &ev) {
                             warn!("falha emitindo {RUN_EVENT}: {e}");
+                        }
+                    }
+                    SidecarNotification::Hook(hook) => {
+                        let decision = decide_hook(&store, &hook);
+                        if let Err(e) = sidecar
+                            .decide_hook(protocol::HookDecideParams {
+                                run_id: hook.run_id.clone(),
+                                hook_id: hook.hook_id.clone(),
+                                decision,
+                            })
+                            .await
+                        {
+                            warn!("hook.decide falhou para {}: {e}", hook.hook_id);
                         }
                     }
                     SidecarNotification::Log(log) => {
@@ -127,6 +141,53 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
         runtime,
     });
     Ok(())
+}
+
+/// Avalia a política do projeto do run para um hook PreToolUse e registra na auditoria.
+fn decide_hook(store: &Store, hook: &protocol::RunHookNotification) -> protocol::HookDecision {
+    let project = store
+        .get_run(&hook.run_id)
+        .ok()
+        .flatten()
+        .and_then(|run| store.get_project(&run.project_id).ok().flatten());
+    let Some(project) = project else {
+        warn!("hook {} sem projeto conhecido; passando", hook.hook_id);
+        return store::policy::PolicyDecision::pass().to_hook_decision();
+    };
+    match store.evaluate_policy(
+        &project.id,
+        Path::new(&project.path),
+        &hook.tool_name,
+        &hook.input,
+    ) {
+        Ok(decision) => {
+            if decision.behavior != "pass" {
+                if let Err(e) = store.audit(
+                    "política",
+                    &format!("policy.{}", decision.behavior),
+                    Some(&project.id),
+                    serde_json::json!({
+                        "runId": hook.run_id,
+                        "tool": hook.tool_name,
+                        "input": hook.input,
+                        "ruleId": decision.rule_id,
+                        "reason": decision.reason,
+                    }),
+                ) {
+                    warn!("auditoria da política falhou: {e}");
+                }
+            }
+            decision.to_hook_decision()
+        }
+        Err(e) => {
+            warn!("avaliação de política falhou ({e}); pedindo aprovação");
+            protocol::HookDecision {
+                behavior: "ask".into(),
+                reason: Some("Falha ao avaliar a política; confirme manualmente".into()),
+                updated_input: None,
+            }
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

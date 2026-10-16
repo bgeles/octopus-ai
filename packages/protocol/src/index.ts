@@ -61,6 +61,35 @@ export const TaskContextSchema = z.object({
 });
 export type TaskContext = z.infer<typeof TaskContextSchema>;
 
+/** Subconjunto do `SandboxSettings` do SDK que o Octopus controla (perfis de sandbox). */
+export const SandboxSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  failIfUnavailable: z.boolean().optional(),
+  allowUnsandboxedCommands: z.boolean().optional(),
+  autoAllowBashIfSandboxed: z.boolean().optional(),
+  network: z
+    .object({
+      allowedDomains: z.array(z.string()).optional(),
+      deniedDomains: z.array(z.string()).optional(),
+      strictAllowlist: z.boolean().optional(),
+    })
+    .optional(),
+  filesystem: z
+    .object({
+      allowWrite: z.array(z.string()).optional(),
+      denyWrite: z.array(z.string()).optional(),
+      denyRead: z.array(z.string()).optional(),
+      allowRead: z.array(z.string()).optional(),
+    })
+    .optional(),
+  credentials: z
+    .object({
+      envVars: z.array(z.object({ name: z.string(), mode: z.enum(["deny", "mask"]), injectHosts: z.array(z.string()).optional() })).optional(),
+    })
+    .optional(),
+});
+export type SandboxSettings = z.infer<typeof SandboxSettingsSchema>;
+
 export const RunOptionsSchema = z.object({
   model: z.string().optional(),
   permissionMode: PermissionModeSchema.optional(),
@@ -78,6 +107,10 @@ export const RunOptionsSchema = z.object({
   agents: z.record(z.string(), AgentDefinitionSchema).optional(),
   /** Run que executa uma task do board: o sidecar expõe a tool MCP `task_update` ao agente. */
   taskContext: TaskContextSchema.optional(),
+  /** Encaminha PreToolUse ao core (`run.hook` → `hook.decide`) para o motor de política em Rust. */
+  policyHooks: z.boolean().optional(),
+  /** Perfil de sandbox traduzido para `options.sandbox` do SDK. */
+  sandbox: SandboxSettingsSchema.optional(),
 });
 export type RunOptions = z.infer<typeof RunOptionsSchema>;
 
@@ -149,6 +182,23 @@ export type SessionsTagParams = z.infer<typeof SessionsTagParamsSchema>;
 
 export const SessionMutationResultSchema = z.object({ ok: z.literal(true) });
 
+/** Decisão do core para um hook PreToolUse (vira `hookSpecificOutput.permissionDecision` no SDK). */
+export const HookDecisionSchema = z.object({
+  /** `pass` = nenhuma regra opinou: segue o fluxo normal de permissões do SDK. */
+  behavior: z.enum(["allow", "deny", "ask", "pass"]),
+  reason: z.string().optional(),
+  updatedInput: z.record(z.string(), z.unknown()).optional(),
+});
+export type HookDecision = z.infer<typeof HookDecisionSchema>;
+
+export const HookDecideParamsSchema = z.object({
+  runId: z.string(),
+  hookId: z.string(),
+  decision: HookDecisionSchema,
+});
+export type HookDecideParams = z.infer<typeof HookDecideParamsSchema>;
+export const HookDecideResultSchema = z.object({ applied: z.boolean() });
+
 export const RequestMethodSchema = z.enum([
   "runtime.hello",
   "run.start",
@@ -157,6 +207,7 @@ export const RequestMethodSchema = z.enum([
   "sessions.list",
   "sessions.rename",
   "sessions.tag",
+  "hook.decide",
 ]);
 export type RequestMethod = z.infer<typeof RequestMethodSchema>;
 
@@ -168,6 +219,7 @@ export const REQUEST_SCHEMAS = {
   "sessions.list": { params: SessionsListParamsSchema, result: SessionsListResultSchema },
   "sessions.rename": { params: SessionsRenameParamsSchema, result: SessionMutationResultSchema },
   "sessions.tag": { params: SessionsTagParamsSchema, result: SessionMutationResultSchema },
+  "hook.decide": { params: HookDecideParamsSchema, result: HookDecideResultSchema },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -262,12 +314,26 @@ export const RuntimeLogSchema = z.object({
   message: z.string(),
 });
 
-export const NotificationMethodSchema = z.enum(["run.event", "runtime.log"]);
+/** Hook PreToolUse bloqueante: o sidecar espera `hook.decide` do core (com timeout → `ask`). */
+export const RunHookNotificationSchema = z.object({
+  runId: z.string(),
+  hookId: z.string(),
+  event: z.literal("PreToolUse"),
+  toolName: z.string(),
+  input: z.unknown(),
+  toolUseId: z.string().nullable().default(null),
+  /** Mensagens de subagente trazem o id da chamada Agent pai. */
+  parentToolUseId: z.string().nullable().default(null),
+});
+export type RunHookNotification = z.infer<typeof RunHookNotificationSchema>;
+
+export const NotificationMethodSchema = z.enum(["run.event", "runtime.log", "run.hook"]);
 export type NotificationMethod = z.infer<typeof NotificationMethodSchema>;
 
 export const NOTIFICATION_SCHEMAS = {
   "run.event": RunEventNotificationSchema,
   "runtime.log": RuntimeLogSchema,
+  "run.hook": RunHookNotificationSchema,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -329,6 +395,7 @@ export const JsonRpcErrorCode = {
   RunNotFound: -32001,
   RunAlreadyExists: -32002,
   PermissionRequestNotFound: -32003,
+  HookNotFound: -32004,
 } as const;
 
 // ---------------------------------------------------------------------------

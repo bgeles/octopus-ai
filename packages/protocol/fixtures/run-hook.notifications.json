@@ -1,0 +1,17 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "run.hook",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "hookId": "hook_01",
+      "event": "PreToolUse",
+      "toolName": "Bash",
+      "input": {
+        "command": "rm -rf /tmp/x"
+      },
+      "toolUseId": "toolu_09",
+      "parentToolUseId": null
+    }
+  }
+]

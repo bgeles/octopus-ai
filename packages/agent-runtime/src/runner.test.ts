@@ -1,7 +1,8 @@
 import type { RunEvent } from "@octopus/protocol";
 import { describe, expect, it } from "vitest";
 import type { SdkMessageLike } from "./events.js";
-import { RunManager, type QueryFn, type QueryOptionsLike } from "./runner.js";
+import { RunManager, type HookCallbackLike, type QueryFn, type QueryOptionsLike } from "./runner.js";
+import type { RunHookNotification } from "@octopus/protocol";
 
 type Captured = { runId: string; event: RunEvent };
 
@@ -101,6 +102,65 @@ describe("RunManager", () => {
     expect(seen?.allowedTools).toEqual(["Read", "mcp__octopus__task_update"]);
     expect(events.map((e) => e.event.type)).toEqual(["task_update", "result"]);
     expect(events[0]?.event).toMatchObject({ type: "task_update", taskId: "task_1", status: "review", note: "ok" });
+  });
+
+  it("com policyHooks, PreToolUse espera o core e traduz deny/ask/pass; o motivo do ask vai para o permission_request", async () => {
+    const { events, emit } = collector();
+    const hooks: RunHookNotification[] = [];
+    let seen: QueryOptionsLike | undefined;
+    let canUseTool: QueryOptionsLike["canUseTool"] | undefined;
+    const gate = (() => {
+      let release!: () => void;
+      const promise = new Promise<void>((r) => (release = r));
+      return { promise, release };
+    })();
+    const gated: QueryFn = ({ options }) => {
+      seen = options;
+      canUseTool = options.canUseTool;
+      return {
+        async *[Symbol.asyncIterator]() {
+          await gate.promise;
+          yield { type: "result", subtype: "success", session_id: "s" };
+        },
+      };
+    };
+    const manager = new RunManager(gated, emit, () => {}, null, (h) => hooks.push(h), 50);
+    manager.start({ ...baseParams, options: { policyHooks: true, sandbox: { enabled: true } } });
+    expect(seen?.sandbox).toEqual({ enabled: true });
+    const hook = seen?.hooks?.PreToolUse?.[0]?.hooks[0] as HookCallbackLike;
+    expect(typeof hook).toBe("function");
+    const signal = new AbortController().signal;
+
+    // deny
+    const denyP = hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "rm -rf /tmp/x" }, tool_use_id: "t1" }, "t1", { signal });
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0]).toMatchObject({ runId: "r1", event: "PreToolUse", toolName: "Bash", input: { command: "rm -rf /tmp/x" }, toolUseId: "t1" });
+    manager.decideHook("r1", hooks[0]!.hookId, { behavior: "deny", reason: "fora do projeto" });
+    expect(await denyP).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "fora do projeto" } });
+
+    // pass → sem opinião
+    const passP = hook({ hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "a" } }, undefined, { signal });
+    manager.decideHook("r1", hooks[1]!.hookId, { behavior: "pass" });
+    expect(await passP).toEqual({});
+
+    // ask → o motivo aparece no permission_request seguinte da mesma ferramenta/input
+    const askP = hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "curl x" } }, undefined, { signal });
+    manager.decideHook("r1", hooks[2]!.hookId, { behavior: "ask", reason: "rede exige aprovação" });
+    expect(await askP).toMatchObject({ hookSpecificOutput: { permissionDecision: "ask" } });
+    const permission = canUseTool!("Bash", { command: "curl x" }, { signal });
+    expect(events.at(-1)?.event).toMatchObject({ type: "permission_request", toolName: "Bash", reason: "rede exige aprovação" });
+    const requestId = (events.at(-1)!.event as { requestId: string }).requestId;
+    manager.decidePermission("r1", requestId, { behavior: "allow" });
+    await permission;
+
+    // timeout → ask
+    const slowP = hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } }, undefined, { signal });
+    expect(await slowP).toMatchObject({ hookSpecificOutput: { permissionDecision: "ask" } });
+
+    // hook desconhecido
+    expect(() => manager.decideHook("r1", "hook_999", { behavior: "allow" })).toThrow(/não encontrado/);
+    gate.release();
+    await manager.drain();
   });
 
   it("rejeita run duplicado", async () => {

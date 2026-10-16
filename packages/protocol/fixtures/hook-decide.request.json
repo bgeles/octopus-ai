@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": "req-21",
+  "method": "hook.decide",
+  "params": {
+    "runId": "run_01HZX9R2Y3",
+    "hookId": "hook_01",
+    "decision": {
+      "behavior": "deny",
+      "reason": "Comando destrutivo fora do projeto"
+    }
+  }
+}

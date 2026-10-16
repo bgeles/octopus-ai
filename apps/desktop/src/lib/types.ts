@@ -126,6 +126,28 @@ export type AuditEvent = {
   hash: string;
 };
 
+export type RuleKind = "command" | "write" | "tool" | "mcp";
+export type RuleAction = "allow" | "deny" | "ask";
+
+export type PolicyRule = {
+  id: string;
+  scope: "global" | "project";
+  projectId: string | null;
+  kind: RuleKind;
+  pattern: string;
+  action: RuleAction;
+  reason: string;
+  enabled: boolean;
+  builtin: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PolicyRuleInput = { kind: RuleKind; pattern: string; action: RuleAction; reason?: string; enabled?: boolean };
+
+export type PolicyDecision = { behavior: "allow" | "deny" | "ask" | "pass"; reason: string | null; ruleId: string | null };
+
 export type AuditVerification = {
   ok: boolean;
   events: number;
@@ -377,6 +399,12 @@ export type Commands = {
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };
   export_audit: { args: { destination?: string | null }; result: string };
+  list_policy_rules: { args: { projectId?: string | null }; result: PolicyRule[] };
+  create_policy_rule: { args: { input: { projectId?: string | null; input: PolicyRuleInput } }; result: PolicyRule };
+  update_policy_rule: { args: { ruleId: string; input: PolicyRuleInput }; result: PolicyRule };
+  set_policy_rule_enabled: { args: { ruleId: string; enabled: boolean }; result: PolicyRule };
+  delete_policy_rule: { args: { ruleId: string }; result: boolean };
+  evaluate_policy: { args: { projectId: string; toolName: string; input: unknown }; result: PolicyDecision };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 

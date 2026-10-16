@@ -57,7 +57,7 @@ const emit = (runId: string, event: RunEvent) => {
 };
 
 // O cast isola o restante do sidecar dos tipos do SDK; a compatibilidade estrutural é coberta por testes.
-const runs = new RunManager(query as unknown as QueryFn, emit, log, createTaskToolsFactory(createSdkMcpServer as never, tool as never));
+const runs = new RunManager(query as unknown as QueryFn, emit, log, createTaskToolsFactory(createSdkMcpServer as never, tool as never), (hook) => server.notify("run.hook", hook));
 
 server.register("runtime.hello", async () => ({ protocolVersion: PROTOCOL_VERSION, runtimeVersion, sdkVersion }));
 
@@ -70,6 +70,10 @@ server.register("run.interrupt", async ({ runId }) => ({ interrupted: await runs
 
 server.register("permission.decide", async ({ runId, requestId, decision }) => ({
   applied: runs.decidePermission(runId, requestId, decision),
+}));
+
+server.register("hook.decide", async ({ runId, hookId, decision }) => ({
+  applied: runs.decideHook(runId, hookId, decision),
 }));
 
 server.register("sessions.list", async ({ cwd }) => {

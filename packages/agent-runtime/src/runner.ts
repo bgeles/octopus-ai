@@ -2,7 +2,7 @@
  * Gerencia runs do Agent SDK: inicia, interrompe, encaminha permissões e emite eventos.
  * O acesso ao SDK é injetado (QueryFn) para permitir testes sem rede nem binário do Claude.
  */
-import type { PermissionDecision, RunEvent, RunStartParams, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
+import type { HookDecision, PermissionDecision, RunEvent, RunHookNotification, RunStartParams, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 import { JsonRpcErrorCode } from "@octopus/protocol";
 import { mapSdkMessage, type SdkMessageLike } from "./events.js";
 import { RpcError } from "./rpc.js";
@@ -34,6 +34,10 @@ export type QueryOptionsLike = {
   agents?: Record<string, { description: string; prompt: string; tools?: string[]; model?: string }>;
   /** MCP servers in-process (instâncias do SDK); o runner só repassa. */
   mcpServers?: Record<string, unknown>;
+  /** Hooks do SDK (PreToolUse etc.), estruturalmente iguais ao `HookCallbackMatcher`. */
+  hooks?: Record<string, Array<{ matcher?: string; hooks: HookCallbackLike[]; timeout?: number }>>;
+  /** `SandboxSettings` do SDK; o runner só repassa. */
+  sandbox?: unknown;
   abortController: AbortController;
   canUseTool: CanUseToolLike;
 };
@@ -42,6 +46,16 @@ export type QueryHandleLike = AsyncIterable<SdkMessageLike> & { interrupt?: () =
 export type QueryFn = (args: { prompt: string; options: QueryOptionsLike }) => QueryHandleLike;
 
 export type EventSink = (runId: string, event: RunEvent) => void;
+
+/** Entrada mínima do hook PreToolUse do SDK. */
+export type PreToolUseInputLike = { hook_event_name: string; tool_name: string; tool_input: unknown; tool_use_id?: string; parent_tool_use_id?: string | null };
+export type HookCallbackLike = (input: PreToolUseInputLike, toolUseId: string | undefined, options: { signal: AbortSignal }) => Promise<unknown>;
+
+/** Notifica o core de um hook bloqueante (`run.hook`); a resposta chega por `decideHook`. */
+export type HookSink = (notification: RunHookNotification) => void;
+
+/** Quanto tempo esperar pelo core antes de cair em `ask`. */
+export const HOOK_TIMEOUT_MS = 30_000;
 
 /** Fábrica do MCP server `octopus` (createSdkMcpServer + tool do SDK), injetada para testes. */
 export type TaskToolsFactory = (ctx: TaskContext, onUpdate: (status: TaskStatusUpdate, note: string | null) => void) => unknown;
@@ -52,23 +66,33 @@ type PendingPermission = {
   resolve: (decision: PermissionDecision) => void;
 };
 
+type PendingHook = {
+  resolve: (decision: HookDecision) => void;
+};
+
 type ActiveRun = {
   runId: string;
   abort: AbortController;
   handle: QueryHandleLike | null;
   pendingPermissions: Map<string, PendingPermission>;
+  pendingHooks: Map<string, PendingHook>;
+  /** Motivo de um `ask` da política, para o `permission_request` seguinte da mesma ferramenta. */
+  askReasons: Map<string, string>;
   done: Promise<void>;
 };
 
 export class RunManager {
   private readonly runs = new Map<string, ActiveRun>();
   private permissionCounter = 0;
+  private hookCounter = 0;
 
   constructor(
     private readonly queryFn: QueryFn,
     private readonly emit: EventSink,
     private readonly log: (level: "debug" | "info" | "warn" | "error", message: string) => void = () => {},
     private readonly taskTools: TaskToolsFactory | null = null,
+    private readonly emitHook: HookSink | null = null,
+    private readonly hookTimeoutMs: number = HOOK_TIMEOUT_MS,
   ) {}
 
   get activeRunIds(): string[] {
@@ -86,6 +110,8 @@ export class RunManager {
       abort,
       handle: null,
       pendingPermissions: new Map(),
+      pendingHooks: new Map(),
+      askReasons: new Map(),
       done: Promise.resolve(),
     };
     this.runs.set(params.runId, run);
@@ -96,6 +122,8 @@ export class RunManager {
         pending.resolve({ behavior: "deny", message: "Run encerrado antes da decisão" });
       }
       run.pendingPermissions.clear();
+      for (const pending of run.pendingHooks.values()) pending.resolve({ behavior: "deny", reason: "Run encerrado antes da decisão" });
+      run.pendingHooks.clear();
       this.runs.delete(params.runId);
     });
   }
@@ -118,6 +146,16 @@ export class RunManager {
     const pending = run.pendingPermissions.get(requestId);
     if (!pending) throw new RpcError(JsonRpcErrorCode.PermissionRequestNotFound, `Pedido ${requestId} não encontrado`);
     run.pendingPermissions.delete(requestId);
+    pending.resolve(decision);
+    return true;
+  }
+
+  decideHook(runId: string, hookId: string, decision: HookDecision): boolean {
+    const run = this.runs.get(runId);
+    if (!run) throw new RpcError(JsonRpcErrorCode.RunNotFound, `Run ${runId} não encontrado`);
+    const pending = run.pendingHooks.get(hookId);
+    if (!pending) throw new RpcError(JsonRpcErrorCode.HookNotFound, `Hook ${hookId} não encontrado`);
+    run.pendingHooks.delete(hookId);
     pending.resolve(decision);
     return true;
   }
@@ -150,6 +188,10 @@ export class RunManager {
     if (o.settingSources) options.settingSources = o.settingSources;
     if (o.env) options.env = { ...process.env, ...o.env };
     if (o.agents && Object.keys(o.agents).length > 0) options.agents = o.agents;
+    if (o.sandbox) options.sandbox = o.sandbox;
+    if (o.policyHooks && this.emitHook) {
+      options.hooks = { PreToolUse: [{ hooks: [(input, toolUseId) => this.preToolUse(run, input, toolUseId)] }] };
+    }
     if (o.taskContext && this.taskTools) {
       const ctx = o.taskContext;
       const server = this.taskTools(ctx, (status, note) => {
@@ -187,6 +229,45 @@ export class RunManager {
     }
   }
 
+  /** Hook PreToolUse: pergunta ao core e traduz a decisão para o formato do SDK. */
+  private async preToolUse(run: ActiveRun, input: PreToolUseInputLike, toolUseId: string | undefined): Promise<unknown> {
+    if (input.hook_event_name !== "PreToolUse") return {};
+    const hookId = `hook_${++this.hookCounter}`;
+    const decision = await new Promise<HookDecision>((resolve) => {
+      const timer = setTimeout(() => {
+        if (run.pendingHooks.delete(hookId)) {
+          this.log("warn", `hook ${hookId} sem resposta do core em ${this.hookTimeoutMs} ms; pedindo aprovação`);
+          resolve({ behavior: "ask", reason: "Política sem resposta a tempo; confirme manualmente" });
+        }
+      }, this.hookTimeoutMs);
+      run.pendingHooks.set(hookId, {
+        resolve: (d) => {
+          clearTimeout(timer);
+          resolve(d);
+        },
+      });
+      this.emitHook!({
+        runId: run.runId,
+        hookId,
+        event: "PreToolUse",
+        toolName: input.tool_name,
+        input: input.tool_input,
+        toolUseId: toolUseId ?? input.tool_use_id ?? null,
+        parentToolUseId: input.parent_tool_use_id ?? null,
+      });
+    });
+    if (decision.behavior === "pass") return {};
+    if (decision.behavior === "ask" && decision.reason) run.askReasons.set(askKey(input.tool_name, input.tool_input), decision.reason);
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: decision.behavior,
+        permissionDecisionReason: decision.reason,
+        ...(decision.updatedInput ? { updatedInput: decision.updatedInput } : {}),
+      },
+    };
+  }
+
   private requestPermission(
     run: ActiveRun,
     toolName: string,
@@ -194,6 +275,9 @@ export class RunManager {
     signal: AbortSignal,
   ): Promise<PermissionResultLike> {
     const requestId = `perm_${++this.permissionCounter}`;
+    const key = askKey(toolName, input);
+    const reason = run.askReasons.get(key) ?? null;
+    run.askReasons.delete(key);
     return new Promise<PermissionResultLike>((resolve) => {
       const finish = (decision: PermissionDecision) => {
         signal.removeEventListener("abort", onAbort);
@@ -209,7 +293,17 @@ export class RunManager {
       };
       signal.addEventListener("abort", onAbort, { once: true });
       run.pendingPermissions.set(requestId, { resolve: finish });
-      this.emit(run.runId, { type: "permission_request", requestId, toolName, input, reason: null });
+      this.emit(run.runId, { type: "permission_request", requestId, toolName, input, reason });
     });
   }
+}
+
+function askKey(toolName: string, input: unknown): string {
+  let serialized = "";
+  try {
+    serialized = JSON.stringify(input) ?? "";
+  } catch {
+    serialized = String(input);
+  }
+  return `${toolName}:${serialized}`;
 }
