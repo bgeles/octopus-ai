@@ -88,6 +88,67 @@ pub struct TaskContext {
     pub allowed_statuses: Vec<TaskStatusUpdate>,
 }
 
+/// Subconjunto do `SandboxSettings` do SDK controlado pelos perfis de sandbox.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_if_unavailable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_unsandboxed_commands: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_allow_bash_if_sandboxed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<SandboxNetwork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem: Option<SandboxFilesystem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<SandboxCredentials>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxNetwork {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_domains: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_domains: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_allowlist: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxFilesystem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_write: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_write: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_read: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_read: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxCredentials {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_vars: Option<Vec<SandboxEnvVar>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxEnvVar {
+    pub name: String,
+    /// `deny` ou `mask`.
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_hosts: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunOptions {
@@ -117,6 +178,10 @@ pub struct RunOptions {
     pub agents: Option<std::collections::BTreeMap<String, AgentDefinition>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_context: Option<TaskContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_hooks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxSettings>,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +296,45 @@ pub struct SessionsTagParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMutationResult {
     pub ok: bool,
+}
+
+/// Decisão do core para um hook PreToolUse: `allow`, `deny`, `ask` ou `pass`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookDecision {
+    pub behavior: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_input: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookDecideParams {
+    pub run_id: String,
+    pub hook_id: String,
+    pub decision: HookDecision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookDecideResult {
+    pub applied: bool,
+}
+
+/// Notificação `run.hook`: o sidecar segura a ferramenta até o `hook.decide`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunHookNotification {
+    pub run_id: String,
+    pub hook_id: String,
+    pub event: String,
+    pub tool_name: String,
+    pub input: Value,
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+    #[serde(default)]
+    pub parent_tool_use_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +621,43 @@ mod tests {
         assert_eq!(params.tag, None);
         // `None` precisa virar `null` explícito, não ser omitido: o sidecar exige a chave.
         assert_eq!(serde_json::to_value(&params).unwrap(), raw["params"]);
+    }
+
+    #[test]
+    fn hook_fixtures_roundtrip() {
+        let raw = read_fixture("hook-decide.request.json");
+        let request: JsonRpcRequest = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(request.method, "hook.decide");
+        let params: HookDecideParams = serde_json::from_value(request.params.unwrap()).unwrap();
+        assert_eq!(params.decision.behavior, "deny");
+        assert_eq!(serde_json::to_value(&params).unwrap(), raw["params"]);
+
+        let raw = read_fixture("run-hook.notifications.json");
+        let item = &raw.as_array().unwrap()[0];
+        match serde_json::from_value::<IncomingMessage>(item.clone()).unwrap() {
+            IncomingMessage::Notification { method, params } => {
+                assert_eq!(method, "run.hook");
+                let n: RunHookNotification = serde_json::from_value(params.unwrap()).unwrap();
+                assert_eq!(n.tool_name, "Bash");
+                assert_eq!(n.input["command"], "rm -rf /tmp/x");
+                assert_eq!(n.tool_use_id.as_deref(), Some("toolu_09"));
+            }
+            _ => panic!("esperava notificação"),
+        }
+
+        let sandbox = SandboxSettings {
+            enabled: Some(true),
+            filesystem: Some(SandboxFilesystem {
+                allow_write: Some(vec!["/p".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&sandbox).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"enabled": true, "filesystem": {"allowWrite": ["/p"]}})
+        );
     }
 
     #[test]

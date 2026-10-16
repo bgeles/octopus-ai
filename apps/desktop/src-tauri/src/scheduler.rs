@@ -79,6 +79,7 @@ pub async fn tick(store: &Store, sidecar: &Sidecar) -> Result<TickReport> {
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 include_partial_messages: Some(true),
                 task_context: Some(Store::task_context(&task, &stage)),
+                policy_hooks: Some(true),
                 ..Default::default()
             };
             let options = match agent_id.as_deref() {

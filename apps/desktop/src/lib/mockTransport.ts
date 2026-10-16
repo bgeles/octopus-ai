@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, Approval, AppSettings, AuditEvent, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, Approval, AppSettings, AuditEvent, BackupSnapshot, PolicyDecision, PolicyRule, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -111,6 +111,50 @@ const TEMPLATE_INSTRUCTIONS: Record<string, string> = {
   Pesquisar: "Investigue a pergunta e entregue achados com fontes.",
   Sintetizar: "Sintetize os achados em um documento curto, claro, em português.",
 };
+
+/** Regras de política iguais ao seed da migration 0007. */
+export function seedPolicyRules(): PolicyRule[] {
+  const at = "2026-10-16T00:00:00Z";
+  const base = { scope: "global" as const, projectId: null, builtin: true, createdAt: at, updatedAt: at };
+  return [
+    { ...base, id: "rule_destructive_outside", kind: "command", pattern: "@destructive-outside-project", action: "deny", reason: "Comando destrutivo fora da pasta do projeto", enabled: true, position: 1 },
+    { ...base, id: "rule_git_push_protected", kind: "command", pattern: "git\\s+push\\b.*(--force\\b|-f\\b|\\bmain\\b|\\bmaster\\b)", action: "deny", reason: "Push forçado ou para branch protegida", enabled: true, position: 2 },
+    { ...base, id: "rule_write_secrets", kind: "write", pattern: "**/.env|**/.env.*|**/*.pem|**/id_rsa*|**/id_ed25519*|**/secrets/**", action: "deny", reason: "Segredos nunca entram no repositório", enabled: true, position: 3 },
+    { ...base, id: "rule_write_outside", kind: "write", pattern: "@outside-project", action: "deny", reason: "Confinamento de caminhos à pasta do projeto", enabled: true, position: 4 },
+    { ...base, id: "rule_network_ask", kind: "command", pattern: "\\b(curl|wget|nc|ssh|scp)\\b", action: "ask", reason: "Saída de rede exige aprovação", enabled: true, position: 5 },
+    { ...base, id: "rule_web_ask", kind: "tool", pattern: "WebFetch|WebSearch", action: "ask", reason: "Buscar na web só com você olhando", enabled: false, position: 6 },
+    { ...base, id: "rule_mcp_octopus", kind: "mcp", pattern: "mcp__octopus__*", action: "allow", reason: "Ferramentas do próprio orquestrador", enabled: true, position: 7 },
+  ];
+}
+
+/** Avaliação simplificada da política no mock (espelha a ordem deny > ask > allow do motor Rust). */
+export function evaluatePolicyMock(rules: PolicyRule[], projectPath: string, toolName: string, input: unknown): PolicyDecision {
+  const record = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
+  const rank = { deny: 3, ask: 2, allow: 1 } as const;
+  let best: PolicyRule | null = null;
+  const inside = (p: string) => (p.startsWith("/") ? p : `${projectPath}/${p}`).replace(/\/[^/]+\/\.\.(?=\/|$)/g, "").startsWith(projectPath);
+  for (const rule of rules.filter((r) => r.enabled)) {
+    let hit = false;
+    if (rule.kind === "command" && toolName === "Bash" && typeof record.command === "string") {
+      const cmd = record.command;
+      if (rule.pattern === "@destructive-outside-project") hit = /\brm\s+-[a-z]*[rf][a-z]*\s+(\/|~|\$HOME|\.\.|\/(?!Users\/dev\/projetos\/chat-core))/i.test(cmd) || /\brm\s+-[a-z]*[rf][a-z]*\s+\/tmp/.test(cmd);
+      else hit = new RegExp(rule.pattern).test(cmd);
+    } else if (rule.kind === "write" && ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName) && typeof record.file_path === "string") {
+      const path = record.file_path;
+      if (rule.pattern === "@outside-project") hit = !inside(path);
+      else hit = rule.pattern.split("|").some((g) => globToRegex(g).test(path) || globToRegex(g).test(`${projectPath}/${path}`));
+    } else if (rule.kind === "tool") hit = rule.pattern.split("|").some((g) => globToRegex(g).test(toolName));
+    else if (rule.kind === "mcp") hit = toolName.startsWith("mcp__") && rule.pattern.split("|").some((g) => globToRegex(g).test(toolName));
+    if (hit && (!best || rank[rule.action] > rank[best.action])) best = rule;
+  }
+  if (!best) return { behavior: "pass", reason: null, ruleId: null };
+  return { behavior: best.action, reason: best.reason || `Regra ${best.id}`, ruleId: best.id };
+}
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob.trim().replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*");
+  return new RegExp(`^${escaped}$`, "i");
+}
 
 /** Conteúdo "atual" de arquivos do projeto de demonstração, para o diff de Write. */
 const MOCK_FILES: Record<string, string> = {
@@ -241,6 +285,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     }
     return out;
   };
+  const rules: PolicyRule[] = seedPolicyRules();
+  let ruleCounter = 0;
   const auditLog: AuditEvent[] = [];
   let tampered: number | null = null;
   const fakeHash = (seed: string) => {
@@ -445,6 +491,28 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     } else if (ev.type === "permission_request") {
       run.status = "waiting_approval";
       recordApproval(run, notification.at, ev);
+    }
+    if (ev.type === "permission_request") {
+      // Como o hook PreToolUse em Rust: a política decide antes de perguntar.
+      const project = projects.find((p) => p.id === run.projectId);
+      const decision = evaluatePolicyMock(rules.filter((r) => r.scope === "global" || r.projectId === run.projectId), project?.path ?? "/", ev.toolName, ev.input);
+      if (decision.behavior !== "pass") audit("política", `policy.${decision.behavior}`, run.projectId, { runId, tool: ev.toolName, input: ev.input, ruleId: decision.ruleId, reason: decision.reason });
+      if (decision.behavior === "deny") {
+        run.status = "running";
+        events.get(runId)!.pop();
+        approvals.delete(approvalKey(runId, ev.requestId));
+        emitEvent(runId, { type: "tool_use", toolUseId: `toolu_${ev.requestId}`, name: ev.toolName, input: ev.input, parentToolUseId: null });
+        emitEvent(runId, { type: "tool_result", toolUseId: `toolu_${ev.requestId}`, content: `Bloqueado pela política: ${decision.reason}`, isError: true, parentToolUseId: null });
+        schedule(runId, index + 1);
+        return;
+      }
+      if (decision.behavior === "ask" && decision.reason) {
+        notification.event = { ...ev, reason: decision.reason };
+        const stored = events.get(runId)!.at(-1);
+        if (stored) stored.event = notification.event;
+        const approval = approvals.get(approvalKey(runId, ev.requestId));
+        if (approval) approval.reason = decision.reason;
+      }
     }
     emit("run:event", notification);
     if (ev.type === "permission_request") {
@@ -896,6 +964,48 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         return destination;
       }
       return jsonl;
+    },
+    list_policy_rules: async ({ projectId }) => rules.filter((r) => r.scope === "global" || r.projectId === projectId).map((r) => ({ ...r })),
+    create_policy_rule: async ({ input }) => {
+      if (!input.input.pattern.trim()) throw new Error("Informe o padrão da regra");
+      if (input.projectId && input.input.action === "allow") throw new Error("Regras do projeto só podem apertar (negar ou perguntar); permitir só no escopo global");
+      if (input.input.kind === "command" && !input.input.pattern.startsWith("@")) new RegExp(input.input.pattern);
+      const at = new Date().toISOString();
+      const rule: PolicyRule = { id: `rule_${++ruleCounter}`, scope: input.projectId ? "project" : "global", projectId: input.projectId ?? null, kind: input.input.kind, pattern: input.input.pattern.trim(), action: input.input.action, reason: input.input.reason?.trim() ?? "", enabled: input.input.enabled ?? true, builtin: false, position: rules.length + 1, createdAt: at, updatedAt: at };
+      rules.push(rule);
+      audit("você", "config.rule.created", rule.projectId, { ruleId: rule.id, kind: rule.kind, pattern: rule.pattern, action: rule.action });
+      return { ...rule };
+    },
+    update_policy_rule: async ({ ruleId, input }) => {
+      const rule = rules.find((r) => r.id === ruleId);
+      if (!rule) throw new Error(`Regra ${ruleId} não encontrada`);
+      if (rule.projectId && input.action === "allow") throw new Error("Regras do projeto só podem apertar (negar ou perguntar); permitir só no escopo global");
+      Object.assign(rule, { kind: input.kind, pattern: input.pattern.trim(), action: input.action, reason: input.reason?.trim() ?? rule.reason, enabled: input.enabled ?? rule.enabled, updatedAt: new Date().toISOString() });
+      audit("você", "config.rule.updated", rule.projectId, { ruleId: rule.id, action: rule.action, enabled: rule.enabled });
+      return { ...rule };
+    },
+    set_policy_rule_enabled: async ({ ruleId, enabled }) => {
+      const rule = rules.find((r) => r.id === ruleId);
+      if (!rule) throw new Error(`Regra ${ruleId} não encontrada`);
+      rule.enabled = enabled;
+      rule.updatedAt = new Date().toISOString();
+      audit("você", "config.rule.toggled", rule.projectId, { ruleId, enabled });
+      return { ...rule };
+    },
+    delete_policy_rule: async ({ ruleId }) => {
+      const rule = rules.find((r) => r.id === ruleId);
+      if (!rule) return false;
+      if (rule.builtin) throw new Error("Regras do catálogo não podem ser removidas; desative-a");
+      rules.splice(rules.indexOf(rule), 1);
+      audit("você", "config.rule.deleted", null, { ruleId });
+      return true;
+    },
+    evaluate_policy: async ({ projectId, toolName, input }) => {
+      const project = projects.find((p) => p.id === projectId);
+      if (!project) throw new Error(`Projeto ${projectId} não encontrado`);
+      const decision = evaluatePolicyMock(rules.filter((r) => r.scope === "global" || r.projectId === projectId), project.path, toolName, input);
+      if (decision.behavior !== "pass") audit("política", `policy.${decision.behavior}`, projectId, { tool: toolName, input, ruleId: decision.ruleId, reason: decision.reason });
+      return decision;
     },
     list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
     rename_session: async ({ input }) => {

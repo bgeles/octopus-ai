@@ -131,13 +131,14 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
         .map_err(err)?
         .ok_or_else(|| format!("Projeto {} não encontrado", input.project_id))?;
 
-    let options = match input.agent_profile_id.as_deref() {
+    let mut options = match input.agent_profile_id.as_deref() {
         Some(agent_id) => state
             .store
             .agent_run_options(agent_id, &input.options)
             .map_err(err)?,
         None => input.options,
     };
+    options.policy_hooks = Some(true);
     let run = state
         .store
         .create_run_for_agent(

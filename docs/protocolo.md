@@ -21,8 +21,9 @@ JSON-RPC 2.0 em NDJSON (uma mensagem JSON por linha) pelo stdio do sidecar.
 | `sessions.list` | `{ cwd }` | `{ sessions: SessionSummary[] }` |
 | `sessions.rename` | `{ sessionId, cwd, title }` | `{ ok: true }` |
 | `sessions.tag` | `{ sessionId, cwd, tag: string \| null }` | `{ ok: true }` (`null` remove a tag) |
+| `hook.decide` | `{ runId, hookId, decision: { behavior: allow\|deny\|ask, reason?, updatedInput? } }` | `{ applied }` (resposta do core a um `run.hook`) |
 
-`options` (`RunOptions`): `model`, `permissionMode`, `maxTurns`, `maxBudgetUsd`, `resumeSessionId`, `forkSession`, `systemPromptAppend`, `allowedTools`, `settingSources`, `env`, `includePartialMessages`, `agents` (mapa nome → `{ description, prompt, tools?, model? }`, vira `options.agents` do SDK; o Octopus preenche com os membros do time que reportam ao agente do run), `taskContext` (`{ taskId, title, stage, allowedStatuses }`: o sidecar cria um MCP server in-process `octopus` com a tool `task_update(status, note)`, libera `mcp__octopus__task_update` em `allowedTools` e emite o evento `task_update`).
+`options` (`RunOptions`): `model`, `permissionMode`, `maxTurns`, `maxBudgetUsd`, `resumeSessionId`, `forkSession`, `systemPromptAppend`, `allowedTools`, `settingSources`, `env`, `includePartialMessages`, `agents` (mapa nome → `{ description, prompt, tools?, model? }`, vira `options.agents` do SDK; o Octopus preenche com os membros do time que reportam ao agente do run), `taskContext` (`{ taskId, title, stage, allowedStatuses }`: o sidecar cria um MCP server in-process `octopus` com a tool `task_update(status, note)`, libera `mcp__octopus__task_update` em `allowedTools` e emite o evento `task_update`), `policyHooks` (registra um hook `PreToolUse` que emite `run.hook` e espera `hook.decide`; sem resposta em 30 s a decisão vira `ask`), `sandbox` (subconjunto do `SandboxSettings` do SDK: `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands`, `network.allowedDomains/deniedDomains/strictAllowlist`, `filesystem.allowWrite/denyWrite/denyRead/allowRead`, `credentials.envVars`).
 
 Retomar e bifurcar não têm método próprio: são um `run.start` com `options.resumeSessionId` (e `forkSession: true` para bifurcar); o SDK recebe `resume`/`forkSession`. O `session_init` do novo run traz o `sessionId` resultante (o mesmo, ao retomar; um novo, ao bifurcar).
 
@@ -51,6 +52,10 @@ Retomar e bifurcar não têm método próprio: são um `run.start` com `options.
 
 Eventos terminais: `result` e `error` com `fatal: true`.
 
+### `run.hook`
+
+`{ runId, hookId, event: "PreToolUse", toolName, input, toolUseId, parentToolUseId }`. Bloqueante: o sidecar segura a ferramenta até o core responder com `hook.decide`. O core avalia as regras de política (nega vence, depois pergunta, senão permite) e registra a decisão na auditoria (`policy.allow|deny|ask`). `deny` chega ao agente com o motivo; `ask` vira um `permission_request` normal (com o motivo da regra em `reason`).
+
 ### `runtime.log`
 
 `{ level, message }`.
@@ -67,6 +72,7 @@ Eventos terminais: `result` e `error` com `fatal: true`.
 | -32001 | Run não encontrado |
 | -32002 | Run já existe |
 | -32003 | Pedido de permissão não encontrado |
+| -32004 | Hook não encontrado (já decidido ou run encerrado) |
 
 ## Evolução
 

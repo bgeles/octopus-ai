@@ -8,6 +8,7 @@ pub mod audit;
 pub mod config;
 pub mod models;
 pub mod orchestration;
+pub mod policy;
 pub mod team;
 
 use std::path::{Path, PathBuf};
@@ -36,6 +37,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0005_orchestration.sql"),
     ),
     ("0006_audit", include_str!("migrations/0006_audit.sql")),
+    ("0007_policy", include_str!("migrations/0007_policy.sql")),
 ];
 
 pub struct Store {
@@ -562,12 +564,13 @@ mod tests {
                 "0003_settings_backups".to_string(),
                 "0004_team".to_string(),
                 "0005_orchestration".to_string(),
-                "0006_audit".to_string()
+                "0006_audit".to_string(),
+                "0007_policy".to_string()
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 6);
+        assert_eq!(s.applied_migrations().unwrap().len(), 7);
     }
 
     #[test]

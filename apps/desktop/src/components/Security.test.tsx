@@ -25,6 +25,7 @@ describe("Segurança · Auditoria", () => {
 
     await user.click(screen.getByRole("button", { name: "Segurança" }));
     const view = await screen.findByTestId("security-view");
+    await user.click(within(view).getByRole("tab", { name: /Auditoria/ }));
     await waitFor(() => expect(within(view).getByTestId("audit-integrity")).toHaveAttribute("data-ok", "true"));
     expect(within(view).getByTestId("audit-integrity")).toHaveTextContent(/Cadeia de hashes íntegra · \d+ eventos/);
 
@@ -40,8 +41,8 @@ describe("Segurança · Auditoria", () => {
     await user.click(within(view).getByRole("button", { name: "Aprovações" }));
     await waitFor(() => expect(within(view).getAllByTestId("audit-row").every((r) => r.getAttribute("data-kind")?.startsWith("approval."))).toBe(true));
 
-    // Abas que ainda não existem ficam desabilitadas.
-    expect(within(view).getByRole("tab", { name: "Política" })).toBeDisabled();
+    // A aba que ainda não existe fica desabilitada.
+    expect(within(view).getByRole("tab", { name: "Política" })).toBeEnabled();
     expect(within(view).getByRole("tab", { name: "Orçamentos" })).toBeDisabled();
   });
 
@@ -54,6 +55,7 @@ describe("Segurança · Auditoria", () => {
     transport.tamperAudit(2);
 
     await user.click(screen.getByRole("button", { name: "Segurança" }));
+    await user.click(await screen.findByRole("tab", { name: /Auditoria/ }));
     const integrity = await screen.findByTestId("audit-integrity");
     await waitFor(() => expect(integrity).toHaveAttribute("data-ok", "false"));
     expect(integrity).toHaveTextContent("Cadeia de hashes quebrada no evento #2");

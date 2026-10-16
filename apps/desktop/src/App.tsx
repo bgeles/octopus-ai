@@ -18,7 +18,7 @@ import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, PolicyRule, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -58,7 +58,9 @@ export function App({ transport }: AppProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskEvents, setTaskEvents] = useState<TaskEvent[]>([]);
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
-  const [securityTab, setSecurityTab] = useState<SecurityTab>("audit");
+  const [securityTab, setSecurityTab] = useState<SecurityTab>("policy");
+  const [rules, setRules] = useState<PolicyRule[] | null>(null);
+  const [policyEvents, setPolicyEvents] = useState<AuditEvent[]>([]);
   const [audit, setAudit] = useState<AuditEvent[] | null>(null);
   const [auditVerification, setAuditVerification] = useState<AuditVerification | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
@@ -535,6 +537,18 @@ export function App({ transport }: AppProps) {
     [transport],
   );
 
+  const refreshPolicy = useCallback(() => {
+    const projectId = selectedProjectRef.current?.id ?? null;
+    transport
+      .invoke("list_policy_rules", { projectId })
+      .then(setRules)
+      .catch((e) => setToast(`Falha ao carregar as regras: ${messageOf(e)}`));
+    transport
+      .invoke("list_audit_events", { projectId, kindPrefix: "policy.", limit: 20 })
+      .then(setPolicyEvents)
+      .catch(() => {});
+  }, [transport]);
+
   const verifyAudit = useCallback(async () => {
     try {
       setAuditVerification(await transport.invoke("verify_audit", {}));
@@ -738,6 +752,27 @@ export function App({ transport }: AppProps) {
           onRefreshAudit={refreshAudit}
           onVerify={verifyAudit}
           onExport={(destination) => transport.invoke("export_audit", { destination })}
+          rules={rules}
+          policyEvents={policyEvents}
+          onRefreshPolicy={refreshPolicy}
+          onToggleRule={async (rule, enabled) => {
+            await transport.invoke("set_policy_rule_enabled", { ruleId: rule.id, enabled });
+            refreshPolicy();
+          }}
+          onCreateRule={async (scope, input) => {
+            await transport.invoke("create_policy_rule", { input: { projectId: scope === "project" ? (selectedProject?.id ?? null) : null, input } });
+            refreshPolicy();
+          }}
+          onDeleteRule={async (rule) => {
+            await transport.invoke("delete_policy_rule", { ruleId: rule.id });
+            refreshPolicy();
+          }}
+          onSimulate={async (toolName, input) => {
+            if (!selectedProject) throw new Error("Sem projeto selecionado");
+            const decision = await transport.invoke("evaluate_policy", { projectId: selectedProject.id, toolName, input });
+            refreshPolicy();
+            return decision;
+          }}
         />
       )}
 

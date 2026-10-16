@@ -56,6 +56,9 @@ rl.on("line", (line) => {
     case "sessions.tag":
       write({ jsonrpc: "2.0", id: req.id, result: { ok: true } });
       break;
+    case "hook.decide":
+      write({ jsonrpc: "2.0", id: req.id, result: { applied: true } });
+      break;
     default:
       write({ jsonrpc: "2.0", id: req.id, error: { code: -32601, message: "Método desconhecido" } });
   }
