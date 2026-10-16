@@ -278,4 +278,169 @@ mod tests {
         assert_eq!(t_now.status, TaskStatus::Failed);
         sidecar.shutdown().await;
     }
+
+    /// Verificação da Fase 2 com o Claude de verdade: o scheduler inicia a task como o membro do time,
+    /// o agente recebe a tool MCP `task_update` e a task avança quando ele a chama.
+    /// Custa dinheiro: `cargo test real_sidecar -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "usa o Claude de verdade (custa dinheiro); rode com --ignored"]
+    async fn real_sidecar_runs_a_task_and_the_agent_calls_task_update() {
+        use crate::protocol::{PermissionDecideParams, PermissionDecision, RunEvent};
+        use crate::sidecar::command::find_node;
+        use crate::sidecar::SidecarNotification;
+
+        let main_js = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../packages/agent-runtime/dist/main.js")
+            .canonicalize()
+            .expect("sidecar compilado");
+        let (sidecar, mut notifications) = Sidecar::spawn(SidecarCommand::new(
+            find_node(),
+            vec![main_js.to_string_lossy().into_owned()],
+        ))
+        .await
+        .unwrap();
+        sidecar.hello().await.unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let project = store
+            .create_project("verificacao", dir.path().to_str().unwrap())
+            .unwrap();
+        store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Ana".into(),
+                    role_id: "role_implementador".into(),
+                    max_turns: Some(6),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", true)
+            .unwrap();
+        // Pesquisar tem Pesquisador como responsável; sem um no time, cai no membro atribuído à task.
+        let ana = store.list_team(&project.id).unwrap()[0].profile.id.clone();
+        let task = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Checagem do orquestrador".into(),
+                    description_md: "Não leia nem altere arquivos e não use outras ferramentas. Apenas confirme que recebeu esta task chamando a tool task_update com status \"done\" e a nota \"octopus ok\".".into(),
+                    assigned_agent_id: Some(ana),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let report = tick(&store, &sidecar).await.unwrap();
+        assert_eq!(report.started.len(), 1, "{report:?}");
+        let run_id = report.started[0].run_id.clone();
+        let claimed = store.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(claimed.status, TaskStatus::Running);
+        assert!(claimed
+            .worktree_path
+            .as_deref()
+            .unwrap()
+            .contains(".octopus/worktrees/"));
+        assert!(Path::new(claimed.worktree_path.as_deref().unwrap())
+            .join(".git")
+            .exists());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(240);
+        let mut saw_task_update = false;
+        loop {
+            let n = tokio::time::timeout_at(deadline, notifications.recv())
+                .await
+                .expect("timeout esperando o run")
+                .expect("canal fechado");
+            match n {
+                SidecarNotification::RunEvent(ev) if ev.run_id == run_id => {
+                    eprintln!("[{}] {}", ev.seq, ev.event.kind());
+                    if let RunEvent::PermissionRequest {
+                        request_id,
+                        tool_name,
+                        ..
+                    } = &ev.event
+                    {
+                        eprintln!("negando {tool_name} pedido pelo agente");
+                        sidecar
+                            .decide_permission(PermissionDecideParams {
+                                run_id: run_id.clone(),
+                                request_id: request_id.clone(),
+                                decision: PermissionDecision::Deny {
+                                    message: "teste: só task_update".into(),
+                                },
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    if matches!(ev.event, RunEvent::TaskUpdate { .. }) {
+                        saw_task_update = true;
+                    }
+                    let terminal = ev.event.is_terminal();
+                    store
+                        .record_run_event(&ev.run_id, ev.seq, &ev.at, &ev.event)
+                        .unwrap();
+                    if terminal {
+                        break;
+                    }
+                }
+                SidecarNotification::Exited(code) => panic!("sidecar saiu: {code:?}"),
+                _ => {}
+            }
+        }
+        let run = store.get_run(&run_id).unwrap().unwrap();
+        eprintln!(
+            "run {:?} custo {:?} resultado {:?}",
+            run.status, run.cost_usd, run.result_text
+        );
+        assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error_message);
+        assert!(saw_task_update, "o agente não chamou task_update");
+        let after = store.get_task(&task.id).unwrap().unwrap();
+        eprintln!(
+            "task {:?} estágio {} nota {:?}",
+            after.status, after.stage_id, after.last_note
+        );
+        assert_eq!(after.stage_id, "stage_2", "done avança para Sintetizar");
+        assert_eq!(after.status, TaskStatus::Ready);
+        assert!(after
+            .last_note
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("octopus ok"));
+        let kinds: Vec<String> = store
+            .list_task_events(&task.id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(kinds.contains(&"agent_update".to_string()));
+        assert!(kinds.contains(&"advanced".to_string()));
+        sidecar.shutdown().await;
+    }
 }
