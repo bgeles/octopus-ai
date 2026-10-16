@@ -6,7 +6,7 @@
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { CommandName, Commands, EventName, Events, Project, Run, StoredRunEvent } from "./types";
+import type { CommandName, Commands, EventName, Events, Project, Run, SessionSummary, StoredRunEvent } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -32,6 +32,17 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   ];
   const runs = new Map<string, Run>();
   const events = new Map<string, StoredRunEvent[]>();
+  const sessions: SessionSummary[] = [
+    {
+      sessionId: "5b3f2c1a-8d4e-4f6b-9a7c-2e1d0f9b8a6c",
+      cwd: projects[0]?.path ?? "/",
+      title: "Criar migração Flyway V12 para tabela leads",
+      tags: ["migração"],
+      createdAt: new Date(Date.now() - 3_600_000).toISOString(),
+      lastUsedAt: new Date().toISOString(),
+    },
+  ];
+  let forkCounter = 0;
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
   const pausedAt = new Map<string, number>();
   const seqByRun = new Map<string, number>();
@@ -60,7 +71,13 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     const run = runs.get(runId);
     if (!run || index >= script.length) return;
     const template = script[index]!;
-    const notification: RunEventNotification = { ...template, runId, seq: nextSeq(runId), at: new Date().toISOString() };
+    let event = template.event;
+    // Retomar mantém o id da sessão; bifurcar nasce com um id novo (como o SDK faz).
+    if (event.type === "session_init" && run.options.resumeSessionId) {
+      const sessionId = run.options.forkSession ? `fork-${++forkCounter}-${run.options.resumeSessionId.slice(0, 8)}` : run.options.resumeSessionId;
+      event = { ...event, sessionId };
+    }
+    const notification: RunEventNotification = { ...template, event, runId, seq: nextSeq(runId), at: new Date().toISOString() };
     const ev = notification.event;
     if (ev.type !== "assistant_text_delta") {
       events.get(runId)!.push({ runId, seq: notification.seq, at: notification.at, kind: ev.type, event: ev });
@@ -69,6 +86,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       run.status = "running";
       run.claudeSessionId = ev.sessionId;
       run.model = ev.model;
+      if (!sessions.some((s) => s.sessionId === ev.sessionId)) {
+        const project = projects.find((p) => p.id === run.projectId);
+        sessions.unshift({ sessionId: ev.sessionId, cwd: project?.path ?? "/", title: run.prompt, tags: [], createdAt: notification.at, lastUsedAt: notification.at });
+      }
     } else if (ev.type === "usage") {
       run.inputTokens = ev.usage.inputTokens;
       run.outputTokens = ev.usage.outputTokens;
@@ -183,16 +204,21 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       schedule(input.runId, resume);
       return true;
     },
-    list_sessions: async () => [
-      {
-        sessionId: "5b3f2c1a-8d4e-4f6b-9a7c-2e1d0f9b8a6c",
-        cwd: projects[0]?.path ?? "/",
-        title: "Criar migração Flyway V12 para tabela leads",
-        tags: ["migração"],
-        createdAt: new Date(Date.now() - 3_600_000).toISOString(),
-        lastUsedAt: new Date().toISOString(),
-      },
-    ],
+    list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
+    rename_session: async ({ input }) => {
+      const session = sessions.find((s) => s.sessionId === input.sessionId);
+      if (!session) throw new Error(`Sessão ${input.sessionId} não encontrada`);
+      if (!input.title.trim()) throw new Error("Informe um título para a sessão");
+      session.title = input.title.trim();
+      return true;
+    },
+    tag_session: async ({ input }) => {
+      const session = sessions.find((s) => s.sessionId === input.sessionId);
+      if (!session) throw new Error(`Sessão ${input.sessionId} não encontrada`);
+      const tag = input.tag?.trim();
+      session.tags = tag ? [tag] : [];
+      return true;
+    },
   };
 
   return {

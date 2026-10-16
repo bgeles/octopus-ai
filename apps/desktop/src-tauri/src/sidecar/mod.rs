@@ -207,6 +207,17 @@ impl Sidecar {
             .await
     }
 
+    pub async fn rename_session(
+        &self,
+        params: SessionsRenameParams,
+    ) -> Result<SessionMutationResult> {
+        self.request("sessions.rename", params).await
+    }
+
+    pub async fn tag_session(&self, params: SessionsTagParams) -> Result<SessionMutationResult> {
+        self.request("sessions.tag", params).await
+    }
+
     /// Fecha o stdin (soltando o handle), o que faz o sidecar encerrar os runs e sair.
     pub async fn shutdown(&self) {
         let mut guard = self.stdin.lock().await;
@@ -379,6 +390,29 @@ mod tests {
                 "result"
             ]
         );
+
+        // Sessões: listar, renomear e taguear passam pelo mesmo canal.
+        let sessions = sidecar.list_sessions("/tmp").await.unwrap();
+        assert_eq!(sessions.sessions.len(), 1);
+        assert_eq!(sessions.sessions[0].tags, vec!["teste".to_string()]);
+        let renamed = sidecar
+            .rename_session(SessionsRenameParams {
+                session_id: "5b3f2c1a".into(),
+                cwd: "/tmp".into(),
+                title: "novo".into(),
+            })
+            .await
+            .unwrap();
+        assert!(renamed.ok);
+        let tagged = sidecar
+            .tag_session(SessionsTagParams {
+                session_id: "5b3f2c1a".into(),
+                cwd: "/tmp".into(),
+                tag: None,
+            })
+            .await
+            .unwrap();
+        assert!(tagged.ok);
 
         // Erro JSON-RPC vira Err com código e mensagem.
         let err = sidecar

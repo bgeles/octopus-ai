@@ -176,6 +176,28 @@ pub struct SessionsListResult {
     pub sessions: Vec<SessionSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionsRenameParams {
+    pub session_id: String,
+    pub cwd: String,
+    pub title: String,
+}
+
+/// `tag: None` serializa como `null` e remove a tag no SDK.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionsTagParams {
+    pub session_id: String,
+    pub cwd: String,
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMutationResult {
+    pub ok: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Eventos de run (sidecar -> Rust -> UI)
 // ---------------------------------------------------------------------------
@@ -423,6 +445,30 @@ mod tests {
                 message: "Rede bloqueada pelo perfil de sandbox estrito".into()
             }
         );
+    }
+
+    #[test]
+    fn sessions_request_fixtures_roundtrip() {
+        let raw = read_fixture("sessions-list.request.json");
+        let request: JsonRpcRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(request.method, "sessions.list");
+        let params: SessionsListParams = serde_json::from_value(request.params.unwrap()).unwrap();
+        assert_eq!(params.cwd, "/Users/dev/projetos/chat-core");
+
+        let raw = read_fixture("sessions-rename.request.json");
+        let request: JsonRpcRequest = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(request.method, "sessions.rename");
+        let params: SessionsRenameParams = serde_json::from_value(request.params.unwrap()).unwrap();
+        assert_eq!(params.title, "Migração V12: tabela leads");
+        assert_eq!(serde_json::to_value(&params).unwrap(), raw["params"]);
+
+        let raw = read_fixture("sessions-tag.request.json");
+        let request: JsonRpcRequest = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(request.method, "sessions.tag");
+        let params: SessionsTagParams = serde_json::from_value(request.params.unwrap()).unwrap();
+        assert_eq!(params.tag, None);
+        // `None` precisa virar `null` explícito, não ser omitido: o sidecar exige a chave.
+        assert_eq!(serde_json::to_value(&params).unwrap(), raw["params"]);
     }
 
     #[test]

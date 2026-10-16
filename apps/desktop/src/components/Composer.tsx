@@ -1,9 +1,13 @@
-import { useState } from "react";
+import { GitFork, History } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { PermissionMode } from "@octopus/protocol";
+import type { ResumeTarget } from "../lib/types";
 
 type ComposerProps = {
   disabled: boolean;
   busy: boolean;
+  resumeTarget?: ResumeTarget | null;
+  onCancelResume?: () => void;
   onSubmit: (prompt: string, options: { permissionMode: PermissionMode; maxTurns: number }) => void;
 };
 
@@ -15,10 +19,16 @@ const PERMISSION_LABELS: Record<PermissionMode, string> = {
   auto: "Classificador automático",
 };
 
-export function Composer({ disabled, busy, onSubmit }: ComposerProps) {
+export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, onSubmit }: ComposerProps) {
   const [prompt, setPrompt] = useState("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
   const [maxTurns, setMaxTurns] = useState(40);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Ao escolher retomar/bifurcar, o foco vai direto para a instrução.
+  useEffect(() => {
+    if (resumeTarget) textareaRef.current?.focus();
+  }, [resumeTarget]);
 
   const submit = () => {
     const text = prompt.trim();
@@ -35,12 +45,25 @@ export function Composer({ disabled, busy, onSubmit }: ComposerProps) {
       }}
       className="flex flex-col gap-2 border-t hairline bg-surface px-6 pt-4 pb-5"
     >
+      {resumeTarget && (
+        <div role="status" data-testid="resume-banner" className="flex flex-wrap items-center gap-2.5 rounded-md border border-brand bg-brand-soft px-3.5 py-2.5 text-[13px] text-brand-hover">
+          {resumeTarget.fork ? <GitFork size={14} aria-hidden /> : <History size={14} aria-hidden />}
+          <span>
+            <strong>{resumeTarget.fork ? "Bifurcando a partir de" : "Retomando"}</strong> a sessão “{resumeTarget.title ?? resumeTarget.sessionId.slice(0, 8)}” · a próxima instrução {resumeTarget.fork ? "abre uma sessão nova com o histórico copiado" : "continua com o contexto anterior"}
+          </span>
+          <span className="font-mono text-[11px] text-slate">{resumeTarget.sessionId.slice(0, 8)}…</span>
+          <button type="button" onClick={onCancelResume} className="ml-auto rounded-sm border border-brand px-2.5 py-1 text-xs font-semibold text-brand-hover hover:bg-surface">
+            Cancelar
+          </button>
+        </div>
+      )}
       <label htmlFor="prompt" className="text-xs font-medium text-slate">
         Instrução para o agente
       </label>
       <div className="flex flex-wrap items-end gap-2.5">
         <textarea
           id="prompt"
+          ref={textareaRef}
           rows={2}
           value={prompt}
           disabled={disabled}
@@ -48,7 +71,7 @@ export function Composer({ disabled, busy, onSubmit }: ComposerProps) {
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
           }}
-          placeholder={disabled ? "Selecione um projeto para começar" : "Ex.: liste as migrações e resuma a última (⌘↵ envia)"}
+          placeholder={disabled ? "Selecione um projeto para começar" : resumeTarget ? "Ex.: o que fizemos antes? (⌘↵ envia)" : "Ex.: liste as migrações e resuma a última (⌘↵ envia)"}
           className="min-w-0 flex-1 basis-80 resize-y rounded-sm border hairline-strong bg-surface px-3 py-2.5 text-sm text-ink disabled:bg-paper"
         />
         <button

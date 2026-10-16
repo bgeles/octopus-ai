@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "sessions.tag",
+  "params": {
+    "sessionId": "5b3f2c1a-8d4e-4f6b-9a7c-2e1d0f9b8a6c",
+    "cwd": "/Users/dev/projetos/chat-core",
+    "tag": null
+  }
+}
