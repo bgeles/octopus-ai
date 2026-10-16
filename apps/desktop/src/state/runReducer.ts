@@ -127,7 +127,7 @@ function applyEvent(state: RunViewState, event: RunEvent, at: string): RunViewSt
         at,
       });
       const toolCounts = { ...state.toolCounts, [event.name]: (state.toolCounts[event.name] ?? 0) + 1 };
-      const subagentIds = event.name === "Agent" || event.name === "Task" ? [...state.subagentIds, event.toolUseId] : state.subagentIds;
+      const subagentIds = isSubagentTool(event.name) ? [...state.subagentIds, event.toolUseId] : state.subagentIds;
       return { ...state, items, toolCounts, subagentIds };
     }
 
@@ -214,4 +214,70 @@ export function isRunActive(state: RunViewState): boolean {
   if (state.runId === null) return false;
   if (state.result) return false;
   return !state.items.some((i) => i.kind === "error" && i.fatal);
+}
+
+// ---------------------------------------------------------------------------
+// Árvore de subagentes (por parentToolUseId)
+// ---------------------------------------------------------------------------
+
+export type SubagentNode = {
+  toolUseId: string;
+  /** Descrição dada pelo agente principal ao delegar (ou o tipo do subagente). */
+  name: string;
+  subagentType: string | null;
+  status: "running" | "done" | "error";
+  toolCalls: number;
+  messages: number;
+  errors: number;
+  children: TranscriptItem[];
+  at: string;
+};
+
+const SUBAGENT_TOOLS = new Set(["Agent", "Task"]);
+
+export function isSubagentTool(name: string): boolean {
+  return SUBAGENT_TOOLS.has(name);
+}
+
+/** Agrupa os itens do transcript sob a chamada `Agent`/`Task` que os originou. */
+export function subagentTree(items: TranscriptItem[]): SubagentNode[] {
+  const nodes = new Map<string, SubagentNode>();
+  for (const item of items) {
+    if (item.kind === "tool" && isSubagentTool(item.name)) {
+      const input = typeof item.input === "object" && item.input !== null ? (item.input as Record<string, unknown>) : {};
+      const description = typeof input.description === "string" ? input.description : null;
+      const subagentType = typeof input.subagent_type === "string" ? input.subagent_type : null;
+      nodes.set(item.toolUseId, {
+        toolUseId: item.toolUseId,
+        name: description ?? subagentType ?? "Subagente",
+        subagentType,
+        status: item.result === null ? "running" : item.isError ? "error" : "done",
+        toolCalls: 0,
+        messages: 0,
+        errors: 0,
+        children: [],
+        at: item.at,
+      });
+    }
+  }
+  for (const item of items) {
+    if (item.kind !== "assistant" && item.kind !== "tool") continue;
+    if (!item.parentToolUseId) continue;
+    const node = nodes.get(item.parentToolUseId);
+    if (!node) continue;
+    node.children.push(item);
+    if (item.kind === "tool") {
+      node.toolCalls++;
+      if (item.isError) node.errors++;
+    } else {
+      node.messages++;
+    }
+  }
+  return [...nodes.values()];
+}
+
+/** Itens de nível superior: tudo que não pertence a um subagente conhecido. */
+export function topLevelItems(items: TranscriptItem[], tree = subagentTree(items)): TranscriptItem[] {
+  const known = new Set(tree.map((n) => n.toolUseId));
+  return items.filter((item) => !((item.kind === "assistant" || item.kind === "tool") && item.parentToolUseId && known.has(item.parentToolUseId)));
 }

@@ -1,0 +1,136 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 0,
+      "at": "2026-10-16T15:00:00.000Z",
+      "event": {
+        "type": "session_init",
+        "sessionId": "9c21e0d4-aaaa-4bbb-8ccc-0d1e2f3a17ab",
+        "model": "claude-opus-5-5",
+        "tools": ["Read", "Glob", "Grep", "Bash", "Agent"],
+        "mcpServers": [],
+        "permissionMode": "default"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 1,
+      "at": "2026-10-16T15:00:01.000Z",
+      "event": { "type": "assistant_text", "messageId": "msg_main_1", "text": "Vou pedir a um subagente que mapeie as migrações existentes.", "parentToolUseId": null }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 2,
+      "at": "2026-10-16T15:00:02.000Z",
+      "event": {
+        "type": "tool_use",
+        "toolUseId": "toolu_agent_1",
+        "name": "Agent",
+        "input": { "description": "Mapear migrações Flyway", "subagent_type": "Explore", "prompt": "Liste as migrações em src/main/resources/db/migration e resuma a última." },
+        "parentToolUseId": null
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 3,
+      "at": "2026-10-16T15:00:03.000Z",
+      "event": { "type": "assistant_text", "messageId": "msg_sub_1", "text": "Procurando arquivos V*.sql.", "parentToolUseId": "toolu_agent_1" }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 4,
+      "at": "2026-10-16T15:00:04.000Z",
+      "event": {
+        "type": "tool_use",
+        "toolUseId": "toolu_sub_grep",
+        "name": "Grep",
+        "input": { "pattern": "CREATE TABLE", "path": "src/main/resources/db/migration" },
+        "parentToolUseId": "toolu_agent_1"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 5,
+      "at": "2026-10-16T15:00:05.000Z",
+      "event": { "type": "tool_result", "toolUseId": "toolu_sub_grep", "content": "V10__create_leads.sql:1:CREATE TABLE leads (", "isError": false, "parentToolUseId": "toolu_agent_1" }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 6,
+      "at": "2026-10-16T15:00:06.000Z",
+      "event": { "type": "tool_result", "toolUseId": "toolu_agent_1", "content": "Há duas migrações: V10 cria leads e V11 adiciona status.", "isError": false, "parentToolUseId": null }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 7,
+      "at": "2026-10-16T15:00:07.000Z",
+      "event": { "type": "assistant_text", "messageId": "msg_main_2", "text": "A última migração é a V11, que adiciona a coluna status.", "parentToolUseId": null }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 8,
+      "at": "2026-10-16T15:00:08.000Z",
+      "event": {
+        "type": "usage",
+        "usage": { "inputTokens": 2200, "outputTokens": 410, "cacheReadTokens": 120000, "cacheCreationTokens": 0 },
+        "contextWindow": 1000000
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 9,
+      "at": "2026-10-16T15:00:09.000Z",
+      "event": {
+        "type": "result",
+        "sessionId": "9c21e0d4-aaaa-4bbb-8ccc-0d1e2f3a17ab",
+        "subtype": "success",
+        "isError": false,
+        "costUsd": 0.0912,
+        "durationMs": 9000,
+        "numTurns": 2,
+        "usage": { "inputTokens": 2200, "outputTokens": 410, "cacheReadTokens": 120000, "cacheCreationTokens": 0 },
+        "stopReason": "end_turn",
+        "resultText": "A última migração é a V11."
+      }
+    }
+  }
+]

@@ -14,7 +14,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::protocol::{PermissionDecision, RunEvent, RunOptions};
-use models::{Approval, ApprovalDecision, Project, Run, RunStatus, StoredRunEvent};
+use models::{Approval, ApprovalDecision, Project, ProjectTotals, Run, RunStatus, StoredRunEvent};
 
 const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init", include_str!("migrations/0001_init.sql")),
@@ -210,6 +210,28 @@ impl Store {
             .query_map(params![project_id, limit], Run::from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Soma custo e tokens de todos os runs do projeto (o custo só existe em runs concluídos).
+    pub fn project_totals(&self, project_id: &str) -> Result<ProjectTotals> {
+        let conn = self.conn.lock().expect("store mutex");
+        conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(cost_usd), 0), COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
+             FROM run WHERE project_id = ?1",
+            params![project_id],
+            |r| {
+                Ok(ProjectTotals {
+                    project_id: project_id.to_string(),
+                    runs: r.get::<_, i64>(0)? as u64,
+                    cost_usd: r.get(1)?,
+                    input_tokens: r.get::<_, i64>(2)? as u64,
+                    output_tokens: r.get::<_, i64>(3)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                })
+            },
+        )
+        .map_err(Into::into)
     }
 
     pub fn set_run_status(&self, id: &str, status: RunStatus) -> Result<()> {
@@ -780,5 +802,59 @@ mod tests {
         assert!(s.list_approvals(&other.id, 10).unwrap().is_empty());
         s.delete_project(&p.id).unwrap();
         assert!(s.list_approvals(&p.id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_totals_sum_only_the_projects_runs() {
+        let s = store();
+        let p = s.create_project("p", "/tmp/p").unwrap();
+        let other = s.create_project("o", "/tmp/o").unwrap();
+        assert_eq!(
+            s.project_totals(&p.id).unwrap(),
+            ProjectTotals {
+                project_id: p.id.clone(),
+                runs: 0,
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+            }
+        );
+        let result = |cost: f64, input: u64| RunEvent::Result {
+            session_id: "s".into(),
+            subtype: "success".into(),
+            is_error: false,
+            cost_usd: Some(cost),
+            duration_ms: None,
+            num_turns: Some(1),
+            usage: Some(Usage {
+                input_tokens: input,
+                output_tokens: 10,
+                cache_read_tokens: 100,
+                cache_creation_tokens: 0,
+            }),
+            stop_reason: None,
+            result_text: None,
+        };
+        let r1 = s.create_run(&p.id, "a", &RunOptions::default()).unwrap();
+        s.record_run_event(&r1.id, 0, "t", &result(0.25, 1000))
+            .unwrap();
+        let r2 = s.create_run(&p.id, "b", &RunOptions::default()).unwrap();
+        s.record_run_event(&r2.id, 0, "t", &result(0.5, 2000))
+            .unwrap();
+        // Run ainda sem resultado conta como run, mas não soma custo.
+        s.create_run(&p.id, "c", &RunOptions::default()).unwrap();
+        let foreign = s
+            .create_run(&other.id, "x", &RunOptions::default())
+            .unwrap();
+        s.record_run_event(&foreign.id, 0, "t", &result(9.0, 9))
+            .unwrap();
+
+        let totals = s.project_totals(&p.id).unwrap();
+        assert_eq!(totals.runs, 3);
+        assert!((totals.cost_usd - 0.75).abs() < 1e-9);
+        assert_eq!(totals.input_tokens, 3000);
+        assert_eq!(totals.output_tokens, 20);
+        assert_eq!(totals.cache_read_tokens, 200);
     }
 }

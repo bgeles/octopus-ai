@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { fixtureRunEvents } from "../lib/mockTransport";
-import { applyRunEvent, contextUsage, initialRunViewState, isRunActive, resolvePermission, withUserPrompt } from "./runReducer";
+import { fixtureRunEvents, subagentRunEvents } from "../lib/mockTransport";
+import { applyRunEvent, contextUsage, initialRunViewState, isRunActive, resolvePermission, subagentTree, topLevelItems, withUserPrompt } from "./runReducer";
 
 const events = fixtureRunEvents();
 
@@ -92,5 +92,38 @@ describe("contextUsage", () => {
 
   it("cai para a janela padrão sem informação", () => {
     expect(contextUsage(initialRunViewState())).toEqual({ used: 0, window: 200_000, fraction: 0 });
+  });
+});
+
+describe("subagentTree", () => {
+  const subagentEvents = subagentRunEvents();
+
+  it("agrupa itens pelo parentToolUseId com nome, contadores e status", () => {
+    const running = reduceAll(subagentEvents.slice(0, 6));
+    let tree = subagentTree(running.items);
+    expect(tree).toHaveLength(1);
+    expect(tree[0]).toMatchObject({ toolUseId: "toolu_agent_1", name: "Mapear migrações Flyway", subagentType: "Explore", status: "running", toolCalls: 1, messages: 1, errors: 0 });
+    expect(tree[0]!.children.map((c) => c.kind)).toEqual(["assistant", "tool"]);
+
+    const done = reduceAll(subagentEvents);
+    tree = subagentTree(done.items);
+    expect(tree[0]!.status).toBe("done");
+    expect(done.toolCounts).toEqual({ Agent: 1, Grep: 1 });
+  });
+
+  it("topLevelItems esconde os filhos de subagentes conhecidos e mantém órfãos", () => {
+    const state = reduceAll(subagentEvents);
+    const top = topLevelItems(state.items);
+    expect(top.map((i) => (i.kind === "tool" ? `tool:${i.name}` : i.kind))).toEqual(["assistant", "tool:Agent", "assistant"]);
+
+    const orphan = applyRunEvent(initialRunViewState("r"), { runId: "r", seq: 0, at: "t", event: { type: "assistant_text", messageId: null, text: "solto", parentToolUseId: "toolu_desconhecido" } });
+    expect(topLevelItems(orphan.items)).toHaveLength(1);
+  });
+
+  it("marca erro quando o subagente falha", () => {
+    let state = initialRunViewState("r");
+    state = applyRunEvent(state, { runId: "r", seq: 0, at: "t", event: { type: "tool_use", toolUseId: "a1", name: "Task", input: { subagent_type: "Plan" }, parentToolUseId: null } });
+    state = applyRunEvent(state, { runId: "r", seq: 1, at: "t", event: { type: "tool_result", toolUseId: "a1", content: "falhou", isError: true, parentToolUseId: null } });
+    expect(subagentTree(state.items)[0]).toMatchObject({ name: "Plan", status: "error" });
   });
 });

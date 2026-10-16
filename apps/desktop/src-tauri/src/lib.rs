@@ -131,6 +131,7 @@ pub fn run() {
             commands::rename_session,
             commands::tag_session,
             commands::list_approvals,
+            commands::get_project_totals,
             commands::read_project_file,
         ])
         .run(tauri::generate_context!())

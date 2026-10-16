@@ -20,7 +20,8 @@ test.describe("Run ao vivo (mock)", () => {
     await approval.getByRole("button", { name: "Permitir uma vez" }).click();
 
     await expect(page.getByTestId("run-status")).toHaveText("Concluído");
-    await expect(page.getByText("US$ 0,04")).toBeVisible();
+    await expect(page.getByText("US$ 0,04", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("project-cost")).toHaveText("Projeto US$ 0,04 em 1 run");
     await expect(page.getByRole("progressbar", { name: "Uso do contexto" })).toHaveAttribute("aria-valuenow", "9");
 
     // A decisão fica registrada na vista Aprovações.

@@ -1,7 +1,8 @@
 import { AlertTriangle, Check, ChevronRight, X } from "lucide-react";
 import { useState } from "react";
-import type { PendingPermission, TranscriptItem } from "../state/runReducer";
+import { subagentTree, topLevelItems, type PendingPermission, type SubagentNode, type TranscriptItem } from "../state/runReducer";
 import { ApprovalCard, summarizeInput, type DecideFn, type ReadFileFn } from "./ApprovalCard";
+import { subagentCounters } from "./RunSidebar";
 
 type TranscriptProps = {
   runId: string | null;
@@ -21,8 +22,11 @@ export function Transcript({ runId, items, pendingPermissions, onDecide, decidin
     );
   }
 
+  // Itens de subagentes ficam aninhados sob a chamada Agent que os originou.
+  const tree = subagentTree(items);
+  const nodesById = new Map(tree.map((n) => [n.toolUseId, n]));
   // Agrupa itens contíguos do assistente/ferramentas em um "turno".
-  const groups = groupItems(items);
+  const groups = groupItems(topLevelItems(items, tree));
 
   return (
     <div className="flex w-full max-w-[920px] flex-col gap-4 p-6" aria-live="polite">
@@ -55,7 +59,7 @@ export function Transcript({ runId, items, pendingPermissions, onDecide, decidin
                     </p>
                   );
                 }
-                if (item.kind === "tool") return <ToolCall key={item.id} item={item} />;
+                if (item.kind === "tool") return <ToolCall key={item.id} item={item} subagent={nodesById.get(item.toolUseId) ?? null} />;
                 if (item.kind === "error") {
                   return (
                     <div key={item.id} role="alert" className="flex items-start gap-2 rounded-md border border-brand/40 bg-brand-soft px-3 py-2 text-[13px] text-brand-hover">
@@ -85,20 +89,22 @@ export function Transcript({ runId, items, pendingPermissions, onDecide, decidin
   );
 }
 
-function ToolCall({ item }: { item: Extract<TranscriptItem, { kind: "tool" }> }) {
+function ToolCall({ item, subagent = null }: { item: Extract<TranscriptItem, { kind: "tool" }>; subagent?: SubagentNode | null }) {
   const [open, setOpen] = useState(false);
-  const summary = summarizeInput(item.name, item.input);
+  const summary = subagent ? subagent.name : summarizeInput(item.name, item.input);
   const status = item.result === null ? "pending" : item.isError ? "error" : "ok";
   return (
-    <div className={["rounded-md border hairline bg-surface text-[13px]", item.parentToolUseId ? "ml-3" : ""].join(" ")} data-testid="tool-call">
+    <div className={["rounded-md border hairline bg-surface text-[13px]", item.parentToolUseId ? "ml-3" : "", subagent ? "border-l-2 border-l-ink" : ""].join(" ")} data-testid="tool-call">
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex w-full items-center gap-2 px-3 py-2 text-left">
         {status === "pending" && <span aria-label="executando" className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-mist border-t-brand" />}
         {status === "ok" && <Check size={14} aria-label="concluída" className="shrink-0 text-success" />}
         {status === "error" && <X size={14} aria-label="falhou" className="shrink-0 text-brand" />}
-        <span className="font-semibold text-ink">{item.name}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate">{summary}</span>
+        <span className="font-semibold text-ink">{subagent ? "Subagente" : item.name}</span>
+        <span className={["min-w-0 flex-1 truncate text-xs", subagent ? "text-ink" : "font-mono text-slate"].join(" ")}>{summary}</span>
+        {subagent && <span className="shrink-0 text-xs text-slate">{subagentCounters(subagent)}</span>}
         <ChevronRight size={14} aria-hidden className={["shrink-0 text-slate transition-transform", open ? "rotate-90" : ""].join(" ")} />
       </button>
+      {subagent && <SubagentActivity node={subagent} />}
       {open && (
         <div className="flex flex-col gap-2 border-t hairline px-3 py-2">
           <div>
@@ -134,6 +140,35 @@ function groupItems(items: TranscriptItem[]): Group[] {
     }
   }
   return groups;
+}
+
+function SubagentActivity({ node }: { node: SubagentNode }) {
+  const [collapsed, setCollapsed] = useState(false);
+  return (
+    <div className="flex flex-col gap-1.5 border-t hairline px-3 py-2" data-testid="subagent-group" data-status={node.status}>
+      <button type="button" onClick={() => setCollapsed((c) => !c)} aria-expanded={!collapsed} className="flex items-center gap-2 text-left text-xs text-slate">
+        <ChevronRight size={12} aria-hidden className={["transition-transform", collapsed ? "" : "rotate-90"].join(" ")} />
+        <span>
+          Atividade do subagente{node.subagentType ? ` (${node.subagentType})` : ""} · {node.status === "running" ? "em execução" : node.status === "error" ? "falhou" : "concluído"}
+        </span>
+      </button>
+      {!collapsed && (
+        <div className="flex flex-col gap-1.5 border-l-2 border-mist pl-3">
+          {node.children.length === 0 && <span className="text-xs text-slate">Aguardando a primeira ação…</span>}
+          {node.children.map((child) => {
+            if (child.kind === "tool") return <ToolCall key={child.id} item={{ ...child, parentToolUseId: null }} />;
+            if (child.kind !== "assistant") return null;
+            return (
+              <p key={child.id} className="m-0 text-[13px] whitespace-pre-wrap text-ink">
+                {child.text}
+                {child.streaming && <span aria-label="gerando" className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-brand" />}
+              </p>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function formatTime(iso: string): string {

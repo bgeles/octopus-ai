@@ -1,5 +1,5 @@
 import type { Run } from "../lib/types";
-import { contextUsage, type RunViewState } from "../state/runReducer";
+import { contextUsage, subagentTree, type RunViewState, type SubagentNode } from "../state/runReducer";
 
 type RunSidebarProps = {
   state: RunViewState;
@@ -15,6 +15,7 @@ export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
   const turns = state.result?.numTurns ?? run?.numTurns ?? null;
   const maxTurns = run?.options.maxTurns ?? null;
   const budget = run?.options.maxBudgetUsd ?? null;
+  const subagents = subagentTree(state.items);
 
   return (
     <aside aria-label="Estado do run" className="flex w-[340px] shrink-0 flex-col gap-4 border-l hairline bg-surface p-5">
@@ -58,13 +59,13 @@ export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
           <span className="font-semibold">Principal</span>
           <span className="ml-auto text-xs text-slate">{state.model ?? "modelo padrão"}</span>
         </div>
-        {state.subagentIds.map((id) => (
-          <div key={id} className="flex items-center gap-2 py-1 pl-6 text-[13px] text-ink">
-            <span className="size-2 rounded-full bg-success" />
-            <span>Subagente</span>
-            <span className="ml-auto font-mono text-xs text-slate">{id.slice(0, 12)}</span>
-          </div>
-        ))}
+        {subagents.length > 0 && (
+          <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label="Subagentes">
+            {subagents.map((node) => (
+              <SubagentRow key={node.toolUseId} node={node} />
+            ))}
+          </ul>
+        )}
         <div className="flex flex-wrap gap-1.5 pt-1">
           {Object.entries(state.toolCounts).length === 0 && <span className="text-xs text-slate">Nenhuma ferramenta chamada</span>}
           {Object.entries(state.toolCounts)
@@ -84,6 +85,23 @@ export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
       </section>
     </aside>
   );
+}
+
+function SubagentRow({ node }: { node: SubagentNode }) {
+  const dot = node.status === "running" ? "bg-brand animate-pulse" : node.status === "error" ? "bg-brand" : "bg-success";
+  return (
+    <li className="flex items-center gap-2 border-l-2 border-mist py-1 pl-4 text-[13px] text-ink" data-testid="subagent-node" data-status={node.status}>
+      <span aria-label={node.status === "running" ? "em execução" : node.status === "error" ? "falhou" : "concluído"} className={["size-2 shrink-0 rounded-full", dot].join(" ")} />
+      <span className="min-w-0 flex-1 truncate">{node.name}</span>
+      <span className="shrink-0 text-xs text-slate">{subagentCounters(node)}</span>
+    </li>
+  );
+}
+
+export function subagentCounters(node: Pick<SubagentNode, "toolCalls" | "messages" | "errors">): string {
+  const parts = [`${node.toolCalls} ${node.toolCalls === 1 ? "ferramenta" : "ferramentas"}`, `${node.messages} ${node.messages === 1 ? "mensagem" : "mensagens"}`];
+  if (node.errors > 0) parts.push(`${node.errors} ${node.errors === 1 ? "erro" : "erros"}`);
+  return parts.join(" · ");
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
