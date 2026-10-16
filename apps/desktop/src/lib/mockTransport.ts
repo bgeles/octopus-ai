@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -346,6 +346,41 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const pages: MemoryPage[] = [];
   const pageVersions: MemoryPageVersion[] = [];
   const contextEvents: ContextEvent[] = [];
+  const handoffs: MemoryHandoff[] = [];
+  const normMock = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  /** Brief do run, como o core: handoff pendente da task (claim único) + páginas que casam com o pedido. */
+  const buildBriefMock = (projectId: string, taskId: string | null, prompt: string, runId: string): { text: string; items: string[] } | null => {
+    const pending = handoffs.find((h) => h.projectId === projectId && !h.consumedAt && (taskId ? h.taskId === taskId : h.taskId === null));
+    if (pending) {
+      pending.consumedByRunId = runId;
+      pending.consumedAt = new Date().toISOString();
+    }
+    const words = normMock(prompt)
+      .split(/[^a-z0-9_-]+/)
+      .filter((w) => w.length >= 4)
+      .slice(0, 16);
+    let relevant = pages.filter((p) => p.projectId === projectId && !p.archivedAt && words.some((w) => normMock(p.title).includes(w) || normMock(p.bodyMd).includes(w))).slice(0, 3);
+    if (relevant.length === 0) relevant = pages.filter((p) => p.projectId === projectId && !p.archivedAt && p.kind !== "tasklog").sort((a, b) => b.score - a.score).slice(0, 2);
+    if (!pending && relevant.length === 0) return null;
+    const items: string[] = [];
+    let text = "## Memória do projeto (Octopus)\n";
+    if (pending) {
+      text += `\n### Handoff pendente do run anterior desta task\n${pending.bodyMd.slice(0, 800)}\n`;
+      items.push(`handoff: ${pending.bodyMd.slice(0, 60)}`);
+    }
+    if (relevant.length) {
+      text += "\n### Páginas relevantes\n";
+      for (const p of relevant) {
+        text += `- **${p.title}** (${p.kind}): ${p.bodyMd.slice(0, 400)}\n`;
+        items.push(p.title);
+        p.accessCount += 1;
+        p.score = Math.min(1, p.score + 0.05);
+      }
+    }
+    text += "\nUse a tool memory_search para mais contexto, memory_write para registrar decisões/armadilhas e memory_handoff para deixar uma nota ao próximo run se não terminar.\n";
+    return { text, items };
+  };
+  const briefEvent = (runId: string, brief: { text: string; items: string[] }): RunEventNotification => ({ runId, seq: 0, at: new Date().toISOString(), event: { type: "brief_injected", chars: brief.text.length, items: brief.items } });
   const sanitizeMock = (text: string): [string, boolean] => {
     let redacted = false;
     let out = text.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, () => {
@@ -395,7 +430,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       .map((o) => o.title.split(/\s+/)[1])
       .filter((f, i, arr): f is string => Boolean(f) && arr.indexOf(f) === i);
     const notes = observations.filter((o) => o.runId === run.id && (o.kind === "turn_end" || o.kind === "subagent_end") && o.body.trim()).map((o) => o.body.trim().slice(0, 400));
-    const statusLabel = run.status === "completed" ? "concluído" : run.status === "failed" ? "falhou" : run.status;
+    const statusLabel = run.status === "completed" ? "concluído" : run.status === "failed" ? "falhou" : run.status === "interrupted" ? "interrompido" : run.status;
     let entry = `\n## ${run.startedAt.slice(0, 16).replace("T", " ")} · run ${run.id.slice(0, 12)} · ${statusLabel}${run.costUsd != null ? ` · US$ ${run.costUsd.toFixed(2)}` : ""}\n`;
     entry += `**Pedido:** ${run.prompt.trim().slice(0, 300)}\n`;
     if (run.resultText?.trim()) entry += `**Resultado:** ${run.resultText.trim().slice(0, 600)}\n`;
@@ -412,6 +447,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     if (!existing) saved.slug = slug;
     const ts = new Date().toISOString();
     for (const o of observations) if (o.runId === run.id && !o.consolidatedAt) o.consolidatedAt = ts;
+    // Run de task que não terminou bem e sem handoff do agente: nota automática.
+    if (run.status !== "completed" && run.taskId && !handoffs.some((h) => h.runId === run.id)) {
+      let body = `Run ${statusLabel} sem handoff do agente.`;
+      if (run.errorMessage?.trim()) body += `\n\n**O que falhou:** ${run.errorMessage.trim().slice(0, 400)}`;
+      if (notes.length) body += `\n\n**Últimas notas do agente:** ${notes.join(" · ")}`;
+      if (files.length) body += `\n\n**Arquivos tocados:** ${files.join(", ")}`;
+      handoffs.unshift({ id: `hand_${Math.random().toString(36).slice(2, 10)}`, projectId: run.projectId, taskId: run.taskId, runId: run.id, bodyMd: body, source: "auto", createdAt: ts, consumedByRunId: null, consumedAt: null });
+    }
   };
 
   /** Keychain de mentira: só para a UI; os valores nunca saem daqui. */
@@ -751,6 +794,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       };
       runs.set(run.id, run);
       events.set(run.id, []);
+      const brief = buildBriefMock(run.projectId, null, run.prompt, run.id);
+      if (brief) scriptByRun.set(run.id, [briefEvent(run.id, brief), ...script]);
       schedule(run.id, 0);
       return { ...run };
     },
@@ -762,9 +807,11 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       pausedAt.delete(runId);
       run.status = "interrupted";
       run.endedAt = new Date().toISOString();
+      run.errorMessage = "Run interrompido pelo usuário";
       closePendingApprovals(runId);
       finishTaskRun(run, false, "Run interrompido pelo usuário");
       emitEvent(runId, { type: "error", message: "Run interrompido pelo usuário", fatal: true });
+      consolidateRunMock(run);
       return true;
     },
     decide_permission: async ({ input }) => {
@@ -1064,7 +1111,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           };
           runs.set(run.id, run);
           events.set(run.id, []);
-          scriptByRun.set(run.id, taskRunEvents());
+          const taskBrief = buildBriefMock(project.id, task.id, prompt, run.id);
+          scriptByRun.set(run.id, taskBrief ? [briefEvent(run.id, taskBrief), ...taskRunEvents()] : taskRunEvents());
           task.status = "running";
           task.lockRunId = run.id;
           task.updatedAt = run.startedAt;
@@ -1200,6 +1248,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     list_memory_page_versions: async ({ pageId }) => pageVersions.filter((v) => v.pageId === pageId).map((v) => ({ ...v })),
     list_memory_observations: async ({ projectId, runId, limit }) => observations.filter((o) => o.projectId === projectId && (!runId || o.runId === runId)).slice(0, limit ?? 200).map((o) => ({ ...o })),
     list_context_events: async ({ runId }) => contextEvents.filter((c) => c.runId === runId).map((c) => ({ ...c })),
+    list_memory_handoffs: async ({ projectId }) => handoffs.filter((h) => h.projectId === projectId).sort((a, b) => Number(Boolean(a.consumedAt)) - Number(Boolean(b.consumedAt)) || b.createdAt.localeCompare(a.createdAt)).map((h) => ({ ...h })),
     rebuild_memory_index: async ({ projectId }) => {
       const n = pages.filter((p) => p.projectId === projectId).length;
       audit("você", "memory.reindex", projectId, { pages: n });

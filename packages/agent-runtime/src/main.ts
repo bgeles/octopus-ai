@@ -12,7 +12,7 @@ import { createSdkMcpServer, listSessions, query, renameSession, tagSession, too
 import { RpcServer } from "./rpc.js";
 import { RunManager, type QueryFn } from "./runner.js";
 import { toSessionSummary } from "./sessions.js";
-import { createTaskToolsFactory } from "./taskTools.js";
+import { createOctopusToolsFactory } from "./octopusTools.js";
 
 const require = createRequire(import.meta.url);
 const runtimeVersion: string = require("../package.json").version;
@@ -57,7 +57,15 @@ const emit = (runId: string, event: RunEvent) => {
 };
 
 // O cast isola o restante do sidecar dos tipos do SDK; a compatibilidade estrutural é coberta por testes.
-const runs = new RunManager(query as unknown as QueryFn, emit, log, createTaskToolsFactory(createSdkMcpServer as never, tool as never), (hook) => server.notify("run.hook", hook));
+const runs = new RunManager(
+  query as unknown as QueryFn,
+  emit,
+  log,
+  createOctopusToolsFactory(createSdkMcpServer as never, tool as never),
+  (hook) => server.notify("run.hook", hook),
+  undefined,
+  (call) => server.notify("run.memory_call", call),
+);
 
 server.register("runtime.hello", async () => ({ protocolVersion: PROTOCOL_VERSION, runtimeVersion, sdkVersion }));
 
@@ -74,6 +82,10 @@ server.register("permission.decide", async ({ runId, requestId, decision }) => (
 
 server.register("hook.decide", async ({ runId, hookId, decision }) => ({
   applied: runs.decideHook(runId, hookId, decision),
+}));
+
+server.register("memory.result", async ({ runId, callId, result }) => ({
+  applied: runs.resolveMemoryCall(runId, callId, result),
 }));
 
 server.register("sessions.list", async ({ cwd }) => {

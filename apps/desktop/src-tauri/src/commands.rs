@@ -156,6 +156,20 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
         )
         .map_err(err)?;
 
+    // Memória: brief (handoff pendente + páginas relevantes) e tools MCP só na cópia enviada ao sidecar.
+    let mut options = options;
+    {
+        let brief = state
+            .store
+            .memory_brief(&project.id, None, &input.prompt, &run.id)
+            .map_err(err)?;
+        let memory = options.memory.get_or_insert_with(Default::default);
+        memory.tools = Some(true);
+        if let Some(b) = brief {
+            memory.brief = Some(b.text);
+            memory.brief_items = Some(b.items);
+        }
+    }
     // A chave de API (quando o projeto usa uma) entra só aqui, a caminho do sidecar;
     // o run gravado acima fica com as opções sem segredo.
     let options =

@@ -1,0 +1,40 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "run.memory_call",
+    "params": {
+      "runId": "run_mem_01",
+      "callId": "mem_1",
+      "op": "search",
+      "args": {
+        "query": "migração flyway"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.memory_call",
+    "params": {
+      "runId": "run_mem_01",
+      "callId": "mem_2",
+      "op": "write",
+      "args": {
+        "kind": "decisions",
+        "title": "Índice parcial em status",
+        "body": "Criar índice parcial em triage(status) WHERE status <> 'done'."
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.memory_call",
+    "params": {
+      "runId": "run_mem_01",
+      "callId": "mem_3",
+      "op": "handoff",
+      "args": {
+        "body": "Onde parei: V12 criada; falta o índice. O que falhou: nada. O que falta: revisar índice e abrir PR."
+      }
+    }
+  }
+]

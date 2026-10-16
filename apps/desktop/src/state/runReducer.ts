@@ -51,6 +51,8 @@ export type RunViewState = {
   lastSeq: number;
   toolCounts: Record<string, number>;
   subagentIds: string[];
+  /** Brief de memória injetado no início do run (o que entrou no contexto). */
+  brief: { chars: number; items: string[] } | null;
 };
 
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -70,6 +72,7 @@ export function initialRunViewState(runId: string | null = null): RunViewState {
     lastSeq: -1,
     toolCounts: {},
     subagentIds: [],
+    brief: null
   };
 }
 
@@ -196,6 +199,9 @@ function applyEvent(state: RunViewState, event: RunEvent, at: string): RunViewSt
     case "task_update":
       // O board reage a este evento; no transcript a chamada da tool task_update já aparece como tool_use.
       return state;
+
+    case "brief_injected":
+      return { ...state, brief: { chars: event.chars, items: event.items } };
 
     case "observation":
     case "compaction":

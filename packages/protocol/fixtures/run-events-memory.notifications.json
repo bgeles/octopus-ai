@@ -32,6 +32,24 @@
     "params": {
       "runId": "run_mem_01",
       "seq": 1,
+      "at": "2026-10-16T14:01:41.000Z",
+      "event": {
+        "type": "brief_injected",
+        "chars": 1840,
+        "items": [
+          "handoff: T-21 · Migração V12",
+          "Migrações sempre em Flyway versionado",
+          "Log de tarefas — 2026-10"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_mem_01",
+      "seq": 2,
       "at": "2026-10-16T14:01:46.000Z",
       "event": {
         "type": "tool_use",
@@ -50,7 +68,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 2,
+      "seq": 3,
       "at": "2026-10-16T14:01:47.000Z",
       "event": {
         "type": "tool_result",
@@ -66,7 +84,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 3,
+      "seq": 4,
       "at": "2026-10-16T14:01:47.100Z",
       "event": {
         "type": "observation",
@@ -85,7 +103,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 4,
+      "seq": 5,
       "at": "2026-10-16T14:01:50.000Z",
       "event": {
         "type": "tool_use",
@@ -103,7 +121,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 5,
+      "seq": 6,
       "at": "2026-10-16T14:01:58.000Z",
       "event": {
         "type": "tool_result",
@@ -119,7 +137,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 6,
+      "seq": 7,
       "at": "2026-10-16T14:01:58.100Z",
       "event": {
         "type": "observation",
@@ -138,7 +156,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 7,
+      "seq": 8,
       "at": "2026-10-16T14:02:00.000Z",
       "event": {
         "type": "compaction",
@@ -153,7 +171,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 8,
+      "seq": 9,
       "at": "2026-10-16T14:02:03.000Z",
       "event": {
         "type": "compaction",
@@ -168,7 +186,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 9,
+      "seq": 10,
       "at": "2026-10-16T14:02:04.000Z",
       "event": {
         "type": "observation",
@@ -187,7 +205,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 10,
+      "seq": 11,
       "at": "2026-10-16T14:02:05.000Z",
       "event": {
         "type": "assistant_text",
@@ -202,7 +220,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 11,
+      "seq": 12,
       "at": "2026-10-16T14:02:05.500Z",
       "event": {
         "type": "observation",
@@ -221,7 +239,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 12,
+      "seq": 13,
       "at": "2026-10-16T14:02:06.000Z",
       "event": {
         "type": "result",
@@ -247,7 +265,7 @@
     "method": "run.event",
     "params": {
       "runId": "run_mem_01",
-      "seq": 13,
+      "seq": 14,
       "at": "2026-10-16T14:02:06.200Z",
       "event": {
         "type": "observation",

@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use super::{new_id, now, Store};
-use crate::protocol::ObservationKind;
+use crate::protocol::{MemoryCallResult, MemoryOp, ObservationKind};
+
+/// Tamanho máximo do brief injetado no contexto do agente.
+pub const MAX_BRIEF_CHARS: usize = 3_000;
 
 pub const REDACTED: &str = "[redigido]";
 pub const PAGE_KINDS: &[&str] = &[
@@ -256,6 +259,45 @@ pub struct ContextEvent {
     pub kind: String,
     pub payload: serde_json::Value,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryHandoff {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub body_md: String,
+    pub source: String,
+    pub created_at: String,
+    pub consumed_by_run_id: Option<String>,
+    pub consumed_at: Option<String>,
+}
+
+impl MemoryHandoff {
+    const SELECT: &'static str = "SELECT id, project_id, task_id, run_id, body_md, source, created_at, consumed_by_run_id, consumed_at FROM memory_handoff";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            task_id: row.get(2)?,
+            run_id: row.get(3)?,
+            body_md: row.get(4)?,
+            source: row.get(5)?,
+            created_at: row.get(6)?,
+            consumed_by_run_id: row.get(7)?,
+            consumed_at: row.get(8)?,
+        })
+    }
+}
+
+/// O que entra no contexto do agente no início do run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryBrief {
+    pub text: String,
+    pub items: Vec<String>,
 }
 
 // ---------------------------------------------------------------------- store
@@ -735,6 +777,42 @@ impl Store {
                 turn_notes.join(" · ")
             ));
         }
+        // Run de task que não terminou bem e sem handoff do agente: nota automática "onde parei".
+        if status != "completed" {
+            if let Some(tid) = &task_id {
+                let has_handoff: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM memory_handoff WHERE run_id = ?1",
+                    params![run_id],
+                    |r| r.get(0),
+                )?;
+                if has_handoff == 0 {
+                    let mut body = format!("Run {status_label} sem handoff do agente.");
+                    if let Some(e) = error_message.as_deref().filter(|s| !s.trim().is_empty()) {
+                        body.push_str(&format!(
+                            "\n\n**O que falhou:** {}",
+                            first_chars(e.trim(), 400)
+                        ));
+                    }
+                    if !turn_notes.is_empty() {
+                        body.push_str(&format!(
+                            "\n\n**Últimas notas do agente:** {}",
+                            turn_notes.join(" · ")
+                        ));
+                    }
+                    if !files.is_empty() {
+                        body.push_str(&format!("\n\n**Arquivos tocados:** {}", files.join(", ")));
+                    }
+                    Self::create_handoff_in(
+                        tx,
+                        &project_id,
+                        Some(tid),
+                        Some(run_id),
+                        &body,
+                        "auto",
+                    )?;
+                }
+            }
+        }
         let slug = format!("log-de-tarefas-{month}");
         let existing: Option<(String, String)> = tx
             .query_row(
@@ -772,6 +850,285 @@ impl Store {
         Ok(Some(id))
     }
 
+    // ------------------------------------------------------------------ handoffs e recall
+
+    pub(crate) fn create_handoff_in(
+        tx: &Transaction<'_>,
+        project_id: &str,
+        task_id: Option<&str>,
+        run_id: Option<&str>,
+        body: &str,
+        source: &str,
+    ) -> Result<String> {
+        let (body, _) = sanitize(body.trim());
+        let id = new_id("hand");
+        tx.execute(
+            "INSERT INTO memory_handoff (id, project_id, task_id, run_id, body_md, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, project_id, task_id, run_id, body, source, now()],
+        )?;
+        Ok(id)
+    }
+
+    pub fn create_handoff(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+        run_id: Option<&str>,
+        body: &str,
+        source: &str,
+    ) -> Result<MemoryHandoff> {
+        if body.trim().is_empty() {
+            anyhow::bail!("O handoff precisa de conteúdo");
+        }
+        let id = {
+            let mut conn = self.conn.lock().expect("store mutex");
+            let tx = conn.transaction()?;
+            let id = Self::create_handoff_in(&tx, project_id, task_id, run_id, body, source)?;
+            tx.commit()?;
+            id
+        };
+        let conn = self.conn.lock().expect("store mutex");
+        Ok(conn.query_row(
+            &format!("{} WHERE id = ?1", MemoryHandoff::SELECT),
+            params![id],
+            MemoryHandoff::from_row,
+        )?)
+    }
+
+    pub fn list_handoffs(&self, project_id: &str) -> Result<Vec<MemoryHandoff>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare(&format!(
+            "{} WHERE project_id = ?1 ORDER BY (consumed_at IS NOT NULL), created_at DESC",
+            MemoryHandoff::SELECT
+        ))?;
+        let rows = stmt.query_map(params![project_id], MemoryHandoff::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Monta o brief do run: handoff pendente da task (consumido por este run, claim único) e as
+    /// páginas mais relevantes para o pedido. `None` quando a memória ainda está vazia.
+    pub fn memory_brief(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+        prompt: &str,
+        run_id: &str,
+    ) -> Result<Option<MemoryBrief>> {
+        let handoff: Option<MemoryHandoff> = {
+            let mut conn = self.conn.lock().expect("store mutex");
+            let tx = conn.transaction()?;
+            let found = tx
+                .query_row(
+                    &format!(
+                        "{} WHERE project_id = ?1 AND consumed_at IS NULL AND ((?2 IS NOT NULL AND task_id = ?2) OR (?2 IS NULL AND task_id IS NULL)) ORDER BY created_at DESC LIMIT 1",
+                        MemoryHandoff::SELECT
+                    ),
+                    params![project_id, task_id],
+                    MemoryHandoff::from_row,
+                )
+                .optional()?;
+            if let Some(h) = &found {
+                tx.execute(
+                    "UPDATE memory_handoff SET consumed_by_run_id = ?2, consumed_at = ?3 WHERE id = ?1",
+                    params![h.id, run_id, now()],
+                )?;
+            }
+            tx.commit()?;
+            found
+        };
+        let task_title: Option<String> = match task_id {
+            Some(id) => {
+                let conn = self.conn.lock().expect("store mutex");
+                conn.query_row("SELECT title FROM task WHERE id = ?1", params![id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+            }
+            None => None,
+        };
+        let query = brief_query(prompt, task_title.as_deref());
+        let mut pages: Vec<MemoryPage> = self
+            .search_pages(project_id, &query, 3)?
+            .into_iter()
+            .map(|h| h.page)
+            .collect();
+        if pages.is_empty() {
+            let conn = self.conn.lock().expect("store mutex");
+            let mut stmt = conn.prepare(&format!(
+                "{} WHERE p.project_id = ?1 AND p.archived_at IS NULL AND p.kind <> 'tasklog' ORDER BY p.score DESC, p.updated_at DESC LIMIT 2",
+                MemoryPage::SELECT
+            ))?;
+            pages = stmt
+                .query_map(params![project_id], MemoryPage::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+        }
+        if handoff.is_none() && pages.is_empty() {
+            return Ok(None);
+        }
+        let mut text = String::from(
+            "## Memória do projeto (Octopus)
+",
+        );
+        let mut items = Vec::new();
+        if let Some(h) = &handoff {
+            text.push_str(
+                "
+### Handoff pendente do run anterior desta task
+",
+            );
+            text.push_str(&first_chars(&h.body_md, 800));
+            text.push('\n');
+            items.push(format!("handoff: {}", first_chars(&h.body_md, 60)));
+        }
+        if !pages.is_empty() {
+            text.push_str(
+                "
+### Páginas relevantes
+",
+            );
+            let budget = MAX_BRIEF_CHARS.saturating_sub(text.len() + 220);
+            let per_page = (budget / pages.len()).clamp(200, 700);
+            for p in &pages {
+                text.push_str(&format!(
+                    "- **{}** ({}): {}
+",
+                    p.title,
+                    p.kind,
+                    first_chars(&p.body_md, per_page)
+                ));
+                items.push(p.title.clone());
+            }
+        }
+        text.push_str("
+Use a tool memory_search para mais contexto, memory_write para registrar decisões/armadilhas e memory_handoff para deixar uma nota ao próximo run se não terminar.
+");
+        let ids: Vec<String> = pages.iter().map(|p| p.id.clone()).collect();
+        self.touch_pages(&ids)?;
+        Ok(Some(MemoryBrief { text, items }))
+    }
+
+    /// Responde a uma tool de memória chamada pelo agente (`run.memory_call`).
+    pub fn handle_memory_call(
+        &self,
+        run_id: &str,
+        op: MemoryOp,
+        args: &serde_json::Value,
+    ) -> Result<MemoryCallResult> {
+        let (project_id, task_id): (String, Option<String>) = {
+            let conn = self.conn.lock().expect("store mutex");
+            conn.query_row(
+                "SELECT project_id, task_id FROM run WHERE id = ?1",
+                params![run_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .with_context(|| format!("run {run_id} não encontrado"))?
+        };
+        let str_arg = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string()
+        };
+        match op {
+            MemoryOp::Search => {
+                let query = str_arg("query");
+                let hits = self.search_pages(&project_id, &query, 5)?;
+                if hits.is_empty() {
+                    return Ok(MemoryCallResult {
+                        ok: true,
+                        content: format!("Nenhuma página da memória casa com \"{query}\"."),
+                    });
+                }
+                let ids: Vec<String> = hits.iter().map(|h| h.page.id.clone()).collect();
+                self.touch_pages(&ids)?;
+                let mut out = format!(
+                    "{} página(s):
+",
+                    hits.len()
+                );
+                for h in hits {
+                    out.push_str(&format!(
+                        "
+## {} ({})
+{}
+",
+                        h.page.title,
+                        h.page.kind,
+                        first_chars(&h.page.body_md, 900)
+                    ));
+                }
+                Ok(MemoryCallResult {
+                    ok: true,
+                    content: out,
+                })
+            }
+            MemoryOp::Write => {
+                let kind = str_arg("kind");
+                if !["decisions", "architecture", "pitfalls", "note"].contains(&kind.as_str()) {
+                    return Ok(MemoryCallResult {
+                        ok: false,
+                        content: "Tipo inválido: use decisions, architecture, pitfalls ou note."
+                            .into(),
+                    });
+                }
+                let input = MemoryPageInput {
+                    project_id: project_id.clone(),
+                    page_id: None,
+                    kind,
+                    title: str_arg("title"),
+                    body_md: str_arg("body"),
+                };
+                match self.save_page(&input, &format!("run {run_id} (agente)"), "agent") {
+                    Ok(page) => {
+                        self.audit(
+                            "agente",
+                            "memory.page",
+                            Some(&project_id),
+                            serde_json::json!({"pageId": page.id, "kind": page.kind, "title": page.title, "runId": run_id}),
+                        )?;
+                        Ok(MemoryCallResult {
+                            ok: true,
+                            content: format!(
+                                "Página \"{}\" gravada na memória do projeto ({}).",
+                                page.title, page.kind
+                            ),
+                        })
+                    }
+                    Err(e) => Ok(MemoryCallResult {
+                        ok: false,
+                        content: format!("Não gravei: {e:#}"),
+                    }),
+                }
+            }
+            MemoryOp::Handoff => {
+                let body = str_arg("body");
+                match self.create_handoff(
+                    &project_id,
+                    task_id.as_deref(),
+                    Some(run_id),
+                    &body,
+                    "agent",
+                ) {
+                    Ok(_) => Ok(MemoryCallResult {
+                        ok: true,
+                        content: if task_id.is_some() {
+                            "Handoff registrado: o próximo run desta task vai recebê-lo no início."
+                                .into()
+                        } else {
+                            "Handoff registrado para o próximo run avulso deste projeto.".into()
+                        },
+                    }),
+                    Err(e) => Ok(MemoryCallResult {
+                        ok: false,
+                        content: format!("Não registrei: {e:#}"),
+                    }),
+                }
+            }
+        }
+    }
+
     /// Depois de `record_run_event` fechar a transação: grava o arquivo da página consolidada.
     pub fn flush_wiki_page(&self, page_id: &str) -> Result<()> {
         if let Some(page) = self.get_page(page_id)? {
@@ -788,6 +1145,25 @@ fn first_chars(s: &str, n: usize) -> String {
     } else {
         format!("{}…", one_line.chars().take(n).collect::<String>())
     }
+}
+
+/// Palavras do pedido (e da task) que valem como consulta de recall.
+fn brief_query(prompt: &str, task_title: Option<&str>) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for w in task_title
+        .unwrap_or("")
+        .split_whitespace()
+        .chain(prompt.split_whitespace())
+    {
+        let w: String = w.chars().filter(|c| c.is_alphanumeric()).collect();
+        if w.chars().count() >= 4 && !words.iter().any(|x| x.eq_ignore_ascii_case(&w)) {
+            words.push(w);
+        }
+        if words.len() >= 16 {
+            break;
+        }
+    }
+    words.join(" ")
 }
 
 /// Monta a consulta FTS5: termos entre aspas com prefixo, unidos por OR.
@@ -1000,6 +1376,225 @@ mod tests {
         assert_eq!(store.search_pages(&project.id, "V13", 10).unwrap().len(), 1);
         store.touch_pages(std::slice::from_ref(&page.id)).unwrap();
         assert_eq!(store.get_page(&page.id).unwrap().unwrap().access_count, 1);
+    }
+
+    #[test]
+    fn brief_claims_the_pending_handoff_once_and_picks_relevant_pages() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.create_project("p", "/tmp/p").unwrap();
+        assert!(store
+            .memory_brief(&project.id, None, "qualquer coisa", "run_x")
+            .unwrap()
+            .is_none());
+        store
+            .save_page(
+                &MemoryPageInput {
+                    project_id: project.id.clone(),
+                    page_id: None,
+                    kind: "decisions".into(),
+                    title: "Migrações em Flyway".into(),
+                    body_md: "Toda alteração de esquema vira migração Flyway.".into(),
+                },
+                "c",
+                "manual",
+            )
+            .unwrap();
+        store
+            .save_page(
+                &MemoryPageInput {
+                    project_id: project.id.clone(),
+                    page_id: None,
+                    kind: "pitfalls".into(),
+                    title: "Postgres 16".into(),
+                    body_md: "Os testes exigem Postgres 16 local.".into(),
+                },
+                "c",
+                "manual",
+            )
+            .unwrap();
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        let task = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &crate::store::orchestration::TaskInput {
+                    title: "Migração V12".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .create_handoff(
+                &project.id,
+                Some(&task.id),
+                None,
+                "Onde parei: V12 criada; falta o índice.",
+                "agent",
+            )
+            .unwrap();
+
+        let brief = store
+            .memory_brief(&project.id, Some(&task.id), "crie a migração", "run_1")
+            .unwrap()
+            .unwrap();
+        assert!(brief.text.contains("Handoff pendente"));
+        assert!(brief.text.contains("falta o índice"));
+        assert!(brief.text.contains("Migrações em Flyway"), "{}", brief.text);
+        assert!(
+            !brief.text.contains("Postgres 16"),
+            "só páginas relevantes ao pedido"
+        );
+        assert_eq!(
+            brief.items[0],
+            "handoff: Onde parei: V12 criada; falta o índice."
+        );
+        assert!(brief.text.len() <= MAX_BRIEF_CHARS);
+        let handoffs = store.list_handoffs(&project.id).unwrap();
+        assert_eq!(handoffs[0].consumed_by_run_id.as_deref(), Some("run_1"));
+
+        // Segundo run: handoff já consumido; sem termo relevante cai nas páginas de maior score.
+        let again = store
+            .memory_brief(&project.id, Some(&task.id), "zzz", "run_2")
+            .unwrap()
+            .unwrap();
+        assert!(!again.text.contains("Handoff pendente"));
+        assert!(again.text.contains("Páginas relevantes"));
+        assert_eq!(
+            store
+                .get_page(
+                    &store
+                        .list_pages(&project.id, false)
+                        .unwrap()
+                        .iter()
+                        .find(|p| p.title == "Migrações em Flyway")
+                        .unwrap()
+                        .id
+                )
+                .unwrap()
+                .unwrap()
+                .access_count,
+            2
+        );
+    }
+
+    #[test]
+    fn memory_calls_search_write_and_handoff() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.create_project("p", "/tmp/p").unwrap();
+        let run = store
+            .create_run(&project.id, "x", &RunOptions::default())
+            .unwrap();
+        let none = store
+            .handle_memory_call(
+                &run.id,
+                MemoryOp::Search,
+                &serde_json::json!({"query": "flyway"}),
+            )
+            .unwrap();
+        assert!(none.ok && none.content.contains("Nenhuma página"));
+        let bad = store
+            .handle_memory_call(
+                &run.id,
+                MemoryOp::Write,
+                &serde_json::json!({"kind": "tasklog", "title": "t", "body": "b"}),
+            )
+            .unwrap();
+        assert!(!bad.ok);
+        let ok = store.handle_memory_call(&run.id, MemoryOp::Write, &serde_json::json!({"kind": "decisions", "title": "Migrações em Flyway", "body": "Sempre versionadas. senha=abcdef12"})).unwrap();
+        assert!(ok.ok, "{}", ok.content);
+        let page = &store.list_pages(&project.id, false).unwrap()[0];
+        assert_eq!(page.source, "agent");
+        assert!(page.body_md.contains("senha=[redigido]"));
+        let found = store
+            .handle_memory_call(
+                &run.id,
+                MemoryOp::Search,
+                &serde_json::json!({"query": "flyway"}),
+            )
+            .unwrap();
+        assert!(found.content.contains("## Migrações em Flyway (decisions)"));
+        let hand = store
+            .handle_memory_call(
+                &run.id,
+                MemoryOp::Handoff,
+                &serde_json::json!({"body": "Onde parei: nada."}),
+            )
+            .unwrap();
+        assert!(hand.ok && hand.content.contains("run avulso"));
+        assert_eq!(store.list_handoffs(&project.id).unwrap().len(), 1);
+        let audit = store
+            .list_audit_events(Some(&project.id), Some("memory."), 10)
+            .unwrap();
+        assert_eq!(audit[0].actor, "agente");
+    }
+
+    #[test]
+    fn failed_task_run_without_handoff_gets_an_automatic_one() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.create_project("p", "/tmp/p").unwrap();
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        let task = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &crate::store::orchestration::TaskInput {
+                    title: "T".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run = store
+            .create_run_full(
+                &project.id,
+                "p",
+                &RunOptions::default(),
+                None,
+                Some(&task.id),
+            )
+            .unwrap();
+        store
+            .record_run_event(
+                &run.id,
+                1,
+                "t",
+                &RunEvent::Observation {
+                    kind: ObservationKind::TurnEnd,
+                    title: "Fim do turno".into(),
+                    body: "Comecei a V12.".into(),
+                    tool_name: None,
+                    tool_use_id: None,
+                    parent_tool_use_id: None,
+                    agent_id: None,
+                },
+            )
+            .unwrap();
+        store
+            .record_run_event(
+                &run.id,
+                2,
+                "t",
+                &RunEvent::Error {
+                    message: "estourou o limite".into(),
+                    fatal: true,
+                },
+            )
+            .unwrap();
+        let handoffs = store.list_handoffs(&project.id).unwrap();
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].source, "auto");
+        assert_eq!(handoffs[0].task_id.as_deref(), Some(task.id.as_str()));
+        assert!(handoffs[0].body_md.contains("estourou o limite"));
+        assert!(handoffs[0].body_md.contains("Comecei a V12."));
+        // O próximo run da task recebe o handoff no brief.
+        let brief = store
+            .memory_brief(&project.id, Some(&task.id), "continue", "run_next")
+            .unwrap()
+            .unwrap();
+        assert!(brief.text.contains("Comecei a V12."));
     }
 
     #[test]

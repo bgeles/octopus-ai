@@ -35,6 +35,12 @@ export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
           <span>Cache lido: {formatTokens(state.usage?.cacheReadTokens ?? 0)}</span>
           <span>Saída: {formatTokens(state.usage?.outputTokens ?? 0)}</span>
         </div>
+        {state.brief && (
+          <div className="flex flex-col gap-0.5 rounded-md border hairline bg-paper px-2.5 py-2 text-xs" data-testid="brief-chip">
+            <span className="font-semibold text-ink">Memória injetada · {state.brief.chars.toLocaleString("pt-BR")} caracteres</span>
+            {state.brief.items.length > 0 && <span className="text-slate">{state.brief.items.join(" · ")}</span>}
+          </div>
+        )}
       </section>
 
       <section className="flex flex-col gap-2.5 border-t hairline pt-4">

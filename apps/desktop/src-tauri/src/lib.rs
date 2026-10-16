@@ -106,6 +106,26 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                             warn!("hook.decide falhou para {}: {e}", hook.hook_id);
                         }
                     }
+                    SidecarNotification::MemoryCall(call) => {
+                        let result =
+                            match store.handle_memory_call(&call.run_id, call.op, &call.args) {
+                                Ok(r) => r,
+                                Err(e) => protocol::MemoryCallResult {
+                                    ok: false,
+                                    content: format!("Erro na memória do projeto: {e:#}"),
+                                },
+                            };
+                        if let Err(e) = sidecar
+                            .memory_result(protocol::MemoryResultParams {
+                                run_id: call.run_id.clone(),
+                                call_id: call.call_id.clone(),
+                                result,
+                            })
+                            .await
+                        {
+                            warn!("memory.result falhou para {}: {e}", call.call_id);
+                        }
+                    }
                     SidecarNotification::Log(log) => {
                         let _ = app.emit(RUNTIME_LOG, &log);
                     }
@@ -290,6 +310,7 @@ pub fn run() {
             commands_memory::list_memory_observations,
             commands_memory::list_context_events,
             commands_memory::rebuild_memory_index,
+            commands_memory::list_memory_handoffs,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");

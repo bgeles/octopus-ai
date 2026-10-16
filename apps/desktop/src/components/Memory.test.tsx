@@ -92,4 +92,56 @@ describe("Memória", () => {
     expect(audit.some((e) => e.kind === "memory.page.archived")).toBe(true);
     expect(audit.some((e) => e.kind === "memory.page")).toBe(true);
   });
+
+  it("o run seguinte recebe o brief com as páginas relevantes e o sidebar mostra o que entrou", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await transport.invoke("save_memory_page", { input: { projectId: "proj_demo", kind: "pitfalls", title: "Testes exigem Postgres 16", bodyMd: "Os testes de integração sobem um Postgres 16 local." } });
+    await transport.invoke("save_memory_page", { input: { projectId: "proj_demo", kind: "note", title: "Convenções de commit", bodyMd: "Mensagens em pt-BR." } });
+    await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    const chip = await screen.findByTestId("brief-chip");
+    expect(chip).toHaveTextContent("Memória injetada");
+    expect(chip).toHaveTextContent("Testes exigem Postgres 16");
+    expect(chip).not.toHaveTextContent("Convenções de commit");
+    const events = await transport.invoke("list_run_events", { runId: (await transport.invoke("list_runs", { projectId: "proj_demo" }))[0]!.id });
+    expect(events[0]?.event.type).toBe("brief_injected");
+  });
+
+  it("run de task interrompido gera handoff automático, que o próximo run da task consome", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    const wf = await transport.invoke("create_workflow_from_template", { input: { projectId: "proj_demo", templateId: "research-synthesis" } });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: true });
+    const task = await transport.invoke("create_task", { projectId: "proj_demo", workflowId: wf.id, input: { title: "Mapear integrações", descriptionMd: "Listar integrações externas." } });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: false });
+    await transport.invoke("scheduler_tick", {});
+    const [run] = await transport.invoke("list_runs", { projectId: "proj_demo" });
+    expect(run?.taskId).toBe(task.id);
+    expect(await transport.invoke("interrupt_run", { runId: run!.id })).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Memória" }));
+    await user.click(await screen.findByRole("tab", { name: /Handoffs · 1 pendente/ }));
+    const row = await screen.findByTestId("handoff-row");
+    expect(row).toHaveAttribute("data-consumed", "false");
+    expect(row).toHaveAttribute("data-source", "auto");
+    expect(row).toHaveTextContent("Mapear integrações");
+    expect(row).toHaveTextContent("interrompido");
+    expect(row).toHaveTextContent("O que falhou: Run interrompido pelo usuário");
+
+    // A task volta para a fila; o próximo run dela consome o handoff.
+    await transport.invoke("move_task", { input: { taskId: task.id, stageId: null, status: "ready", note: null } });
+    await transport.invoke("scheduler_tick", {});
+    const runs = await transport.invoke("list_runs", { projectId: "proj_demo" });
+    const next = runs.find((r) => r.id !== run!.id)!;
+    const handoffs = await transport.invoke("list_memory_handoffs", { projectId: "proj_demo" });
+    expect(handoffs[0]?.consumedByRunId).toBe(next.id);
+    // Os eventos do mock chegam de forma assíncrona.
+    await waitFor(async () => {
+      const nextEvents = await transport.invoke("list_run_events", { runId: next.id });
+      expect(nextEvents[0]?.event).toMatchObject({ type: "brief_injected" });
+      expect((nextEvents[0]?.event as { items: string[] }).items[0]).toMatch(/^handoff: Run interrompido/);
+    });
+  });
 });
+

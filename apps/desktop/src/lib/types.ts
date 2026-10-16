@@ -438,6 +438,7 @@ export type Commands = {
   list_context_events: { args: { runId: string }; result: ContextEvent[] };
   /** Reconstrói o índice a partir dos arquivos .md da wiki; devolve quantas páginas entraram. */
   rebuild_memory_index: { args: { projectId: string }; result: number };
+  list_memory_handoffs: { args: { projectId: string }; result: MemoryHandoff[] };
 };
 
 // ---------------------------------------------------------------------- memória
@@ -490,6 +491,19 @@ export type MemoryObservation = {
 };
 
 export type ContextEvent = { id: string; projectId: string; runId: string; kind: string; payload: unknown; createdAt: string };
+
+/** Nota de passagem entre runs ("onde parei / o que falhou / o que falta"), consumida uma vez. */
+export type MemoryHandoff = {
+  id: string;
+  projectId: string;
+  taskId: string | null;
+  runId: string | null;
+  bodyMd: string;
+  source: "agent" | "auto" | string;
+  createdAt: string;
+  consumedByRunId: string | null;
+  consumedAt: string | null;
+};
 
 export type CommandName = keyof Commands;
 

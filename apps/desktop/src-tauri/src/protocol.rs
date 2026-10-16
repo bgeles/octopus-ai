@@ -192,6 +192,12 @@ pub struct RunOptions {
 pub struct MemoryOptions {
     #[serde(default = "default_true")]
     pub capture: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_items: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -200,8 +206,51 @@ fn default_true() -> bool {
 
 impl Default for MemoryOptions {
     fn default() -> Self {
-        Self { capture: true }
+        Self {
+            capture: true,
+            brief: None,
+            brief_items: None,
+            tools: None,
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOp {
+    Search,
+    Write,
+    Handoff,
+}
+
+/// Notificação `run.memory_call`: o agente chamou uma tool de memória; o core responde com `memory.result`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunMemoryCallNotification {
+    pub run_id: String,
+    pub call_id: String,
+    pub op: MemoryOp,
+    #[serde(default)]
+    pub args: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryCallResult {
+    pub ok: bool,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryResultParams {
+    pub run_id: String,
+    pub call_id: String,
+    pub result: MemoryCallResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryResultResult {
+    pub applied: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +553,12 @@ pub enum RunEvent {
         #[serde(default)]
         summary: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    BriefInjected {
+        chars: u64,
+        #[serde(default)]
+        items: Vec<String>,
+    },
 }
 
 impl RunEvent {
@@ -522,6 +577,7 @@ impl RunEvent {
             RunEvent::TaskUpdate { .. } => "task_update",
             RunEvent::Observation { .. } => "observation",
             RunEvent::Compaction { .. } => "compaction",
+            RunEvent::BriefInjected { .. } => "brief_injected",
         }
     }
 
@@ -789,6 +845,50 @@ mod tests {
         }
         assert_eq!(observations, 5);
         assert!(post_summary.unwrap().contains("V12"));
+        let brief = raw
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| serde_json::from_value::<IncomingMessage>(item.clone()).ok())
+            .find_map(|m| match m {
+                IncomingMessage::Notification { params, .. } => {
+                    let n: RunEventNotification = serde_json::from_value(params.unwrap()).unwrap();
+                    match n.event {
+                        RunEvent::BriefInjected { chars, items } => Some((chars, items)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(brief.0, 1840);
+        assert_eq!(brief.1.len(), 3);
+
+        // Chamadas de memória e a resposta do core.
+        let calls = read_fixture("run-memory-call.notifications.json");
+        let mut ops = Vec::new();
+        for item in calls.as_array().unwrap() {
+            let incoming: IncomingMessage = serde_json::from_value(item.clone()).unwrap();
+            if let IncomingMessage::Notification { method, params } = incoming {
+                assert_eq!(method, "run.memory_call");
+                let n: RunMemoryCallNotification = serde_json::from_value(params.unwrap()).unwrap();
+                ops.push(n.op);
+            }
+        }
+        assert_eq!(
+            ops,
+            vec![MemoryOp::Search, MemoryOp::Write, MemoryOp::Handoff]
+        );
+        let res = read_fixture("memory-result.request.json");
+        let params: MemoryResultParams = serde_json::from_value(res["params"].clone()).unwrap();
+        assert!(params.result.ok);
+        let roundtrip = serde_json::to_value(&params).unwrap();
+        assert_eq!(roundtrip, res["params"]);
+        let opts: RunOptions =
+            serde_json::from_value(serde_json::json!({"memory": {"brief": "x", "tools": true}}))
+                .unwrap();
+        assert_eq!(opts.memory.as_ref().unwrap().tools, Some(true));
+        assert!(opts.memory.unwrap().capture);
         let opts: RunOptions = serde_json::from_value(serde_json::json!({"memory": {}})).unwrap();
         assert!(opts.memory.unwrap().capture);
     }
