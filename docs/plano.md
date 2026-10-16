@@ -169,7 +169,7 @@ Com o build de teste em mãos, quem instala o app precisa ser guiado e poder gua
 
 - **Onboarding** (primeira abertura, ou sempre que um pré-requisito faltar): tela de boas-vindas em 4 passos no tema Grafite.
   1. *Ambiente*: Node encontrado (reusa `find_node()` do supervisor; mostra o caminho ou instrui a instalar e permite apontar via `OCTOPUS_NODE`), sidecar respondendo (`runtime.hello`) e Claude Code autenticado (teste real: `run.start` curto em modo `plan` com `maxTurns: 1`, ou o estado de auth do SDK quando houver), com o aviso de licença do login pessoal.
-  2. *Autenticação padrão*: assinatura ou API key (a chave vai para o Keychain na Fase 3; até lá só o modo).
+  2. *Autenticação padrão*: assinatura ou API key (a chave em si é informada por projeto em Segurança → Autenticação e vai para o Keychain).
   3. *Primeiro projeto*: reusa `AddProjectDialog`, com a opção "importar um backup" em vez de começar do zero.
   4. *Tema*: Sistema, Claro ou Escuro.
   Entrada "Refazer onboarding" em Settings; cada checagem vira depois um item de status na tela Segurança/Settings.
@@ -226,8 +226,13 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 - MCP in-process com `task_update` para o agente mover a própria task.
 - Entregue: migrations 0003–0005 (`app_setting`, `backup_snapshot`, `role`, `agent_profile`, `team_member`, `workflow`, `task`, `task_event`), scheduler em Rust (`scheduler.rs`, tick a cada 4 s + `scheduler_tick` manual, pausa por preferência), `RunOptions.agents` e `taskContext` no protocolo, tool MCP `task_update` no sidecar, telas Onboarding, Configurações, Time, Ficha do membro e Board. Fora: grafo xyflow (o organograma e a faixa de estágios são CSS), edição visual de estágios (só por modelo e comando `update_workflow`), heartbeats/metas (decisão de 16/10).
 
-### Fase 3 — Segurança de execução
-- Perfis de sandbox → `options.sandbox`; motor PreToolUse em Rust; orçamentos; auditoria com hash chain; Keychain para API keys; tela Segurança (política, aprovações, auditoria).
+### Fase 3 — Segurança de execução (concluída em 16/10/2026 na branch `fase-3/seguranca`)
+- Pranchas no Design antes das telas: `Seguranca.dc.html` (sandbox, política, autenticação, orçamentos) e `Auditoria.dc.html`.
+- **01 — Auditoria**: migration 0006 (`audit_event` append-only, hash SHA-256 de `prev_hash|ts|actor|kind|project|payload`, gênese `0…0`), eventos de run, aprovações e configurações, verificação de integridade, exportação JSONL, aba Auditoria com filtros por família.
+- **02 — Motor de política PreToolUse**: `RunOptions.policyHooks` → o sidecar registra `hooks.PreToolUse`, emite `run.hook` e espera `hook.decide` (timeout 30 s → `ask`); Rust avalia `policy_rule` (deny > ask > allow > pass; sentinelas `@destructive-outside-project` e `@outside-project`; regras do projeto só deny/ask) e audita `policy.*`; aba Política com regras, interruptores e simulador.
+- **03 — Sandbox e orçamentos**: migration 0008 (`sandbox_profile` com Estrito/Dev padrão/Somente leitura e `${PROJECT}`; `project.sandbox_profile_id`; `budget_policy` por projeto e membro com aviso, limite e turnos por run). `start_run` e o scheduler aplicam `options.sandbox` e o orçamento do mês (limite esgotado recusa o run e põe a task em Bloqueada; `maxBudgetUsd` é limitado ao restante). Seção Sandbox, aba Orçamentos e chips no cabeçalho do run.
+- **04 — Keychain**: `SecretStore` (Keychain via `keyring`, memória em testes/`OCTOPUS_SECRETS=memory`); a chave entra só na cópia das opções enviada ao sidecar, nunca no run gravado, no export nem na auditoria (`secret.set` registra "valor não registrado"). Seção Autenticação do projeto. Correção de passagem: os comandos Tauri de configurações, time, orquestração e segurança não estavam registrados em `generate_handler!`.
+- Fora: interrupção automática do run em andamento ao estourar o limite no meio (o run corrente só é limitado por `maxBudgetUsd`; o bloqueio vale para os próximos), lista de MCP tools permitidas por regra, isolamento forte (Fase 6).
 
 ### Fase 4 — Memória e contexto
 - Captura por hooks com sanitização; wiki markdown + FTS5; consolidação opcional com Haiku; recall por hook e MCP; handoffs; medidor e pins de contexto; histórico de compactação.
