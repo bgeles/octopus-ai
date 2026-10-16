@@ -4,10 +4,11 @@ import { AddProjectDialog } from "./components/AddProjectDialog";
 import { Composer } from "./components/Composer";
 import { RunHeader } from "./components/RunHeader";
 import { RunSidebar } from "./components/RunSidebar";
+import { SessionsView } from "./components/SessionsView";
 import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import type { Transport } from "./lib/transport";
-import type { PermissionDecision, Project, Run, RunEventNotification, SessionSummary } from "./lib/types";
+import type { PermissionDecision, Project, ResumeTarget, Run, RunEventNotification, SessionSummary } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -25,6 +26,8 @@ export function App({ transport }: AppProps) {
   const [deciding, setDeciding] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [resumeTarget, setResumeTarget] = useState<ResumeTarget | null>(null);
+  const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   // Mantém a referência ao run atual para o listener de eventos.
@@ -114,8 +117,18 @@ export function App({ transport }: AppProps) {
     setToast(null);
     try {
       const run = await transport.invoke("start_run", {
-        input: { projectId: selectedProject.id, prompt, options: { permissionMode: options.permissionMode, maxTurns: options.maxTurns, includePartialMessages: true } },
+        input: {
+          projectId: selectedProject.id,
+          prompt,
+          options: {
+            permissionMode: options.permissionMode,
+            maxTurns: options.maxTurns,
+            includePartialMessages: true,
+            ...(resumeTarget ? { resumeSessionId: resumeTarget.sessionId, ...(resumeTarget.fork ? { forkSession: true } : {}) } : {}),
+          },
+        },
       });
+      setResumeTarget(null);
       currentRunIdRef.current = run.id;
       setCurrentRun(run);
       setRunState(withUserPrompt(initialRunViewState(run.id), prompt, run.startedAt));
@@ -186,6 +199,37 @@ export function App({ transport }: AppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, selectedProject]);
 
+  const beginResume = (session: { sessionId: string; title: string | null }, fork: boolean) => {
+    setResumeTarget({ sessionId: session.sessionId, title: session.title, fork });
+    setView("run");
+  };
+
+  const renameSession = async (sessionId: string, title: string) => {
+    if (!selectedProject) return;
+    setBusySessionId(sessionId);
+    try {
+      await transport.invoke("rename_session", { input: { projectId: selectedProject.id, sessionId, title } });
+      await loadSessions();
+    } catch (e) {
+      setToast(`Falha ao renomear a sessão: ${messageOf(e)}`);
+    } finally {
+      setBusySessionId(null);
+    }
+  };
+
+  const tagSession = async (sessionId: string, tag: string | null) => {
+    if (!selectedProject) return;
+    setBusySessionId(sessionId);
+    try {
+      await transport.invoke("tag_session", { input: { projectId: selectedProject.id, sessionId, tag } });
+      await loadSessions();
+    } catch (e) {
+      setToast(`Falha ao taguear a sessão: ${messageOf(e)}`);
+    } finally {
+      setBusySessionId(null);
+    }
+  };
+
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "waiting_approval" || r.status === "queued");
 
   return (
@@ -196,6 +240,7 @@ export function App({ transport }: AppProps) {
         setSelectedProject(p);
         setCurrentRun(null);
         setRunState(initialRunViewState());
+        setResumeTarget(null);
       }}
       onAddProject={() => setAddOpen(true)}
       view={view}
@@ -205,19 +250,45 @@ export function App({ transport }: AppProps) {
     >
       {view === "run" && (
         <>
-          <RunHeader project={selectedProject} run={currentRun} state={runState} active={active} onInterrupt={() => void interrupt()} interrupting={interrupting} />
+          <RunHeader
+            project={selectedProject}
+            run={currentRun}
+            state={runState}
+            active={active}
+            onInterrupt={() => void interrupt()}
+            interrupting={interrupting}
+            onContinue={() => {
+              const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
+              if (sessionId) beginResume({ sessionId, title: currentRun?.prompt ?? null }, false);
+            }}
+          />
           <div className="flex min-h-0 flex-1">
             <section aria-label="Transcript do run" className="flex min-w-0 flex-1 flex-col overflow-y-auto">
               <Transcript items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(id, d) => void decide(id, d)} deciding={deciding} />
             </section>
             <RunSidebar state={runState} run={currentRun} elapsedMs={elapsedMs} />
           </div>
-          <Composer disabled={!selectedProject} busy={starting || active} onSubmit={(prompt, options) => void startRun(prompt, options)} />
+          <Composer
+            disabled={!selectedProject}
+            busy={starting || active}
+            resumeTarget={resumeTarget}
+            onCancelResume={() => setResumeTarget(null)}
+            onSubmit={(prompt, options) => void startRun(prompt, options)}
+          />
         </>
       )}
 
       {view === "sessions" && (
-        <SessionsView runs={runs} sessions={sessions} onOpenRun={(run) => void openRun(run)} onRefresh={() => void loadSessions()} />
+        <SessionsView
+          runs={runs}
+          sessions={sessions}
+          busySessionId={busySessionId}
+          onOpenRun={(run) => void openRun(run)}
+          onRefresh={() => void loadSessions()}
+          onResume={beginResume}
+          onRename={renameSession}
+          onTag={tagSession}
+        />
       )}
 
       {view === "approvals" && (
@@ -244,90 +315,6 @@ export function App({ transport }: AppProps) {
       <AddProjectDialog open={addOpen} onClose={() => setAddOpen(false)} onCreate={createProject} />
     </Shell>
   );
-}
-
-function SessionsView({ runs, sessions, onOpenRun, onRefresh }: { runs: Run[]; sessions: SessionSummary[] | null; onOpenRun: (run: Run) => void; onRefresh: () => void }) {
-  return (
-    <div className="flex flex-col gap-6 overflow-y-auto p-6">
-      <div className="flex items-center gap-4">
-        <div>
-          <div className="eyebrow text-brand">Histórico</div>
-          <h1 className="m-0 font-display text-xl font-bold tracking-tight">Sessões</h1>
-        </div>
-        <button type="button" onClick={onRefresh} className="ml-auto rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium">
-          Atualizar
-        </button>
-      </div>
-
-      <section className="flex flex-col gap-2">
-        <h2 className="m-0 font-display text-sm font-semibold text-slate">Runs deste projeto</h2>
-        {runs.length === 0 && <p className="m-0 text-[13px] text-slate">Nenhum run ainda.</p>}
-        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-          {runs.map((run) => (
-            <li key={run.id}>
-              <button type="button" onClick={() => onOpenRun(run)} className="flex w-full items-center gap-3 rounded-xl border hairline bg-surface px-4 py-3 text-left hover:border-ink/30">
-                <span className={["size-2 shrink-0 rounded-full", dotFor(run.status)].join(" ")} />
-                <span className="min-w-0 flex-1 truncate font-medium">{run.prompt}</span>
-                <span className="text-xs text-slate">{labelFor(run.status)}</span>
-                <span className="font-mono text-xs text-slate">{run.costUsd === null ? "—" : `US$ ${run.costUsd.toFixed(2).replace(".", ",")}`}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="flex flex-col gap-2">
-        <h2 className="m-0 font-display text-sm font-semibold text-slate">Sessões do Claude nesta pasta</h2>
-        {sessions === null && <p className="m-0 text-[13px] text-slate">Carregando…</p>}
-        {sessions && sessions.length === 0 && <p className="m-0 text-[13px] text-slate">Nenhuma sessão encontrada para esta pasta.</p>}
-        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-          {(sessions ?? []).map((s) => (
-            <li key={s.sessionId} className="flex items-center gap-3 rounded-xl border hairline bg-surface px-4 py-3">
-              <span className="min-w-0 flex-1 truncate font-medium">{s.title ?? "(sem título)"}</span>
-              {s.tags.map((t) => (
-                <span key={t} className="rounded-full border hairline-strong px-2 text-xs text-ink">
-                  {t}
-                </span>
-              ))}
-              <span className="font-mono text-[11px] text-slate">{s.sessionId.slice(0, 8)}…</span>
-            </li>
-          ))}
-        </ul>
-        <p className="m-0 text-xs text-slate">Retomar e bifurcar sessões chega na Fase 1.</p>
-      </section>
-    </div>
-  );
-}
-
-function dotFor(status: Run["status"]): string {
-  switch (status) {
-    case "running":
-    case "queued":
-      return "bg-brand";
-    case "waiting_approval":
-      return "bg-warning";
-    case "completed":
-      return "bg-success";
-    default:
-      return "bg-mist";
-  }
-}
-
-function labelFor(status: Run["status"]): string {
-  switch (status) {
-    case "queued":
-      return "na fila";
-    case "running":
-      return "executando";
-    case "waiting_approval":
-      return "aguardando aprovação";
-    case "completed":
-      return "concluído";
-    case "failed":
-      return "falhou";
-    case "interrupted":
-      return "interrompido";
-  }
 }
 
 function messageOf(e: unknown): string {

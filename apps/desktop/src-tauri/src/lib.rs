@@ -128,6 +128,8 @@ pub fn run() {
             commands::interrupt_run,
             commands::decide_permission,
             commands::list_sessions,
+            commands::rename_session,
+            commands::tag_session,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");

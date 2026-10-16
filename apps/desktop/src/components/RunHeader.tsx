@@ -1,4 +1,4 @@
-import { Lock, Square } from "lucide-react";
+import { History, Lock, Square } from "lucide-react";
 import type { Project, Run } from "../lib/types";
 import type { RunViewState } from "../state/runReducer";
 
@@ -9,10 +9,14 @@ type RunHeaderProps = {
   active: boolean;
   onInterrupt: () => void;
   interrupting: boolean;
+  /** Retomar a sessão deste run (disponível quando o run terminou e tem sessão). */
+  onContinue?: () => void;
 };
 
-export function RunHeader({ project, run, state, active, onInterrupt, interrupting }: RunHeaderProps) {
+export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue }: RunHeaderProps) {
   const status = statusOf(run, state, active);
+  const sessionId = state.sessionId ?? run?.claudeSessionId ?? null;
+  const canContinue = Boolean(run && !active && sessionId && onContinue);
   return (
     <header className="flex flex-wrap items-center gap-4 border-b hairline bg-surface px-6 py-3.5">
       <div className="flex min-w-0 flex-col gap-0.5">
@@ -28,6 +32,15 @@ export function RunHeader({ project, run, state, active, onInterrupt, interrupti
           <Lock size={13} aria-hidden /> Sandbox padrão
         </span>
         {state.model && <span className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">{state.model}</span>}
+        {canContinue && (
+          <button
+            type="button"
+            onClick={onContinue}
+            className="inline-flex items-center gap-2 rounded-full border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-semibold text-ink hover:border-ink"
+          >
+            <History size={13} aria-hidden /> Continuar sessão
+          </button>
+        )}
         {active && (
           <button
             type="button"

@@ -8,9 +8,10 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { PROTOCOL_VERSION, type RunEvent } from "@octopus/protocol";
-import { listSessions, query } from "@anthropic-ai/claude-agent-sdk";
+import { listSessions, query, renameSession, tagSession } from "@anthropic-ai/claude-agent-sdk";
 import { RpcServer } from "./rpc.js";
 import { RunManager, type QueryFn } from "./runner.js";
+import { toSessionSummary } from "./sessions.js";
 
 const require = createRequire(import.meta.url);
 const runtimeVersion: string = require("../package.json").version;
@@ -72,16 +73,17 @@ server.register("permission.decide", async ({ runId, requestId, decision }) => (
 
 server.register("sessions.list", async ({ cwd }) => {
   const sessions = await listSessions({ dir: cwd });
-  return {
-    sessions: sessions.map((s) => ({
-      sessionId: s.sessionId,
-      cwd: s.cwd ?? cwd,
-      title: s.customTitle ?? s.summary ?? null,
-      tags: s.tag ? [s.tag] : [],
-      createdAt: s.createdAt ? new Date(s.createdAt).toISOString() : null,
-      lastUsedAt: s.lastModified ? new Date(s.lastModified).toISOString() : null,
-    })),
-  };
+  return { sessions: sessions.map((s) => toSessionSummary(s, cwd)) };
+});
+
+server.register("sessions.rename", async ({ sessionId, cwd, title }) => {
+  await renameSession(sessionId, title, { dir: cwd });
+  return { ok: true } as const;
+});
+
+server.register("sessions.tag", async ({ sessionId, cwd, tag }) => {
+  await tagSession(sessionId, tag, { dir: cwd });
+  return { ok: true } as const;
 });
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });

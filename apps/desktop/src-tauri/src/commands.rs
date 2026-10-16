@@ -7,7 +7,7 @@ use tauri::State;
 
 use crate::protocol::{
     HelloResult, PermissionDecideParams, PermissionDecision, RunOptions, RunStartParams,
-    SessionSummary,
+    SessionSummary, SessionsRenameParams, SessionsTagParams,
 };
 use crate::sidecar::Sidecar;
 use crate::store::models::{Project, Run, RunStatus, StoredRunEvent};
@@ -197,4 +197,71 @@ pub async fn list_sessions(
         .await
         .map_err(err)?;
     Ok(result.sessions)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameSessionInput {
+    pub project_id: String,
+    pub session_id: String,
+    pub title: String,
+}
+
+#[tauri::command]
+pub async fn rename_session(
+    state: State<'_, AppState>,
+    input: RenameSessionInput,
+) -> CmdResult<bool> {
+    let title = input.title.trim();
+    if title.is_empty() {
+        return Err("Informe um título para a sessão".into());
+    }
+    let project = state
+        .store
+        .get_project(&input.project_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Projeto {} não encontrado", input.project_id))?;
+    let result = state
+        .sidecar
+        .rename_session(SessionsRenameParams {
+            session_id: input.session_id,
+            cwd: project.path,
+            title: title.to_string(),
+        })
+        .await
+        .map_err(err)?;
+    Ok(result.ok)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagSessionInput {
+    pub project_id: String,
+    pub session_id: String,
+    /// `None` ou vazio remove a tag.
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+#[tauri::command]
+pub async fn tag_session(state: State<'_, AppState>, input: TagSessionInput) -> CmdResult<bool> {
+    let project = state
+        .store
+        .get_project(&input.project_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Projeto {} não encontrado", input.project_id))?;
+    let tag = input
+        .tag
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let result = state
+        .sidecar
+        .tag_session(SessionsTagParams {
+            session_id: input.session_id,
+            cwd: project.path,
+            tag,
+        })
+        .await
+        .map_err(err)?;
+    Ok(result.ok)
 }

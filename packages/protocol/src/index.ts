@@ -106,12 +106,32 @@ export const SessionSummarySchema = z.object({
 export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 export const SessionsListResultSchema = z.object({ sessions: z.array(SessionSummarySchema) });
 
+/** Renomeia uma sessão (SDK `renameSession`). `cwd` localiza o arquivo da sessão. */
+export const SessionsRenameParamsSchema = z.object({
+  sessionId: z.string(),
+  cwd: z.string(),
+  title: z.string().min(1),
+});
+export type SessionsRenameParams = z.infer<typeof SessionsRenameParamsSchema>;
+
+/** Define ou remove (`null`) a tag de uma sessão (SDK `tagSession`). */
+export const SessionsTagParamsSchema = z.object({
+  sessionId: z.string(),
+  cwd: z.string(),
+  tag: z.string().min(1).nullable(),
+});
+export type SessionsTagParams = z.infer<typeof SessionsTagParamsSchema>;
+
+export const SessionMutationResultSchema = z.object({ ok: z.literal(true) });
+
 export const RequestMethodSchema = z.enum([
   "runtime.hello",
   "run.start",
   "run.interrupt",
   "permission.decide",
   "sessions.list",
+  "sessions.rename",
+  "sessions.tag",
 ]);
 export type RequestMethod = z.infer<typeof RequestMethodSchema>;
 
@@ -121,6 +141,8 @@ export const REQUEST_SCHEMAS = {
   "run.interrupt": { params: RunInterruptParamsSchema, result: RunInterruptResultSchema },
   "permission.decide": { params: PermissionDecideParamsSchema, result: PermissionDecideResultSchema },
   "sessions.list": { params: SessionsListParamsSchema, result: SessionsListResultSchema },
+  "sessions.rename": { params: SessionsRenameParamsSchema, result: SessionMutationResultSchema },
+  "sessions.tag": { params: SessionsTagParamsSchema, result: SessionMutationResultSchema },
 } as const;
 
 // ---------------------------------------------------------------------------

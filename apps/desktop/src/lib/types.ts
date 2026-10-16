@@ -46,6 +46,13 @@ export type StoredRunEvent = {
   event: RunEvent;
 };
 
+/** Sessão escolhida para o próximo run: retomar (mesma sessão) ou bifurcar (sessão nova a partir dela). */
+export type ResumeTarget = {
+  sessionId: string;
+  title: string | null;
+  fork: boolean;
+};
+
 export type RuntimeLog = { level: "debug" | "info" | "warn" | "error"; message: string };
 
 /** Assinaturas dos comandos Tauri (nome -> args -> resultado). */
@@ -61,6 +68,8 @@ export type Commands = {
   interrupt_run: { args: { runId: string }; result: boolean };
   decide_permission: { args: { input: { runId: string; requestId: string; decision: PermissionDecision } }; result: boolean };
   list_sessions: { args: { projectId: string }; result: SessionSummary[] };
+  rename_session: { args: { input: { projectId: string; sessionId: string; title: string } }; result: boolean };
+  tag_session: { args: { input: { projectId: string; sessionId: string; tag: string | null } }; result: boolean };
 };
 
 export type CommandName = keyof Commands;
