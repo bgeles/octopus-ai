@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::protocol::{RunOptions, RunStartParams};
+use crate::secrets::SecretStore;
 use crate::sidecar::Sidecar;
 use crate::store::models::RunStatus;
 use crate::store::Store;
@@ -49,7 +50,11 @@ pub fn is_paused(store: &Store) -> bool {
     )
 }
 
-pub async fn tick(store: &Store, sidecar: &Sidecar) -> Result<TickReport> {
+pub async fn tick(
+    store: &Store,
+    sidecar: &Sidecar,
+    secrets: &dyn SecretStore,
+) -> Result<TickReport> {
     let mut report = TickReport::default();
     if is_paused(store) {
         report.paused = true;
@@ -128,6 +133,15 @@ pub async fn tick(store: &Store, sidecar: &Sidecar) -> Result<TickReport> {
                 store.mark_run_failed(&run.id, "task deixou de estar pronta")?;
                 continue;
             }
+            let options = match crate::secrets::options_for_sidecar(&project, &options, secrets) {
+                Ok(o) => o,
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    store.mark_run_failed(&run.id, &msg)?;
+                    report.failed.push((task.id.clone(), msg));
+                    continue;
+                }
+            };
             let params = RunStartParams {
                 run_id: run.id.clone(),
                 cwd,
@@ -159,6 +173,7 @@ pub async fn tick(store: &Store, sidecar: &Sidecar) -> Result<TickReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::MemorySecrets;
     use crate::sidecar::SidecarCommand;
     use crate::store::orchestration::{TaskInput, TaskStatus};
     use crate::store::team::TeamMemberInput;
@@ -225,7 +240,9 @@ mod tests {
             )
             .unwrap();
 
-        let report = tick(&store, &sidecar).await.unwrap();
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
         assert_eq!(report.started.len(), 1);
         assert_eq!(report.started[0].task_id, t1.id);
         assert!(report.failed.is_empty());
@@ -264,7 +281,9 @@ mod tests {
         );
 
         // Segundo tick: nada (slot ocupado, t2 depende de t1).
-        let again = tick(&store, &sidecar).await.unwrap();
+        let again = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
         assert!(again.started.is_empty());
         assert_eq!(
             store.get_task(&t2.id).unwrap().unwrap().status,
@@ -275,7 +294,12 @@ mod tests {
         store
             .set_setting(PAUSED_SETTING, &serde_json::json!(true))
             .unwrap();
-        assert!(tick(&store, &sidecar).await.unwrap().paused);
+        assert!(
+            tick(&store, &sidecar, &MemorySecrets::default())
+                .await
+                .unwrap()
+                .paused
+        );
         sidecar.shutdown().await;
     }
 
@@ -336,7 +360,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let report = tick(&store, &sidecar).await.unwrap();
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
         assert!(report.started.is_empty());
         assert_eq!(report.failed.len(), 1);
         let t_now = store.get_task(&t.id).unwrap().unwrap();
@@ -373,7 +399,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let report = tick(&store, &sidecar).await.unwrap();
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
         assert_eq!(report.failed.len(), 1);
         assert!(report.failed[0].1.contains("worktree"));
         let t_now = store.get_task(&t.id).unwrap().unwrap();
@@ -458,7 +486,9 @@ mod tests {
             )
             .unwrap();
 
-        let report = tick(&store, &sidecar).await.unwrap();
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
         assert_eq!(report.started.len(), 1, "{report:?}");
         let run_id = report.started[0].run_id.clone();
         let claimed = store.get_task(&task.id).unwrap().unwrap();

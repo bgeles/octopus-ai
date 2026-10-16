@@ -145,6 +145,20 @@ impl Store {
         Ok(project)
     }
 
+    pub fn update_project_auth(&self, id: &str, auth_mode: models::AuthMode) -> Result<Project> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE project SET auth_mode = ?2 WHERE id = ?1",
+            params![id, auth_mode.as_str()],
+        )?;
+        drop(conn);
+        if changed == 0 {
+            anyhow::bail!("Projeto {id} não encontrado");
+        }
+        self.get_project(id)?
+            .ok_or_else(|| anyhow::anyhow!("Projeto {id} não encontrado"))
+    }
+
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let conn = self.conn.lock().expect("store mutex");
         let mut stmt = conn.prepare(

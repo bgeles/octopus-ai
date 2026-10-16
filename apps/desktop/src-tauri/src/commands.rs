@@ -18,6 +18,7 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub sidecar: Arc<Sidecar>,
     pub runtime: HelloResult,
+    pub secrets: Arc<dyn crate::secrets::SecretStore>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -154,6 +155,17 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
         )
         .map_err(err)?;
 
+    // A chave de API (quando o projeto usa uma) entra só aqui, a caminho do sidecar;
+    // o run gravado acima fica com as opções sem segredo.
+    let options =
+        match crate::secrets::options_for_sidecar(&project, &options, state.secrets.as_ref()) {
+            Ok(o) => o,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                state.store.mark_run_failed(&run.id, &msg).map_err(err)?;
+                return Err(msg);
+            }
+        };
     let params = RunStartParams {
         run_id: run.id.clone(),
         cwd: project.path.clone(),

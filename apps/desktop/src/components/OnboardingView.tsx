@@ -180,7 +180,7 @@ export function OnboardingView({ environment, checking, onRecheck, theme, onThem
           {step === 1 && (
             <div className="flex flex-col gap-2.5" role="radiogroup" aria-label="Autenticação padrão">
               <AuthOption value="subscription" current={authMode} onChange={setAuthMode} title="Login do Claude Code" description="usa a assinatura já autenticada nesta máquina (uso pessoal)" />
-              <AuthOption value="api_key" current={authMode} onChange={setAuthMode} title="API key" description="a chave fica no Keychain (Fase 3); por enquanto só o modo" />
+              <AuthOption value="api_key" current={authMode} onChange={setAuthMode} title="API key" description="a chave fica no Keychain do macOS; você informa em Segurança → Autenticação" />
             </div>
           )}
 
