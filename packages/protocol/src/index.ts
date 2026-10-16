@@ -137,7 +137,10 @@ export const RunOptionsSchema = z.object({
   memory: MemoryOptionsSchema.optional(),
   /** MCP servers externos por nome (o sidecar acrescenta o `octopus` in-process). */
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
+  /** Plugins locais do Claude Code (o Octopus monta um com as skills ativas do membro/projeto). */
+  plugins: z.array(z.object({ type: z.literal("local"), path: z.string().min(1), skipMcpDiscovery: z.boolean().optional() })).optional(),
 });
+export type SdkPlugin = NonNullable<RunOptions["plugins"]>[number];
 export type RunOptions = z.infer<typeof RunOptionsSchema>;
 
 // ---------------------------------------------------------------------------

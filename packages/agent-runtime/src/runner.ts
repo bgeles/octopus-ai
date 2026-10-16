@@ -41,6 +41,8 @@ export type QueryOptionsLike = {
   hooks?: Record<string, Array<{ matcher?: string; hooks: HookCallbackLike[]; timeout?: number }>>;
   /** `SandboxSettings` do SDK; o runner só repassa. */
   sandbox?: unknown;
+  /** Plugins locais (`SdkPluginConfig[]`); o runner só repassa. */
+  plugins?: Array<{ type: "local"; path: string; skipMcpDiscovery?: boolean }>;
   abortController: AbortController;
   canUseTool: CanUseToolLike;
 };
@@ -217,6 +219,7 @@ export class RunManager {
     if (o.agents && Object.keys(o.agents).length > 0) options.agents = o.agents;
     if (o.sandbox) options.sandbox = o.sandbox;
     if (o.mcpServers && Object.keys(o.mcpServers).length > 0) options.mcpServers = { ...o.mcpServers };
+    if (o.plugins && o.plugins.length > 0) options.plugins = o.plugins;
     if (o.policyHooks && this.emitHook) {
       options.hooks = { PreToolUse: [{ hooks: [(input, toolUseId) => this.preToolUse(run, input, toolUseId)] }] };
     }

@@ -375,6 +375,11 @@ pub fn run() {
             commands_harness::set_mcp_server_enabled,
             commands_harness::delete_mcp_server,
             commands_harness::check_mcp_server,
+            commands_harness::list_skills,
+            commands_harness::scan_skills,
+            commands_harness::set_skill_enabled,
+            commands_harness::read_skill,
+            commands_harness::save_skill,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");

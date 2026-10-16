@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -220,6 +220,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       maxBudgetUsd: input.maxBudgetUsd ?? null,
       createdAt: existing?.profile.createdAt ?? new Date().toISOString(),
       mcpServerIds: input.mcpServerIds ?? null,
+      skillIds: input.skillIds ?? null,
     };
     return {
       id: existing?.id ?? `member_${memberCounter}`,
@@ -350,6 +351,43 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const handoffs: MemoryHandoff[] = [];
   const pins: ContextPin[] = [];
   const mcpServers: McpServer[] = [];
+  const skillFiles = new Map<string, string>();
+  const skills: Skill[] = [];
+  const seedSkills = () => {
+    if (skills.length > 0 || fresh) return;
+    const ts = new Date().toISOString();
+    for (const [projectId, name, path, description, source, content] of [
+      ["proj_demo", "flyway-migration", "/Users/dev/projetos/chat-core/.claude/skills/flyway-migration", "Cria migrações Flyway versionadas com teste de integração", "project", "---\nname: flyway-migration\ndescription: Cria migrações Flyway versionadas com teste de integração\n---\n\n1. Rode ./mvnw flyway:info.\n2. Crie V<n+1>__descricao.sql.\n"],
+      ["proj_demo", "java-review", "/Users/dev/projetos/chat-core/.claude/skills/java-review", "Revisão de código Java 21: records, nulls, concorrência", "project", "# Java review\n\nRevisão de código Java 21: records, nulls, concorrência.\n"],
+      [null, "commit-ptbr", "/Users/dev/.claude/skills/commit-ptbr", "Mensagens de commit em pt-BR no padrão do time", "user", "---\nname: commit-ptbr\ndescription: Mensagens de commit em pt-BR no padrão do time\n---\n"],
+    ] as const) {
+      skills.push({ id: `skill_${name}`, projectId, name, path, description, source, enabled: true, createdAt: ts, updatedAt: ts });
+      skillFiles.set(`skill_${name}`, content);
+    }
+  };
+  seedSkills();
+  const slugSkill = (title: string) => title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "skill";
+  const parseSkillMd = (text: string, fallback: string): [string, string] => {
+    let name = fallback;
+    let description = "";
+    let body = text;
+    if (text.startsWith("---\n")) {
+      const end = text.indexOf("\n---", 4);
+      if (end > 0) {
+        for (const line of text.slice(4, end).split("\n")) {
+          const idx = line.indexOf(":");
+          if (idx <= 0) continue;
+          const k = line.slice(0, idx).trim();
+          const v = line.slice(idx + 1).trim().replace(/^["']|["']$/g, "");
+          if (k === "name" && v) name = v;
+          if (k === "description" && v) description = v;
+        }
+        body = text.slice(end + 4);
+      }
+    }
+    if (!description) description = body.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#"))?.slice(0, 200) ?? "";
+    return [name, description];
+  };
   const describeMcp = (c: McpServer["config"]) => (c.type === "stdio" ? c.command : c.url);
   const normMock = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   /** Brief do run, como o core: handoff pendente da task (claim único) + páginas que casam com o pedido. */
@@ -832,6 +870,12 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         const chosen = member?.profile.mcpServerIds ?? null;
         const active = mcpServers.filter((s) => s.enabled && (s.projectId === null || s.projectId === project.id) && (!chosen || chosen.includes(s.id)));
         if (active.length) options.mcpServers = Object.fromEntries(active.map((s) => [s.name, s.config]));
+        // Plugin local com as skills ativas que o Claude Code não carrega sozinho (as do usuário; as do projeto só sem settingSources "project").
+        const chosenSkills = member?.profile.skillIds ?? null;
+        const sources = settings[`project.${project.id}.settingSources`];
+        const projectAuto = !Array.isArray(sources) || sources.includes("project");
+        const pluginSkills = skills.filter((s) => s.enabled && (s.projectId === null || s.projectId === project.id) && (!chosenSkills || chosenSkills.includes(s.id)) && !(projectAuto && s.projectId !== null));
+        if (pluginSkills.length) options.plugins = [{ type: "local", path: `/mock/data/projects/${project.id}/harness/plugin-${member?.profile.id ?? "project"}`, skipMcpDiscovery: true }];
       }
       const profile = sandboxProfiles.find((sp) => sp.id === (project.sandboxProfileId ?? "sandbox_dev"));
       if (profile) options.sandbox = profile.settings;
@@ -1378,6 +1422,43 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       server.lastHealth = ok ? { ok: true, tools: [{ name: "read_file", description: "Lê um arquivo" }, { name: "list_dir", description: null }], error: null, latencyMs: 42, serverVersion: "mock 1.0", checkedAt: new Date().toISOString() } : { ok: false, tools: [], error: "ECONNREFUSED", latencyMs: 5, serverVersion: null, checkedAt: new Date().toISOString() };
       audit("você", "harness.mcp.checked", server.projectId, { serverId, name: server.name, ok, tools: server.lastHealth.tools.length, error: server.lastHealth.error });
       return { ...server };
+    },
+    list_skills: async ({ projectId }) => skills.filter((s) => s.projectId === null || s.projectId === projectId).sort((a, b) => Number(a.projectId === null) - Number(b.projectId === null) || a.name.localeCompare(b.name)).map((s) => ({ ...s })),
+    scan_skills: async ({ projectId }) => {
+      audit("você", "harness.skills.scanned", projectId, { count: skills.filter((s) => s.projectId === null || s.projectId === projectId).length });
+      return handlers.list_skills({ projectId });
+    },
+    set_skill_enabled: async ({ skillId, enabled }) => {
+      const skill = skills.find((s) => s.id === skillId);
+      if (!skill) throw new Error(`Skill ${skillId} não encontrada`);
+      skill.enabled = enabled;
+      skill.updatedAt = new Date().toISOString();
+      audit("você", "harness.skill.enabled", skill.projectId, { skillId, name: skill.name, enabled });
+      return { ...skill };
+    },
+    read_skill: async ({ skillId }) => {
+      if (!skills.some((s) => s.id === skillId)) throw new Error(`Skill ${skillId} não encontrada`);
+      return skillFiles.get(skillId) ?? "";
+    },
+    save_skill: async ({ input }) => {
+      const name = input.name.trim();
+      if (!name) throw new Error("A skill precisa de nome");
+      if (!input.content.trim()) throw new Error("O SKILL.md não pode ser vazio");
+      const project = projects.find((p) => p.id === input.projectId);
+      if (!project) throw new Error(`Projeto ${input.projectId} não encontrado`);
+      const content = input.content.startsWith("---\n") ? input.content : `---\nname: ${name}\ndescription: ${input.content.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#"))?.slice(0, 120) ?? ""}\n---\n\n${input.content.trimStart()}`;
+      const [parsedName, description] = parseSkillMd(content, name);
+      const ts = new Date().toISOString();
+      let skill = input.skillId ? skills.find((s) => s.id === input.skillId) : undefined;
+      if (skill) {
+        Object.assign(skill, { name: parsedName, description, updatedAt: ts });
+      } else {
+        skill = { id: `skill_${Math.random().toString(36).slice(2, 10)}`, projectId: project.id, name: parsedName, path: `${project.path}/.claude/skills/${slugSkill(name)}`, description, source: "project", enabled: true, createdAt: ts, updatedAt: ts };
+        skills.push(skill);
+      }
+      skillFiles.set(skill.id, content);
+      audit("você", input.skillId ? "harness.skill.updated" : "harness.skill.created", project.id, { skillId: skill.id, name: skill.name, path: skill.path });
+      return { ...skill };
     },
     list_memory_handoffs: async ({ projectId }) => handoffs.filter((h) => h.projectId === projectId).sort((a, b) => Number(Boolean(a.consumedAt)) - Number(Boolean(b.consumedAt)) || b.createdAt.localeCompare(a.createdAt)).map((h) => ({ ...h })),
     rebuild_memory_index: async ({ projectId }) => {

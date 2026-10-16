@@ -188,6 +188,29 @@ pub struct RunOptions {
     pub memory: Option<MemoryOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<std::collections::BTreeMap<String, McpServerConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Vec<SdkPlugin>>,
+}
+
+/// Plugin local do Claude Code (`options.plugins` do SDK).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkPlugin {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_mcp_discovery: Option<bool>,
+}
+
+impl SdkPlugin {
+    pub fn local(path: impl Into<String>) -> Self {
+        Self {
+            kind: "local".into(),
+            path: path.into(),
+            skip_mcp_discovery: Some(true),
+        }
+    }
 }
 
 /// MCP server externo (stdio, SSE ou HTTP).
@@ -1017,6 +1040,10 @@ mod tests {
         let servers = p.options.mcp_servers.unwrap();
         assert_eq!(servers.len(), 2);
         assert_eq!(servers["jira"].transport(), "http");
+        let plugins = p.options.plugins.unwrap();
+        assert_eq!(plugins[0].kind, "local");
+        assert_eq!(plugins[0].skip_mcp_discovery, Some(true));
+        assert_eq!(serde_json::to_value(&plugins[0]).unwrap()["type"], "local");
         let result: McpCheckResult = serde_json::from_value(
             serde_json::json!({"ok": true, "tools": [{"name": "read_file"}], "latencyMs": 120}),
         )

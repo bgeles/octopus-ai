@@ -20,7 +20,7 @@ import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, PolicyRule, SandboxProfile, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, McpServer, PolicyRule, SandboxProfile, Skill, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -66,6 +66,7 @@ export function App({ transport }: AppProps) {
   const [sandboxProfiles, setSandboxProfiles] = useState<SandboxProfile[]>([]);
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
+  const [harnessLists, setHarnessLists] = useState<{ mcpServers: McpServer[]; skills: Skill[] }>({ mcpServers: [], skills: [] });
   const [audit, setAudit] = useState<AuditEvent[] | null>(null);
   const [auditVerification, setAuditVerification] = useState<AuditVerification | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
@@ -200,6 +201,15 @@ export function App({ transport }: AppProps) {
       .then(setHasApiKey)
       .catch(() => setHasApiKey(null));
   }, [transport]);
+
+  // Listas do Harness para a ficha do membro (MCP servers e skills do projeto).
+  useEffect(() => {
+    const projectId = selectedProject?.id;
+    if (!memberDialog.open || !projectId) return;
+    Promise.all([transport.invoke("list_mcp_servers", { projectId }), transport.invoke("list_skills", { projectId })])
+      .then(([mcpServers, skills]) => setHarnessLists({ mcpServers, skills }))
+      .catch(() => setHarnessLists({ mcpServers: [], skills: [] }));
+  }, [transport, memberDialog.open, selectedProject?.id]);
 
   const refreshBudget = useCallback(() => {
     const projectId = selectedProjectRef.current?.id;
@@ -922,6 +932,8 @@ export function App({ transport }: AppProps) {
         open={memberDialog.open}
         roles={roles}
         team={team ?? []}
+        mcpServers={harnessLists.mcpServers}
+        skills={harnessLists.skills}
         member={memberDialog.member}
         onClose={() => setMemberDialog((d) => ({ ...d, open: false }))}
         onSave={saveMember}

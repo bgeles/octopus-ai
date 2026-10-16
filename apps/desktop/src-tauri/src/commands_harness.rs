@@ -5,6 +5,7 @@ use tauri::State;
 use crate::commands::AppState;
 use crate::commands_security::audit;
 use crate::store::harness::{McpServer, McpServerInput};
+use crate::store::skills::{Skill, SkillInput};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -111,4 +112,69 @@ pub async fn check_mcp_server(
         serde_json::json!({"serverId": server.id, "name": server.name, "ok": result.ok, "tools": result.tools.len(), "error": result.error, "latencyMs": result.latency_ms}),
     );
     Ok(updated)
+}
+
+// ---------------------------------------------------------------------- skills
+
+#[tauri::command]
+pub fn list_skills(state: State<'_, AppState>, project_id: String) -> CmdResult<Vec<Skill>> {
+    state.store.list_skills(&project_id).map_err(err)
+}
+
+/// Varre `.claude/skills` do projeto e `~/.claude/skills`.
+#[tauri::command]
+pub fn scan_skills(state: State<'_, AppState>, project_id: String) -> CmdResult<Vec<Skill>> {
+    let skills = state.store.scan_skills(&project_id).map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "harness.skills.scanned",
+        Some(&project_id),
+        serde_json::json!({"count": skills.len()}),
+    );
+    Ok(skills)
+}
+
+#[tauri::command]
+pub fn set_skill_enabled(
+    state: State<'_, AppState>,
+    skill_id: String,
+    enabled: bool,
+) -> CmdResult<Skill> {
+    let skill = state
+        .store
+        .set_skill_enabled(&skill_id, enabled)
+        .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "harness.skill.enabled",
+        skill.project_id.as_deref(),
+        serde_json::json!({"skillId": skill.id, "name": skill.name, "enabled": enabled}),
+    );
+    crate::commands_config::auto_backup(&state);
+    Ok(skill)
+}
+
+#[tauri::command]
+pub fn read_skill(state: State<'_, AppState>, skill_id: String) -> CmdResult<String> {
+    state.store.read_skill(&skill_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn save_skill(state: State<'_, AppState>, input: SkillInput) -> CmdResult<Skill> {
+    let creating = input.skill_id.is_none();
+    let skill = state.store.save_skill(&input).map_err(err)?;
+    audit(
+        &state,
+        "você",
+        if creating {
+            "harness.skill.created"
+        } else {
+            "harness.skill.updated"
+        },
+        Some(&input.project_id),
+        serde_json::json!({"skillId": skill.id, "name": skill.name, "path": skill.path}),
+    );
+    Ok(skill)
 }
