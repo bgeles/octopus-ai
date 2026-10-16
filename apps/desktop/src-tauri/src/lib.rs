@@ -54,7 +54,12 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf));
-    let command = SidecarCommand::resolve(exe_dir.as_deref(), dev_repo_root().as_deref())?;
+    let resource_dir = app.path().resource_dir().ok();
+    let command = SidecarCommand::resolve(
+        exe_dir.as_deref(),
+        dev_repo_root().as_deref(),
+        resource_dir.as_deref(),
+    )?;
     let (sidecar, mut notifications) = Sidecar::spawn(command).await?;
     let runtime = sidecar
         .hello()
