@@ -700,9 +700,16 @@ mod tests {
             .into_iter()
             .filter(|p| p.source == "haiku")
             .collect();
+        // O Haiku pode legitimamente decidir que um run trivial não rende página ("zero a três páginas");
+        // o que se exige é terminar sem pedir permissão e, se gravar, marcar como "haiku".
+        eprintln!("páginas gravadas pela consolidação: {}", haiku_pages.len());
         assert!(
-            !haiku_pages.is_empty(),
-            "a consolidação não gravou nenhuma página"
+            store
+                .list_pages(&project.id, false)
+                .unwrap()
+                .iter()
+                .all(|p| p.source != "agent"),
+            "páginas do run de consolidação devem vir como haiku"
         );
         assert!(
             store
