@@ -35,6 +35,11 @@ export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, 
     if (resumeTarget || runAs) textareaRef.current?.focus();
   }, [resumeTarget, runAs]);
 
+  // Ao escolher um membro, as permissões do composer seguem o padrão dele (perfil, senão cargo); o usuário pode mudar.
+  useEffect(() => {
+    if (runAs) setPermissionMode(runAs.profile.permissionMode ?? runAs.role.defaultPermissionMode ?? "default");
+  }, [runAs]);
+
   const submit = () => {
     const text = prompt.trim();
     if (!text || disabled || busy) return;

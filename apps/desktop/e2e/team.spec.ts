@@ -6,16 +6,17 @@ test.describe("Time (mock)", () => {
     await page.getByRole("button", { name: "Time" }).click();
     await expect(page.getByTestId("team-view")).toBeVisible();
 
+    const dialog = page.getByRole("dialog", { name: "Adicionar ao time" });
     await page.getByRole("button", { name: "Adicionar membro" }).click();
-    await page.getByLabel("Nome").fill("Ana");
-    await page.getByLabel("Cargo").selectOption({ label: "Implementador · Código e migrações" });
-    await page.getByRole("button", { name: "Adicionar" }).click();
+    await dialog.getByLabel("Nome", { exact: true }).fill("Ana");
+    await dialog.getByLabel("Cargo", { exact: true }).selectOption({ label: "Implementador · Código e migrações" });
+    await dialog.getByRole("button", { name: "Adicionar" }).click();
 
     await page.getByRole("button", { name: "Adicionar membro" }).click();
-    await page.getByLabel("Nome").fill("Téo");
-    await page.getByLabel("Cargo").selectOption({ label: "Testador · Testes e qualidade" });
-    await page.getByLabel("Reporta a").selectOption({ label: "Ana · Implementador" });
-    await page.getByRole("button", { name: "Adicionar" }).click();
+    await dialog.getByLabel("Nome", { exact: true }).fill("Téo");
+    await dialog.getByLabel("Cargo", { exact: true }).selectOption({ label: "Testador · Testes e qualidade" });
+    await dialog.getByLabel("Reporta a", { exact: true }).selectOption({ label: "Ana · Implementador" });
+    await dialog.getByRole("button", { name: "Adicionar" }).click();
 
     await expect(page.getByTestId("member-card")).toHaveCount(2);
     await expect(page.getByTestId("org-node")).toHaveCount(3);

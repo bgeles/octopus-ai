@@ -103,7 +103,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
 
         <label className="flex flex-col gap-1 text-[13px] font-medium text-slate">
           Cargo
-          <select value={roleId} onChange={(e) => setRoleId(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
+          <select aria-label="Cargo" value={roleId} onChange={(e) => setRoleId(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
             {roles.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.title} · {r.specialty}
@@ -128,7 +128,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
 
         <label className="flex flex-col gap-1 text-[13px] font-medium text-slate">
           Reporta a
-          <select value={reportsTo} onChange={(e) => setReportsTo(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
+          <select aria-label="Reporta a" value={reportsTo} onChange={(e) => setReportsTo(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
             <option value="">Você (gestor)</option>
             {candidates.map((m) => (
               <option key={m.profile.id} value={m.profile.id}>
@@ -147,7 +147,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
         <div className="grid grid-cols-2 gap-3">
           <label className="flex flex-col gap-1 text-[13px] font-medium text-slate">
             Permissões
-            <select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value as "" | PermissionMode)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
+            <select aria-label="Permissões" value={permissionMode} onChange={(e) => setPermissionMode(e.target.value as "" | PermissionMode)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
               <option value="">Padrão do cargo</option>
               {(Object.keys(PERMISSION_LABELS) as PermissionMode[]).map((mode) => (
                 <option key={mode} value={mode}>

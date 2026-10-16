@@ -92,7 +92,7 @@ describe("Time", () => {
 
     await user.click(within(screen.getByRole("article", { name: "Membro do time: Ana" })).getByRole("button", { name: "Dar uma tarefa" }));
     expect(await screen.findByTestId("run-as-banner")).toHaveTextContent("Tarefa para Ana");
-    expect(screen.getByTestId("run-as-select")).toHaveValue(expect.stringMatching(/^agent_/));
+    expect((screen.getByTestId("run-as-select") as HTMLSelectElement).value).toMatch(/^agent_/);
     await user.type(screen.getByLabelText("Instrução para Ana"), "Crie a migração V12");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
 
