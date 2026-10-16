@@ -1,7 +1,7 @@
 import { Archive, BookOpen, History, Plus, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { Transport } from "../lib/transport";
-import { MEMORY_KIND_LABELS, MEMORY_PAGE_KINDS, type MemoryHandoff, type MemoryObservation, type MemoryPage, type MemoryPageKind, type MemoryPageVersion, type MemorySearchHit, type Project, type Task } from "../lib/types";
+import { CONSOLIDATION_MODEL, CONSOLIDATION_SETTING, MEMORY_KIND_LABELS, MEMORY_PAGE_KINDS, type ConsolidationMode, type MemoryHandoff, type MemoryObservation, type MemoryPage, type MemoryPageKind, type MemoryPageVersion, type MemorySearchHit, type Project, type Task } from "../lib/types";
 import { formatRelative } from "./SessionsView";
 
 export type MemoryTab = "pages" | "observations" | "handoffs" | "context";
@@ -26,6 +26,7 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
   const [pages, setPages] = useState<MemoryPage[] | null>(null);
   const [observations, setObservations] = useState<MemoryObservation[] | null>(null);
   const [handoffs, setHandoffs] = useState<MemoryHandoff[] | null>(null);
+  const [consolidation, setConsolidation] = useState<ConsolidationMode | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<MemorySearchHit[] | null>(null);
@@ -54,6 +55,13 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
     setHandoffs(list);
     setTasks(taskList);
   }, [transport, projectId]);
+
+  useEffect(() => {
+    transport
+      .invoke("get_settings", {})
+      .then((s) => setConsolidation(s[CONSOLIDATION_SETTING] === "haiku" ? "haiku" : "raw"))
+      .catch(() => setConsolidation("raw"));
+  }, [transport]);
 
   useEffect(() => {
     setPages(null);
@@ -119,6 +127,33 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
         <div>
           <div className="eyebrow text-brand">{project?.name ?? ""}</div>
           <h1 className="m-0 font-display text-xl font-bold tracking-tight">Memória</h1>
+        </div>
+        <div className="flex flex-col gap-1" data-testid="consolidation-mode" data-mode={consolidation ?? undefined}>
+          <span className="text-xs font-medium text-slate">Consolidação ao fim de cada run</span>
+          <div role="radiogroup" aria-label="Consolidação" className="flex rounded-md border hairline-strong p-0.5 text-[13px]">
+            {(
+              [
+                ["raw", "Bruta (log de tarefas)"],
+                ["haiku", `Com ${CONSOLIDATION_MODEL.includes("haiku") ? "Haiku" : CONSOLIDATION_MODEL}`],
+              ] as [ConsolidationMode, string][]
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={consolidation === mode}
+                disabled={consolidation === null}
+                onClick={async () => {
+                  await transport.invoke("set_setting", { key: CONSOLIDATION_SETTING, value: mode });
+                  setConsolidation(mode);
+                  setNotice(mode === "haiku" ? "Ao fim de cada run, um run barato com Haiku transforma as observações em páginas (decisões, arquitetura, armadilhas). O log bruto continua." : "Só o log de tarefas bruto, sem modelo.");
+                }}
+                className={["rounded-sm px-3 py-1.5 font-medium disabled:opacity-40", consolidation === mode ? "bg-ink text-paper" : "text-slate hover:text-ink"].join(" ")}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div role="tablist" aria-label="Seções da memória" className="ml-auto flex flex-wrap gap-2">
           {tabs.map((t) => {
@@ -238,7 +273,7 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
                     <span className={["eyebrow", KIND_COLOR[selected.kind]].join(" ")}>{MEMORY_KIND_LABELS[selected.kind]}</span>
                     <h2 className="m-0 font-display text-lg font-bold tracking-tight">{selected.title}</h2>
                     <span className="text-xs text-slate">
-                      memory/wiki/{selected.kind}/{selected.slug}.md · atualizada {formatRelative(selected.updatedAt)} ({selected.source === "auto" ? "consolidação automática" : "você"}) · score {selected.score.toFixed(2)} · usada {selected.accessCount}×{selected.archivedAt ? " · arquivada" : ""}
+                      memory/wiki/{selected.kind}/{selected.slug}.md · atualizada {formatRelative(selected.updatedAt)} ({selected.source === "auto" ? "consolidação automática" : selected.source === "haiku" ? "consolidação com Haiku" : selected.source === "agent" ? "pelo agente" : "você"}) · score {selected.score.toFixed(2)} · usada {selected.accessCount}×{selected.archivedAt ? " · arquivada" : ""}
                     </span>
                   </div>
                   <div className="ml-auto flex flex-wrap gap-2">

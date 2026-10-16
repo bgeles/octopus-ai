@@ -143,5 +143,37 @@ describe("Memória", () => {
       expect((nextEvents[0]?.event as { items: string[] }).items[0]).toMatch(/^handoff: Run interrompido/);
     });
   });
+
+  it("com consolidação Haiku ligada, um run de memória grava páginas marcadas como Haiku e aparece como consolidação", async () => {
+    const { user, transport } = setup(memoryEvents.map((n) => n.params as unknown as RunEventNotification));
+    await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Memória" }));
+    const mode = await screen.findByTestId("consolidation-mode");
+    await waitFor(() => expect(mode).toHaveAttribute("data-mode", "raw"));
+    await user.click(within(mode).getByRole("radio", { name: /Com Haiku/ }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Haiku");
+    expect((await transport.invoke("get_settings", {}))["memory.consolidation"]).toBe("haiku");
+
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
+    await user.type(screen.getByLabelText("Instrução para o agente"), "crie a V12");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
+    await waitFor(async () => {
+      const pages = await transport.invoke("list_memory_pages", { projectId: "proj_demo" });
+      expect(pages.some((p) => p.source === "haiku" && p.kind === "decisions")).toBe(true);
+    });
+    const runs = await transport.invoke("list_runs", { projectId: "proj_demo" });
+    expect(runs.find((r) => r.kind === "consolidation")?.model).toBe("claude-haiku-5-5");
+    expect(runs.find((r) => r.kind === "consolidation")?.options.disallowedTools).toContain("Bash");
+
+    await user.click(screen.getByRole("button", { name: "Sessões" }));
+    expect(await screen.findByText("consolidação · Haiku")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Memória" }));
+    const row = (await screen.findAllByTestId("memory-page-row")).find((r) => r.textContent?.includes("Aprendizados do run"))!;
+    await user.click(row);
+    expect(await screen.findByTestId("memory-page")).toHaveTextContent("consolidação com Haiku");
+    const audit = await transport.invoke("list_audit_events", { projectId: "proj_demo", limit: 50 });
+    expect(audit.some((e) => e.kind === "memory.consolidation.started")).toBe(true);
+  });
 });
 

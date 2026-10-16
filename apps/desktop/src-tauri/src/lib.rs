@@ -92,6 +92,9 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         if let Err(e) = app.emit(RUN_EVENT, &ev) {
                             warn!("falha emitindo {RUN_EVENT}: {e}");
                         }
+                        if ev.event.is_terminal() {
+                            maybe_consolidate(&store, &sidecar, &ev.run_id).await;
+                        }
                     }
                     SidecarNotification::Hook(hook) => {
                         let decision = decide_hook(&store, &hook);
@@ -166,6 +169,58 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
         secrets,
     });
     Ok(())
+}
+
+/// Com a preferência `memory.consolidation = haiku`, dispara o run de consolidação da memória
+/// (modelo barato, só tools de memória) assim que um run de agente termina.
+pub async fn maybe_consolidate(store: &Store, sidecar: &sidecar::Sidecar, run_id: &str) {
+    let plan = match store.plan_consolidation(run_id) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return,
+        Err(e) => {
+            warn!("plano de consolidação do run {run_id} falhou: {e:#}");
+            return;
+        }
+    };
+    let project = match store
+        .get_run(run_id)
+        .ok()
+        .flatten()
+        .and_then(|run| store.get_project(&run.project_id).ok().flatten())
+    {
+        Some(p) => p,
+        None => return,
+    };
+    let (prompt, options) = plan;
+    let crun = match store.create_consolidation_run(&project.id, &prompt, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("não criei o run de consolidação: {e:#}");
+            return;
+        }
+    };
+    let params = protocol::RunStartParams {
+        run_id: crun.id.clone(),
+        cwd: project.path.clone(),
+        prompt,
+        options,
+    };
+    match sidecar.start_run(params).await {
+        Ok(_) => {
+            if let Err(e) = store.audit(
+                "sistema",
+                "memory.consolidation.started",
+                Some(&project.id),
+                serde_json::json!({"runId": crun.id, "sourceRunId": run_id, "model": store::memory::CONSOLIDATION_MODEL}),
+            ) {
+                warn!("auditoria da consolidação falhou: {e}");
+            }
+        }
+        Err(e) => {
+            let _ = store.mark_run_failed(&crun.id, &format!("{e:#}"));
+            warn!("run de consolidação {} não iniciou: {e}", crun.id);
+        }
+    }
 }
 
 /// Avalia a política do projeto do run para um hook PreToolUse e registra na auditoria.

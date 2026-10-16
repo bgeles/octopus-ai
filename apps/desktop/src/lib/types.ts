@@ -42,7 +42,14 @@ export type Run = {
   agentProfileId: string | null;
   /** Task do board que o run executa (null = run avulso). */
   taskId: string | null;
+  /** `agent` (pedido do usuário ou do scheduler) ou `consolidation` (memória com Haiku). */
+  kind: RunKind;
 };
+
+export type RunKind = "agent" | "consolidation";
+export type ConsolidationMode = "raw" | "haiku";
+export const CONSOLIDATION_SETTING = "memory.consolidation";
+export const CONSOLIDATION_MODEL = "claude-haiku-5-5";
 
 // ---------------------------------------------------------------------------
 // Orquestração (Fase 2c): workflows, tasks e scheduler. Espelham `store::orchestration`.

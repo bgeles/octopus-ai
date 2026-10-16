@@ -534,6 +534,20 @@ mod tests {
                 .expect("timeout esperando o run")
                 .expect("canal fechado");
             match n {
+                SidecarNotification::MemoryCall(call) => {
+                    let result = store
+                        .handle_memory_call(&call.run_id, call.op, &call.args)
+                        .unwrap();
+                    eprintln!("memória {:?} → ok={}", call.op, result.ok);
+                    sidecar
+                        .memory_result(crate::protocol::MemoryResultParams {
+                            run_id: call.run_id.clone(),
+                            call_id: call.call_id.clone(),
+                            result,
+                        })
+                        .await
+                        .unwrap();
+                }
                 // Como o app: o hook PreToolUse é decidido pelo motor de política em Rust.
                 SidecarNotification::Hook(hook) => {
                     let decision = crate::decide_hook(&store, &hook);
@@ -606,6 +620,94 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == "brief"),
             "evento brief_injected não registrado"
+        );
+
+        // Consolidação com Haiku: o run de memória só usa memory_write e produz páginas "haiku".
+        store
+            .set_setting(
+                crate::store::memory::CONSOLIDATION_SETTING,
+                &serde_json::json!("haiku"),
+            )
+            .unwrap();
+        let (cprompt, coptions) = store
+            .plan_consolidation(&run_id)
+            .unwrap()
+            .expect("há observações para consolidar");
+        let crun = store
+            .create_consolidation_run(&project.id, &cprompt, &coptions)
+            .unwrap();
+        sidecar
+            .start_run(RunStartParams {
+                run_id: crun.id.clone(),
+                cwd: project.path.clone(),
+                prompt: cprompt,
+                options: coptions,
+            })
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+        loop {
+            let n = tokio::time::timeout_at(deadline, notifications.recv())
+                .await
+                .expect("timeout na consolidação")
+                .expect("canal fechado");
+            match n {
+                SidecarNotification::MemoryCall(call) => {
+                    let result = store
+                        .handle_memory_call(&call.run_id, call.op, &call.args)
+                        .unwrap();
+                    eprintln!(
+                        "consolidação memória {:?} → {}",
+                        call.op,
+                        result.content.lines().next().unwrap_or("")
+                    );
+                    sidecar
+                        .memory_result(crate::protocol::MemoryResultParams {
+                            run_id: call.run_id.clone(),
+                            call_id: call.call_id.clone(),
+                            result,
+                        })
+                        .await
+                        .unwrap();
+                }
+                SidecarNotification::RunEvent(ev) if ev.run_id == crun.id => {
+                    if let RunEvent::PermissionRequest { tool_name, .. } = &ev.event {
+                        panic!("run de consolidação pediu permissão para {tool_name}");
+                    }
+                    let terminal = ev.event.is_terminal();
+                    store
+                        .record_run_event(&ev.run_id, ev.seq, &ev.at, &ev.event)
+                        .unwrap();
+                    if terminal {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let crun_done = store.get_run(&crun.id).unwrap().unwrap();
+        eprintln!(
+            "consolidação {:?} custo {:?}",
+            crun_done.status, crun_done.cost_usd
+        );
+        assert_eq!(crun_done.status, RunStatus::Completed);
+        let haiku_pages: Vec<_> = store
+            .list_pages(&project.id, false)
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.source == "haiku")
+            .collect();
+        assert!(
+            !haiku_pages.is_empty(),
+            "a consolidação não gravou nenhuma página"
+        );
+        assert!(
+            store
+                .list_pages(&project.id, false)
+                .unwrap()
+                .iter()
+                .any(|p| p.kind == "tasklog"),
+            "o log bruto continua existindo"
         );
         let after = store.get_task(&task.id).unwrap().unwrap();
         eprintln!(

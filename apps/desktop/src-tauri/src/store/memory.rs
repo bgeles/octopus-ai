@@ -14,6 +14,29 @@ use crate::protocol::{MemoryCallResult, MemoryOp, ObservationKind};
 
 /// Tamanho máximo do brief injetado no contexto do agente.
 pub const MAX_BRIEF_CHARS: usize = 3_000;
+/// Preferência: `raw` (log de tarefas bruto, padrão) ou `haiku` (run de consolidação com modelo barato).
+pub const CONSOLIDATION_SETTING: &str = "memory.consolidation";
+pub const CONSOLIDATION_MODEL: &str = "claude-haiku-5-5";
+/// Meia-vida do score sem acesso, em dias.
+pub const SCORE_HALF_LIFE_DAYS: f64 = 30.0;
+
+/// Score efetivo: cai pela metade a cada 30 dias sem uso e nunca abaixo de 0,05.
+pub fn decayed_score(score: f64, last_used_at: &str, now_ts: &str) -> f64 {
+    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+    let (Some(last), Some(now)) = (parse(last_used_at), parse(now_ts)) else {
+        return score;
+    };
+    let days = (now - last).num_seconds().max(0) as f64 / 86_400.0;
+    (score * 0.5_f64.powf(days / SCORE_HALF_LIFE_DAYS)).max(0.05)
+}
+
+fn apply_decay(page: &mut MemoryPage) {
+    let last = page
+        .last_accessed_at
+        .clone()
+        .unwrap_or_else(|| page.updated_at.clone());
+    page.score = decayed_score(page.score, &last, &now());
+}
 
 pub const REDACTED: &str = "[redigido]";
 pub const PAGE_KINDS: &[&str] = &[
@@ -416,18 +439,24 @@ impl Store {
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![project_id, include_archived], MemoryPage::from_row)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut pages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        pages.iter_mut().for_each(apply_decay);
+        Ok(pages)
     }
 
     pub fn get_page(&self, id: &str) -> Result<Option<MemoryPage>> {
         let conn = self.conn.lock().expect("store mutex");
-        Ok(conn
+        let mut page = conn
             .query_row(
                 &format!("{} WHERE p.id = ?1", MemoryPage::SELECT),
                 params![id],
                 MemoryPage::from_row,
             )
-            .optional()?)
+            .optional()?;
+        if let Some(p) = page.as_mut() {
+            apply_decay(p);
+        }
+        Ok(page)
     }
 
     /// Marca páginas como usadas (recall/leitura): sobe o uso e o score.
@@ -489,8 +518,8 @@ impl Store {
         let id = match existing {
             Some(id) => {
                 tx.execute(
-                    "UPDATE memory_page SET kind = ?2, title = ?3, body_md = ?4, updated_at = ?5 WHERE id = ?1",
-                    params![id, input.kind, title, body, ts],
+                    "UPDATE memory_page SET kind = ?2, title = ?3, body_md = ?4, updated_at = ?5, source = ?6 WHERE id = ?1",
+                    params![id, input.kind, title, body, ts, source],
                 )?;
                 id
             }
@@ -583,7 +612,8 @@ impl Store {
         let mut hits: Vec<MemorySearchHit> = rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(|(page, snippet, bm25)| {
+            .map(|(mut page, snippet, bm25)| {
+                apply_decay(&mut page);
                 let rank = -bm25 * (0.5 + page.score);
                 MemorySearchHit {
                     page,
@@ -662,9 +692,9 @@ impl Store {
     /// Ao fim do run: registra uma entrada no log de tarefas do mês com pedido, resultado e arquivos
     /// tocados, e marca as observações como consolidadas. Sem LLM: é o fallback "bruto" do plano.
     pub(crate) fn consolidate_run_in(tx: &Transaction<'_>, run_id: &str) -> Result<Option<String>> {
-        let Some((project_id, prompt, status, result_text, error_message, cost_usd, started_at, agent_id, task_id)) = tx
+        let Some((project_id, prompt, status, result_text, error_message, cost_usd, started_at, agent_id, task_id, kind)) = tx
             .query_row(
-                "SELECT project_id, prompt, status, result_text, error_message, cost_usd, started_at, agent_profile_id, task_id FROM run WHERE id = ?1",
+                "SELECT project_id, prompt, status, result_text, error_message, cost_usd, started_at, agent_profile_id, task_id, kind FROM run WHERE id = ?1",
                 params![run_id],
                 |r| {
                     Ok((
@@ -677,6 +707,7 @@ impl Store {
                         r.get::<_, String>(6)?,
                         r.get::<_, Option<String>>(7)?,
                         r.get::<_, Option<String>>(8)?,
+                        r.get::<_, String>(9)?,
                     ))
                 },
             )
@@ -684,6 +715,10 @@ impl Store {
         else {
             return Ok(None);
         };
+        if kind != "agent" {
+            // Runs de consolidação não entram no log de tarefas.
+            return Ok(None);
+        }
         let agent_name: Option<String> = match &agent_id {
             Some(id) => tx
                 .query_row(
@@ -1073,14 +1108,35 @@ Use a tool memory_search para mais contexto, memory_write para registrar decisõ
                             .into(),
                     });
                 }
+                let title = str_arg("title");
+                let existing: Option<String> = {
+                    let conn = self.conn.lock().expect("store mutex");
+                    conn.query_row(
+                        "SELECT id FROM memory_page WHERE project_id = ?1 AND slug = ?2 AND archived_at IS NULL",
+                        params![project_id, slugify(&title)],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                };
+                let updating = existing.is_some();
                 let input = MemoryPageInput {
                     project_id: project_id.clone(),
-                    page_id: None,
+                    page_id: existing,
                     kind,
-                    title: str_arg("title"),
+                    title,
                     body_md: str_arg("body"),
                 };
-                match self.save_page(&input, &format!("run {run_id} (agente)"), "agent") {
+                let source = if str_arg("source") == "haiku" {
+                    "haiku"
+                } else {
+                    "agent"
+                };
+                let reason = if updating {
+                    format!("run {run_id} (atualizada pelo agente)")
+                } else {
+                    format!("run {run_id} (agente)")
+                };
+                match self.save_page(&input, &reason, source) {
                     Ok(page) => {
                         self.audit(
                             "agente",
@@ -1091,8 +1147,10 @@ Use a tool memory_search para mais contexto, memory_write para registrar decisõ
                         Ok(MemoryCallResult {
                             ok: true,
                             content: format!(
-                                "Página \"{}\" gravada na memória do projeto ({}).",
-                                page.title, page.kind
+                                "Página \"{}\" {} na memória do projeto ({}).",
+                                page.title,
+                                if updating { "atualizada" } else { "gravada" },
+                                page.kind
                             ),
                         })
                     }
@@ -1127,6 +1185,115 @@ Use a tool memory_search para mais contexto, memory_write para registrar decisõ
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------ consolidação com Haiku
+
+    pub fn consolidation_mode(&self) -> Result<String> {
+        Ok(self
+            .get_setting(CONSOLIDATION_SETTING)?
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "raw".into()))
+    }
+
+    /// Se a preferência for `haiku` e o run (de agente) tiver observações, devolve o prompt e as
+    /// opções do run de consolidação: só as tools de memória, sem perguntas, modelo barato.
+    pub fn plan_consolidation(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<(String, crate::protocol::RunOptions)>> {
+        if self.consolidation_mode()? != "haiku" {
+            return Ok(None);
+        }
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(None);
+        };
+        if run.kind != "agent" {
+            return Ok(None);
+        }
+        let observations = self.list_observations(&run.project_id, Some(run_id), 60)?;
+        if observations.is_empty() {
+            return Ok(None);
+        }
+        let pages = self.list_pages(&run.project_id, false)?;
+        let mut prompt = String::from(
+            "Você é o consolidador de memória do Octopus. Leia o resumo do run e as observações abaixo e registre na memória do projeto, usando SOMENTE a tool memory_write, o que vale guardar para runs futuros:\n\
+             - decisões tomadas (kind \"decisions\"), fatos de arquitetura (\"architecture\"), armadilhas/erros e como evitá-los (\"pitfalls\");\n\
+             - nada de log passo a passo, nada de segredos, nada trivial. Zero a três páginas, curtas e objetivas, em português.\n\
+             - Se uma observação contradiz uma página existente (lista abaixo), grave a página com o MESMO título acrescentando no corpo uma seção \"Contradição\" explicando o conflito.\n\
+             - Passe source=\"haiku\" em toda chamada. Não leia arquivos nem use outras ferramentas. Ao terminar, responda só \"ok\".\n\n",
+        );
+        prompt.push_str(&format!(
+            "## Run {}\nPedido: {}\nStatus: {}\n",
+            run.id,
+            first_chars(&run.prompt, 400),
+            run.status.as_str()
+        ));
+        if let Some(r) = run.result_text.as_deref().filter(|s| !s.trim().is_empty()) {
+            prompt.push_str(&format!("Resultado: {}\n", first_chars(r, 600)));
+        }
+        if pages.iter().any(|p| p.kind != "tasklog") {
+            prompt.push_str("\n## Páginas existentes\n");
+            for p in pages.iter().filter(|p| p.kind != "tasklog").take(30) {
+                prompt.push_str(&format!("- {} ({})\n", p.title, p.kind));
+            }
+        }
+        prompt.push_str("\n## Observações do run\n");
+        let mut used = 0usize;
+        for o in observations.iter().rev() {
+            let body = if o.body.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", first_chars(&o.body, 300))
+            };
+            let line = format!("- [{}] {}{}\n", o.kind, o.title, body);
+            used += line.len();
+            if used > 12_000 {
+                prompt.push_str("- … (observações restantes omitidas)\n");
+                break;
+            }
+            prompt.push_str(&line);
+        }
+        let options = crate::protocol::RunOptions {
+            model: Some(CONSOLIDATION_MODEL.into()),
+            permission_mode: Some(crate::protocol::PermissionMode::DontAsk),
+            max_turns: Some(8),
+            max_budget_usd: Some(0.25),
+            allowed_tools: Some(vec![
+                "mcp__octopus__memory_write".into(),
+                "mcp__octopus__memory_search".into(),
+            ]),
+            disallowed_tools: Some(
+                [
+                    "Bash",
+                    "Edit",
+                    "Write",
+                    "MultiEdit",
+                    "NotebookEdit",
+                    "Read",
+                    "Glob",
+                    "Grep",
+                    "WebFetch",
+                    "WebSearch",
+                    "Agent",
+                    "Task",
+                    "TodoWrite",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ),
+            include_partial_messages: Some(false),
+            policy_hooks: Some(false),
+            memory: Some(crate::protocol::MemoryOptions {
+                capture: false,
+                brief: None,
+                brief_items: None,
+                tools: Some(true),
+            }),
+            ..Default::default()
+        };
+        Ok(Some((prompt, options)))
     }
 
     /// Depois de `record_run_event` fechar a transação: grava o arquivo da página consolidada.
@@ -1376,6 +1543,136 @@ mod tests {
         assert_eq!(store.search_pages(&project.id, "V13", 10).unwrap().len(), 1);
         store.touch_pages(std::slice::from_ref(&page.id)).unwrap();
         assert_eq!(store.get_page(&page.id).unwrap().unwrap().access_count, 1);
+    }
+
+    #[test]
+    fn score_decays_with_a_30_day_half_life_and_floors_at_0_05() {
+        let s = decayed_score(0.8, "2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z");
+        assert!((s - 0.4).abs() < 0.01, "{s}");
+        assert_eq!(
+            decayed_score(0.8, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z"),
+            0.8
+        );
+        assert_eq!(
+            decayed_score(0.1, "2020-01-01T00:00:00Z", "2026-10-01T00:00:00Z"),
+            0.05
+        );
+        assert_eq!(
+            decayed_score(0.7, "data inválida", "2026-10-01T00:00:00Z"),
+            0.7
+        );
+    }
+
+    #[test]
+    fn consolidation_is_planned_only_in_haiku_mode_for_agent_runs_with_observations() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.create_project("p", "/tmp/p").unwrap();
+        let run = store
+            .create_run(&project.id, "crie a V12", &RunOptions::default())
+            .unwrap();
+        store
+            .record_run_event(
+                &run.id,
+                1,
+                "t",
+                &RunEvent::Observation {
+                    kind: ObservationKind::TurnEnd,
+                    title: "Fim do turno".into(),
+                    body: "Decidi usar Flyway versionado.".into(),
+                    tool_name: None,
+                    tool_use_id: None,
+                    parent_tool_use_id: None,
+                    agent_id: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            store.plan_consolidation(&run.id).unwrap().is_none(),
+            "modo raw não consolida com Haiku"
+        );
+        store
+            .set_setting(CONSOLIDATION_SETTING, &serde_json::json!("haiku"))
+            .unwrap();
+        store
+            .save_page(
+                &MemoryPageInput {
+                    project_id: project.id.clone(),
+                    page_id: None,
+                    kind: "decisions".into(),
+                    title: "Postgres 16".into(),
+                    body_md: "x".into(),
+                },
+                "c",
+                "manual",
+            )
+            .unwrap();
+        let (prompt, options) = store.plan_consolidation(&run.id).unwrap().expect("plano");
+        assert!(prompt.contains("Decidi usar Flyway versionado."));
+        assert!(prompt.contains("- Postgres 16 (decisions)"));
+        assert_eq!(options.model.as_deref(), Some(CONSOLIDATION_MODEL));
+        assert_eq!(
+            options.permission_mode,
+            Some(crate::protocol::PermissionMode::DontAsk)
+        );
+        assert!(options
+            .disallowed_tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|t| t == "Bash"));
+        assert!(!options.memory.as_ref().unwrap().capture);
+        // Run de consolidação não é consolidado de novo nem entra no log de tarefas.
+        let c = store
+            .create_consolidation_run(&project.id, &prompt, &options)
+            .unwrap();
+        assert_eq!(c.kind, "consolidation");
+        assert_eq!(store.get_run(&c.id).unwrap().unwrap().kind, "consolidation");
+        assert!(store.plan_consolidation(&c.id).unwrap().is_none());
+        store
+            .record_run_event(
+                &c.id,
+                1,
+                "t",
+                &RunEvent::Result {
+                    session_id: "s".into(),
+                    subtype: "success".into(),
+                    is_error: false,
+                    cost_usd: Some(0.01),
+                    duration_ms: None,
+                    num_turns: Some(2),
+                    usage: None,
+                    stop_reason: None,
+                    result_text: Some("ok".into()),
+                },
+            )
+            .unwrap();
+        assert!(store
+            .list_pages(&project.id, false)
+            .unwrap()
+            .iter()
+            .all(|p| p.kind != "tasklog"));
+        // Sem observações, nada a consolidar.
+        let empty = store
+            .create_run(&project.id, "nada", &RunOptions::default())
+            .unwrap();
+        assert!(store.plan_consolidation(&empty.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn memory_write_with_an_existing_title_updates_the_page() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.create_project("p", "/tmp/p").unwrap();
+        let run = store
+            .create_run(&project.id, "x", &RunOptions::default())
+            .unwrap();
+        store.handle_memory_call(&run.id, MemoryOp::Write, &serde_json::json!({"kind": "decisions", "title": "Migrações em Flyway", "body": "v1"})).unwrap();
+        let r = store.handle_memory_call(&run.id, MemoryOp::Write, &serde_json::json!({"kind": "decisions", "title": "Migrações em Flyway", "body": "v2 com Contradição", "source": "haiku"})).unwrap();
+        assert!(r.content.contains("atualizada"), "{}", r.content);
+        let pages = store.list_pages(&project.id, false).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].body_md, "v2 com Contradição");
+        assert_eq!(pages[0].versions, 2);
+        assert_eq!(pages[0].source, "haiku");
     }
 
     #[test]

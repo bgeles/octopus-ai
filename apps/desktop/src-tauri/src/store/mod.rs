@@ -49,6 +49,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0010_memory_handoff",
         include_str!("migrations/0010_memory_handoff.sql"),
     ),
+    (
+        "0011_run_kind",
+        include_str!("migrations/0011_run_kind.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -249,11 +253,36 @@ impl Store {
             error_message: None,
             agent_profile_id: agent_profile_id.map(str::to_string),
             task_id: task_id.map(str::to_string),
+            kind: "agent".into(),
         };
+        self.insert_run(&run)?;
+        Ok(run)
+    }
+
+    /// Run de consolidação da memória (Haiku): não é de um membro nem de uma task.
+    pub fn create_consolidation_run(
+        &self,
+        project_id: &str,
+        prompt: &str,
+        options: &RunOptions,
+    ) -> Result<Run> {
+        let mut run = self.create_run_full(project_id, prompt, options, None, None)?;
+        {
+            let conn = self.conn.lock().expect("store mutex");
+            conn.execute(
+                "UPDATE run SET kind = 'consolidation' WHERE id = ?1",
+                params![run.id],
+            )?;
+        }
+        run.kind = "consolidation".into();
+        Ok(run)
+    }
+
+    fn insert_run(&self, run: &Run) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
-            "INSERT INTO run (id, project_id, prompt, options_json, status, model, started_at, agent_profile_id, task_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO run (id, project_id, prompt, options_json, status, model, started_at, agent_profile_id, task_id, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 run.id,
                 run.project_id,
@@ -263,10 +292,11 @@ impl Store {
                 run.model,
                 run.started_at,
                 run.agent_profile_id,
-                run.task_id
+                run.task_id,
+                run.kind
             ],
         )?;
-        Ok(run)
+        Ok(())
     }
 
     pub fn get_run(&self, id: &str) -> Result<Option<Run>> {
@@ -668,11 +698,12 @@ mod tests {
                 "0008_sandbox_budget".to_string(),
                 "0009_memory".to_string(),
                 "0010_memory_handoff".to_string(),
+                "0011_run_kind".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 10);
+        assert_eq!(s.applied_migrations().unwrap().len(), 11);
     }
 
     #[test]

@@ -30,6 +30,7 @@ export type QueryOptionsLike = {
   forkSession?: boolean;
   systemPrompt?: { type: "preset"; preset: "claude_code"; append?: string };
   allowedTools?: string[];
+  disallowedTools?: string[];
   settingSources?: Array<"user" | "project" | "local">;
   env?: Record<string, string | undefined>;
   includePartialMessages?: boolean;
@@ -210,6 +211,7 @@ export class RunManager {
       options.systemPrompt = { type: "preset", preset: "claude_code", append: o.systemPromptAppend };
     }
     if (o.allowedTools) options.allowedTools = o.allowedTools;
+    if (o.disallowedTools && o.disallowedTools.length > 0) options.disallowedTools = o.disallowedTools;
     if (o.settingSources) options.settingSources = o.settingSources;
     if (o.env) options.env = { ...process.env, ...o.env };
     if (o.agents && Object.keys(o.agents).length > 0) options.agents = o.agents;
