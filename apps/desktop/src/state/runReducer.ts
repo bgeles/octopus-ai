@@ -192,6 +192,10 @@ function applyEvent(state: RunViewState, event: RunEvent, at: string): RunViewSt
         items: [...finishStreaming(state.items), { kind: "error", id: `error_${state.items.length}`, message: event.message, fatal: event.fatal, at }],
         pendingPermissions: event.fatal ? [] : state.pendingPermissions,
       };
+
+    case "task_update":
+      // O board reage a este evento; no transcript a chamada da tool task_update já aparece como tool_use.
+      return state;
   }
 }
 

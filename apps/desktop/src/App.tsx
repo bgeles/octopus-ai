@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
+import { BoardView } from "./components/BoardView";
+import { TaskDialog } from "./components/TaskDialog";
 import { MemberDialog } from "./components/MemberDialog";
 import { MemberSheet } from "./components/MemberSheet";
 import { TeamView, type MemberStatus } from "./components/TeamView";
@@ -15,7 +17,7 @@ import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, TeamMember, TeamMemberInput } from "./lib/types";
+import type { AgentTotals, AppSettings, Approval, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -48,6 +50,13 @@ export function App({ transport }: AppProps) {
   const [openMemberId, setOpenMemberId] = useState<string | null>(null);
   const [memberDialog, setMemberDialog] = useState<{ open: boolean; member: TeamMember | null }>({ open: false, member: null });
   const [runAs, setRunAs] = useState<TeamMember | null>(null);
+  const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
+  const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [taskEvents, setTaskEvents] = useState<TaskEvent[]>([]);
+  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -143,15 +152,71 @@ export function App({ transport }: AppProps) {
     [transport],
   );
 
+  const refreshBoard = useCallback(
+    async (projectId: string) => {
+      try {
+        const [wfs, taskList] = await Promise.all([transport.invoke("list_workflows", { projectId }), transport.invoke("list_tasks", { projectId })]);
+        setWorkflows(wfs);
+        setTasks(taskList);
+        setSelectedWorkflowId((current) => (current && wfs.some((w) => w.id === current) ? current : (wfs[0]?.id ?? null)));
+      } catch (e) {
+        setToast(`Falha ao carregar o board: ${messageOf(e)}`);
+      }
+    },
+    [transport],
+  );
+
+  useEffect(() => {
+    transport
+      .invoke("list_workflow_templates", {})
+      .then(setTemplates)
+      .catch(() => {});
+  }, [transport]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    transport
+      .listen("board:changed", () => {
+        const projectId = selectedProjectRef.current?.id;
+        if (projectId) {
+          void refreshBoard(projectId);
+          void refreshRuns(projectId);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [transport, refreshBoard, refreshRuns]);
+
+  useEffect(() => {
+    if (!selectedTaskId) {
+      setTaskEvents([]);
+      return;
+    }
+    transport
+      .invoke("list_task_events", { taskId: selectedTaskId })
+      .then(setTaskEvents)
+      .catch(() => setTaskEvents([]));
+  }, [transport, selectedTaskId, tasks]);
+
   useEffect(() => {
     if (!selectedProject) return;
     void refreshRuns(selectedProject.id);
     void refreshApprovals(selectedProject.id);
     void refreshTeam(selectedProject.id);
+    void refreshBoard(selectedProject.id);
     setSessions(null);
     setTeam(null);
     setOpenMemberId(null);
-  }, [selectedProject, refreshRuns, refreshApprovals, refreshTeam]);
+    setSelectedTaskId(null);
+  }, [selectedProject, refreshRuns, refreshApprovals, refreshTeam, refreshBoard]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -165,6 +230,7 @@ export function App({ transport }: AppProps) {
           if (projectId) {
             void refreshRuns(projectId);
             void refreshApprovals(projectId);
+            void refreshBoard(projectId);
           }
         }
       })
@@ -176,7 +242,7 @@ export function App({ transport }: AppProps) {
       disposed = true;
       unlisten?.();
     };
-  }, [transport, refreshRuns, refreshApprovals]);
+  }, [transport, refreshRuns, refreshApprovals, refreshBoard]);
 
   const selectedProjectRef = useRef<Project | null>(null);
   selectedProjectRef.current = selectedProject;
@@ -297,6 +363,15 @@ export function App({ transport }: AppProps) {
 
   useEffect(() => {
     if (view === "sessions" && sessions === null) void loadSessions();
+    // Board e Time recarregam ao entrar: o scheduler e outras janelas podem ter mudado o estado.
+    if ((view === "board" || view === "agents") && selectedProject) {
+      void refreshBoard(selectedProject.id);
+      void refreshTeam(selectedProject.id);
+      transport
+        .invoke("get_settings", {})
+        .then(setSettings)
+        .catch(() => {});
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, selectedProject]);
 
@@ -415,6 +490,37 @@ export function App({ transport }: AppProps) {
   const openMember = team?.find((m) => m.profile.id === openMemberId) ?? null;
   const monthlyTeamCost = teamTotals.reduce((sum, t) => sum + t.costUsd, 0);
 
+  const schedulerPaused = settings?.["scheduler.paused"] === true;
+  const selectedWorkflow = workflows?.find((w) => w.id === selectedWorkflowId) ?? workflows?.[0] ?? null;
+  const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
+  const pendingGates = tasks.filter((t) => t.status === "waiting_approval" || t.status === "review").length;
+
+  const tick = async () => {
+    try {
+      await transport.invoke("scheduler_tick", {});
+      if (selectedProject) {
+        await refreshBoard(selectedProject.id);
+        await refreshRuns(selectedProject.id);
+      }
+    } catch (e) {
+      setToast(`Falha ao rodar o scheduler: ${messageOf(e)}`);
+    }
+  };
+
+  const createTask = async (input: TaskInput) => {
+    if (!selectedProject || !selectedWorkflow) return;
+    const task = await transport.invoke("create_task", { projectId: selectedProject.id, workflowId: selectedWorkflow.id, input });
+    await refreshBoard(selectedProject.id);
+    setSelectedTaskId(task.id);
+    void tick();
+  };
+
+  const afterTaskChange = async () => {
+    if (!selectedProject) return;
+    await refreshBoard(selectedProject.id);
+    void tick();
+  };
+
   const onboardingPending = settings !== null && settings["onboarding.completedAt"] === undefined;
 
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "waiting_approval" || r.status === "queued");
@@ -465,6 +571,7 @@ export function App({ transport }: AppProps) {
       onChangeView={setView}
       activeRuns={activeRuns}
       pendingApprovals={pendingApprovals}
+      pendingGates={pendingGates}
       theme={theme}
       onThemeChange={changeTheme}
     >
@@ -555,6 +662,50 @@ export function App({ transport }: AppProps) {
         />
       )}
 
+      {view === "board" && (
+        <BoardView
+          project={selectedProject}
+          workflows={workflows}
+          templates={templates}
+          tasks={tasks}
+          team={team ?? []}
+          runs={runs}
+          selectedWorkflowId={selectedWorkflow?.id ?? null}
+          onSelectWorkflow={setSelectedWorkflowId}
+          onCreateFromTemplate={async (templateId, useWorktrees) => {
+            if (!selectedProject) return;
+            try {
+              const wf = await transport.invoke("create_workflow_from_template", { input: { projectId: selectedProject.id, templateId, useWorktrees } });
+              await refreshBoard(selectedProject.id);
+              setSelectedWorkflowId(wf.id);
+            } catch (e) {
+              setToast(`Falha ao criar o workflow: ${messageOf(e)}`);
+            }
+          }}
+          onNewTask={() => setTaskDialogOpen(true)}
+          onOpenTask={(task) => setSelectedTaskId(task.id)}
+          schedulerPaused={schedulerPaused}
+          onTogglePaused={() => void setSetting("scheduler.paused", schedulerPaused ? null : true).catch((e) => setToast(messageOf(e)))}
+          onTick={() => void tick()}
+          selectedTask={selectedTask}
+          taskEvents={taskEvents}
+          onApprove={async (task, note) => {
+            await transport.invoke("approve_task", { taskId: task.id, note });
+            await afterTaskChange();
+          }}
+          onReturn={async (task, stageId, note) => {
+            await transport.invoke("return_task", { taskId: task.id, stageId, note });
+            await afterTaskChange();
+          }}
+          onMove={async (task, stageId, status, note) => {
+            await transport.invoke("move_task", { input: { taskId: task.id, stageId, status, note } });
+            await afterTaskChange();
+          }}
+          onOpenRun={(run) => void openRun(run)}
+          onCloseTask={() => setSelectedTaskId(null)}
+        />
+      )}
+
       {view === "settings" && settings && (
         <SettingsView
           settings={settings}
@@ -596,6 +747,7 @@ export function App({ transport }: AppProps) {
       )}
 
       <AddProjectDialog open={addOpen} onClose={() => setAddOpen(false)} onCreate={createProject} />
+      <TaskDialog open={taskDialogOpen} workflow={selectedWorkflow} tasks={tasks.filter((t) => t.workflowId === selectedWorkflow?.id)} team={team ?? []} onClose={() => setTaskDialogOpen(false)} onCreate={createTask} />
       <MemberDialog
         open={memberDialog.open}
         roles={roles}

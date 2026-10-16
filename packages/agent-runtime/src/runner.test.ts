@@ -85,6 +85,24 @@ describe("RunManager", () => {
     expect(typeof seen?.canUseTool).toBe("function");
   });
 
+  it("com taskContext, monta o MCP octopus, libera a tool e emite task_update", async () => {
+    const { events, emit } = collector();
+    let seen: QueryOptionsLike | undefined;
+    let capturedUpdate: ((status: "done" | "review" | "blocked", note: string | null) => void) | undefined;
+    const factory = (_ctx: unknown, onUpdate: typeof capturedUpdate) => {
+      capturedUpdate = onUpdate;
+      return { fake: "server" };
+    };
+    const manager = new RunManager(fakeQuery([{ type: "result", subtype: "success", session_id: "s" }], (o) => (seen = o)), emit, () => {}, factory as never);
+    manager.start({ ...baseParams, options: { allowedTools: ["Read"], taskContext: { taskId: "task_1", title: "T", stage: "Implementar", allowedStatuses: ["done", "review", "blocked"] } } });
+    capturedUpdate!("review", "ok");
+    await manager.drain();
+    expect(seen?.mcpServers).toEqual({ octopus: { fake: "server" } });
+    expect(seen?.allowedTools).toEqual(["Read", "mcp__octopus__task_update"]);
+    expect(events.map((e) => e.event.type)).toEqual(["task_update", "result"]);
+    expect(events[0]?.event).toMatchObject({ type: "task_update", taskId: "task_1", status: "review", note: "ok" });
+  });
+
   it("rejeita run duplicado", async () => {
     const manager = new RunManager(fakeQuery([{ type: "result", subtype: "success", session_id: "s" }]), () => {});
     manager.start(baseParams);

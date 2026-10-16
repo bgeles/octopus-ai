@@ -1,0 +1,120 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 0,
+      "at": "2026-10-16T16:00:00.000Z",
+      "event": {
+        "type": "session_init",
+        "sessionId": "aa11bb22-0000-4000-8000-000000000001",
+        "model": "claude-opus-5-5",
+        "tools": [
+          "Read",
+          "Edit",
+          "Bash",
+          "mcp__octopus__task_update"
+        ],
+        "mcpServers": [
+          {
+            "name": "octopus",
+            "status": "connected"
+          }
+        ],
+        "permissionMode": "acceptEdits"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 1,
+      "at": "2026-10-16T16:00:01.000Z",
+      "event": {
+        "type": "assistant_text",
+        "messageId": "m1",
+        "text": "Migração criada e testes verdes. Marcando a task como pronta para revisão.",
+        "parentToolUseId": null
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 2,
+      "at": "2026-10-16T16:00:02.000Z",
+      "event": {
+        "type": "tool_use",
+        "toolUseId": "toolu_task",
+        "name": "mcp__octopus__task_update",
+        "input": {
+          "status": "review",
+          "note": "V12 criada; LeadRepositoryIT verde."
+        },
+        "parentToolUseId": null
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 3,
+      "at": "2026-10-16T16:00:02.100Z",
+      "event": {
+        "type": "task_update",
+        "taskId": "task_01",
+        "status": "review",
+        "note": "V12 criada; LeadRepositoryIT verde."
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 4,
+      "at": "2026-10-16T16:00:02.200Z",
+      "event": {
+        "type": "tool_result",
+        "toolUseId": "toolu_task",
+        "content": "Task task_01 marcada como review.",
+        "isError": false,
+        "parentToolUseId": null
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.event",
+    "params": {
+      "runId": "run_01HZX9R2Y3",
+      "seq": 5,
+      "at": "2026-10-16T16:00:03.000Z",
+      "event": {
+        "type": "result",
+        "sessionId": "aa11bb22-0000-4000-8000-000000000001",
+        "subtype": "success",
+        "isError": false,
+        "costUsd": 0.031,
+        "durationMs": 3000,
+        "numTurns": 2,
+        "usage": {
+          "inputTokens": 700,
+          "outputTokens": 120,
+          "cacheReadTokens": 30000,
+          "cacheCreationTokens": 0
+        },
+        "stopReason": "end_turn",
+        "resultText": "Pronto para revisão."
+      }
+    }
+  }
+]

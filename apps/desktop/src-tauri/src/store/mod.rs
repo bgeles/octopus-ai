@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod models;
+pub mod orchestration;
 pub mod team;
 
 use std::path::{Path, PathBuf};
@@ -29,6 +30,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0003_settings_backups.sql"),
     ),
     ("0004_team", include_str!("migrations/0004_team.sql")),
+    (
+        "0005_orchestration",
+        include_str!("migrations/0005_orchestration.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -172,6 +177,17 @@ impl Store {
         options: &RunOptions,
         agent_profile_id: Option<&str>,
     ) -> Result<Run> {
+        self.create_run_full(project_id, prompt, options, agent_profile_id, None)
+    }
+
+    pub fn create_run_full(
+        &self,
+        project_id: &str,
+        prompt: &str,
+        options: &RunOptions,
+        agent_profile_id: Option<&str>,
+        task_id: Option<&str>,
+    ) -> Result<Run> {
         let run = Run {
             id: new_id("run"),
             project_id: project_id.to_string(),
@@ -191,11 +207,12 @@ impl Store {
             result_text: None,
             error_message: None,
             agent_profile_id: agent_profile_id.map(str::to_string),
+            task_id: task_id.map(str::to_string),
         };
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
-            "INSERT INTO run (id, project_id, prompt, options_json, status, model, started_at, agent_profile_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO run (id, project_id, prompt, options_json, status, model, started_at, agent_profile_id, task_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 run.id,
                 run.project_id,
@@ -204,7 +221,8 @@ impl Store {
                 run.status.as_str(),
                 run.model,
                 run.started_at,
-                run.agent_profile_id
+                run.agent_profile_id,
+                run.task_id
             ],
         )?;
         Ok(run)
@@ -345,6 +363,7 @@ impl Store {
                     RunStatus::Completed
                 };
                 close_pending_approvals(&tx, run_id)?;
+                Self::finish_task_run(&tx, run_id, !*is_error, result_text.as_deref())?;
                 tx.execute(
                     "UPDATE run SET status = ?2, claude_session_id = COALESCE(NULLIF(?3, ''), claude_session_id),
                         cost_usd = ?4, num_turns = ?5, stop_reason = ?6, result_text = ?7, ended_at = ?8,
@@ -371,10 +390,14 @@ impl Store {
                 fatal: true,
             } => {
                 close_pending_approvals(&tx, run_id)?;
+                Self::finish_task_run(&tx, run_id, false, Some(message))?;
                 tx.execute(
                     "UPDATE run SET status = 'failed', error_message = ?2, ended_at = ?3 WHERE id = ?1",
                     params![run_id, message, now()],
                 )?;
+            }
+            RunEvent::TaskUpdate { status, note, .. } => {
+                Self::apply_task_update(&tx, run_id, *status, note.as_deref())?;
             }
             _ => {}
         }
@@ -482,12 +505,13 @@ mod tests {
                 "0001_init".to_string(),
                 "0002_approvals".to_string(),
                 "0003_settings_backups".to_string(),
-                "0004_team".to_string()
+                "0004_team".to_string(),
+                "0005_orchestration".to_string()
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 4);
+        assert_eq!(s.applied_migrations().unwrap().len(), 5);
     }
 
     #[test]

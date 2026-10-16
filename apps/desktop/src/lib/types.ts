@@ -2,9 +2,9 @@
  * Tipos da ponte UI <-> core Rust. Espelham `src-tauri/src/store/models.rs` e os comandos em `commands.rs`.
  * Eventos de run vêm de `@octopus/protocol`.
  */
-import type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary } from "@octopus/protocol";
+import type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 
-export type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary };
+export type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary, TaskContext, TaskStatusUpdate };
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -38,6 +38,84 @@ export type Run = {
   errorMessage: string | null;
   /** Membro do time que executou o run (null = run avulso). */
   agentProfileId: string | null;
+  /** Task do board que o run executa (null = run avulso). */
+  taskId: string | null;
+};
+
+// ---------------------------------------------------------------------------
+// Orquestração (Fase 2c): workflows, tasks e scheduler. Espelham `store::orchestration`.
+// ---------------------------------------------------------------------------
+
+export type Stage = {
+  id: string;
+  name: string;
+  agentProfileId: string | null;
+  gate: boolean;
+  instruction: string | null;
+};
+
+export type Workflow = {
+  id: string;
+  projectId: string;
+  name: string;
+  stages: Stage[];
+  useWorktrees: boolean;
+  maxParallel: number;
+  createdAt: string;
+};
+
+export type WorkflowInput = { name: string; stages: Stage[]; useWorktrees?: boolean; maxParallel?: number };
+
+export type WorkflowTemplate = { id: string; name: string; stages: { name: string; roleTitle: string | null; gate: boolean }[] };
+
+export type TaskStatus = "backlog" | "ready" | "running" | "waiting_approval" | "review" | "done" | "blocked" | "failed";
+
+export type Task = {
+  id: string;
+  projectId: string;
+  workflowId: string;
+  stageId: string;
+  title: string;
+  descriptionMd: string;
+  acceptanceMd: string;
+  status: TaskStatus;
+  assignedAgentId: string | null;
+  dependsOn: string[];
+  worktreePath: string | null;
+  lockRunId: string | null;
+  lastNote: string | null;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TaskInput = {
+  title: string;
+  descriptionMd?: string;
+  acceptanceMd?: string;
+  stageId?: string | null;
+  assignedAgentId?: string | null;
+  dependsOn?: string[];
+  ready?: boolean;
+};
+
+export type TaskEvent = {
+  id: string;
+  taskId: string;
+  at: string;
+  kind: string;
+  fromStage: string | null;
+  toStage: string | null;
+  runId: string | null;
+  actor: string;
+  note: string | null;
+};
+
+export type TickReport = {
+  started: { taskId: string; runId: string; projectId: string }[];
+  failed: [string, string][];
+  parked: number;
+  paused: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -258,6 +336,21 @@ export type Commands = {
   update_team_member: { args: { agentProfileId: string; input: TeamMemberInput }; result: TeamMember };
   remove_team_member: { args: { agentProfileId: string }; result: boolean };
   team_totals: { args: { projectId: string }; result: AgentTotals[] };
+  list_workflow_templates: { args: Record<string, never>; result: WorkflowTemplate[] };
+  list_workflows: { args: { projectId: string }; result: Workflow[] };
+  create_workflow: { args: { projectId: string; input: WorkflowInput }; result: Workflow };
+  create_workflow_from_template: { args: { input: { projectId: string; templateId: string; useWorktrees?: boolean } }; result: Workflow };
+  update_workflow: { args: { workflowId: string; input: WorkflowInput }; result: Workflow };
+  delete_workflow: { args: { workflowId: string }; result: boolean };
+  list_tasks: { args: { projectId: string }; result: Task[] };
+  create_task: { args: { projectId: string; workflowId: string; input: TaskInput }; result: Task };
+  update_task: { args: { taskId: string; input: TaskInput }; result: Task };
+  delete_task: { args: { taskId: string }; result: boolean };
+  move_task: { args: { input: { taskId: string; stageId?: string | null; status: TaskStatus; note?: string | null } }; result: Task };
+  approve_task: { args: { taskId: string; note?: string | null }; result: Task };
+  return_task: { args: { taskId: string; stageId: string; note?: string | null }; result: Task };
+  list_task_events: { args: { taskId: string }; result: TaskEvent[] };
+  scheduler_tick: { args: Record<string, never>; result: TickReport };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 
@@ -268,6 +361,7 @@ export type Events = {
   "run:event": RunEventNotification;
   "runtime:log": RuntimeLog;
   "runtime:exited": number | null;
+  "board:changed": TickReport;
 };
 
 export type EventName = keyof Events;

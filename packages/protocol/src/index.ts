@@ -49,6 +49,18 @@ export const AgentDefinitionSchema = z.object({
 });
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 
+export const TaskStatusUpdateSchema = z.enum(["done", "review", "blocked"]);
+export type TaskStatusUpdate = z.infer<typeof TaskStatusUpdateSchema>;
+
+export const TaskContextSchema = z.object({
+  taskId: z.string(),
+  title: z.string(),
+  stage: z.string(),
+  /** Estados que o agente pode pedir via `task_update`. */
+  allowedStatuses: z.array(TaskStatusUpdateSchema).default(["done", "review", "blocked"]),
+});
+export type TaskContext = z.infer<typeof TaskContextSchema>;
+
 export const RunOptionsSchema = z.object({
   model: z.string().optional(),
   permissionMode: PermissionModeSchema.optional(),
@@ -64,6 +76,8 @@ export const RunOptionsSchema = z.object({
   includePartialMessages: z.boolean().optional(),
   /** Subagentes disponíveis ao agente principal, por nome. */
   agents: z.record(z.string(), AgentDefinitionSchema).optional(),
+  /** Run que executa uma task do board: o sidecar expõe a tool MCP `task_update` ao agente. */
+  taskContext: TaskContextSchema.optional(),
 });
 export type RunOptions = z.infer<typeof RunOptionsSchema>;
 
@@ -224,6 +238,12 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     type: z.literal("error"),
     message: z.string(),
     fatal: z.boolean().default(false),
+  }),
+  z.object({
+    type: z.literal("task_update"),
+    taskId: z.string(),
+    status: TaskStatusUpdateSchema,
+    note: z.string().nullable().default(null),
   }),
 ]);
 export type RunEvent = z.infer<typeof RunEventSchema>;
