@@ -33,7 +33,7 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
     { id: "agents", label: "Time", icon: <Users size={16} aria-hidden /> },
     { id: "board", label: "Board", icon: <KanbanSquare size={16} aria-hidden />, badge: pendingGates },
     { id: "memory", label: "Memória", icon: <BookOpen size={16} aria-hidden />, disabled: true },
-    { id: "security", label: "Segurança", icon: <Lock size={16} aria-hidden />, disabled: true },
+    { id: "security", label: "Segurança", icon: <Lock size={16} aria-hidden /> },
   ];
 
   return (

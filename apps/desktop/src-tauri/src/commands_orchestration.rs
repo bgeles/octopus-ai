@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::AppState;
 use crate::commands_config::auto_backup;
+use crate::commands_security::audit;
 use crate::scheduler::{self, TickReport};
 use crate::store::orchestration::{
     workflow_templates, Task, TaskEvent, TaskInput, TaskStatus, Workflow, WorkflowInput,
@@ -91,6 +92,13 @@ pub fn create_workflow_from_template(
         .store
         .create_workflow_from_template(&input.project_id, &input.template_id, input.use_worktrees)
         .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "board.workflow.created",
+        Some(&input.project_id),
+        serde_json::json!({"workflowId": wf.id, "name": wf.name, "template": input.template_id, "useWorktrees": input.use_worktrees}),
+    );
     auto_backup(&state);
     Ok(wf)
 }

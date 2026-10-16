@@ -111,6 +111,29 @@ export type TaskEvent = {
   note: string | null;
 };
 
+// ---------------------------------------------------------------------------
+// Segurança (Fase 3). Espelham `store::audit`.
+// ---------------------------------------------------------------------------
+
+export type AuditEvent = {
+  seq: number;
+  ts: string;
+  actor: string;
+  kind: string;
+  projectId: string | null;
+  payload: unknown;
+  prevHash: string;
+  hash: string;
+};
+
+export type AuditVerification = {
+  ok: boolean;
+  events: number;
+  firstBrokenSeq: number | null;
+  intactBefore: number;
+  checkedAt: string;
+};
+
 export type TickReport = {
   started: { taskId: string; runId: string; projectId: string }[];
   failed: [string, string][];
@@ -351,6 +374,9 @@ export type Commands = {
   return_task: { args: { taskId: string; stageId: string; note?: string | null }; result: Task };
   list_task_events: { args: { taskId: string }; result: TaskEvent[] };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
+  list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
+  verify_audit: { args: Record<string, never>; result: AuditVerification };
+  export_audit: { args: { destination?: string | null }; result: string };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 

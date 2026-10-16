@@ -3,6 +3,7 @@ import type { PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
 import { BoardView } from "./components/BoardView";
+import { SecurityView, type SecurityTab } from "./components/SecurityView";
 import { TaskDialog } from "./components/TaskDialog";
 import { MemberDialog } from "./components/MemberDialog";
 import { MemberSheet } from "./components/MemberSheet";
@@ -17,7 +18,7 @@ import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -57,6 +58,9 @@ export function App({ transport }: AppProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskEvents, setTaskEvents] = useState<TaskEvent[]>([]);
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
+  const [securityTab, setSecurityTab] = useState<SecurityTab>("audit");
+  const [audit, setAudit] = useState<AuditEvent[] | null>(null);
+  const [auditVerification, setAuditVerification] = useState<AuditVerification | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -521,6 +525,24 @@ export function App({ transport }: AppProps) {
     void tick();
   };
 
+  const refreshAudit = useCallback(
+    (kindPrefix: string | null) => {
+      transport
+        .invoke("list_audit_events", { projectId: selectedProjectRef.current?.id ?? null, kindPrefix, limit: 200 })
+        .then(setAudit)
+        .catch((e) => setToast(`Falha ao carregar a auditoria: ${messageOf(e)}`));
+    },
+    [transport],
+  );
+
+  const verifyAudit = useCallback(async () => {
+    try {
+      setAuditVerification(await transport.invoke("verify_audit", {}));
+    } catch (e) {
+      setToast(`Falha ao verificar a auditoria: ${messageOf(e)}`);
+    }
+  }, [transport]);
+
   const onboardingPending = settings !== null && settings["onboarding.completedAt"] === undefined;
 
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "waiting_approval" || r.status === "queued");
@@ -703,6 +725,19 @@ export function App({ transport }: AppProps) {
           }}
           onOpenRun={(run) => void openRun(run)}
           onCloseTask={() => setSelectedTaskId(null)}
+        />
+      )}
+
+      {view === "security" && (
+        <SecurityView
+          project={selectedProject}
+          tab={securityTab}
+          onChangeTab={setSecurityTab}
+          audit={audit}
+          verification={auditVerification}
+          onRefreshAudit={refreshAudit}
+          onVerify={verifyAudit}
+          onExport={(destination) => transport.invoke("export_audit", { destination })}
         />
       )}
 

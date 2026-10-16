@@ -4,6 +4,7 @@
 //! Migrations são SQL versionado aplicado em `open()`. Todo acesso passa por `Store`,
 //! que serializa escritas com um `Mutex` (SQLite tem um único escritor).
 
+pub mod audit;
 pub mod config;
 pub mod models;
 pub mod orchestration;
@@ -34,6 +35,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0005_orchestration",
         include_str!("migrations/0005_orchestration.sql"),
     ),
+    ("0006_audit", include_str!("migrations/0006_audit.sql")),
 ];
 
 pub struct Store {
@@ -316,6 +318,14 @@ impl Store {
                     "UPDATE run SET claude_session_id = ?2, model = ?3, status = 'running' WHERE id = ?1",
                     params![run_id, session_id, model],
                 )?;
+                let project_id = run_project_id(&tx, run_id)?;
+                Self::audit_in(
+                    &tx,
+                    "sistema",
+                    "run.started",
+                    project_id.as_deref(),
+                    serde_json::json!({"runId": run_id, "sessionId": session_id, "model": model}),
+                )?;
             }
             RunEvent::Usage { usage, .. } => {
                 tx.execute(
@@ -364,6 +374,14 @@ impl Store {
                 };
                 close_pending_approvals(&tx, run_id)?;
                 Self::finish_task_run(&tx, run_id, !*is_error, result_text.as_deref())?;
+                let project_id = run_project_id(&tx, run_id)?;
+                Self::audit_in(
+                    &tx,
+                    "sistema",
+                    "run.finished",
+                    project_id.as_deref(),
+                    serde_json::json!({"runId": run_id, "status": status.as_str(), "costUsd": cost_usd, "numTurns": num_turns}),
+                )?;
                 tx.execute(
                     "UPDATE run SET status = ?2, claude_session_id = COALESCE(NULLIF(?3, ''), claude_session_id),
                         cost_usd = ?4, num_turns = ?5, stop_reason = ?6, result_text = ?7, ended_at = ?8,
@@ -391,6 +409,14 @@ impl Store {
             } => {
                 close_pending_approvals(&tx, run_id)?;
                 Self::finish_task_run(&tx, run_id, false, Some(message))?;
+                let project_id = run_project_id(&tx, run_id)?;
+                Self::audit_in(
+                    &tx,
+                    "sistema",
+                    "run.failed",
+                    project_id.as_deref(),
+                    serde_json::json!({"runId": run_id, "message": message}),
+                )?;
                 tx.execute(
                     "UPDATE run SET status = 'failed', error_message = ?2, ended_at = ?3 WHERE id = ?1",
                     params![run_id, message, now()],
@@ -422,12 +448,31 @@ impl Store {
             }
         };
         let message = message.map(str::trim).filter(|m| !m.is_empty());
-        let conn = self.conn.lock().expect("store mutex");
-        let changed = conn.execute(
+        let mut conn = self.conn.lock().expect("store mutex");
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
             "UPDATE approval SET decision = ?3, decision_message = ?4, decided_at = ?5
              WHERE run_id = ?1 AND request_id = ?2 AND decision IS NULL",
             params![run_id, request_id, kind.as_str(), message, now()],
         )?;
+        if changed > 0 {
+            let (project_id, tool_name): (Option<String>, Option<String>) = tx
+                .query_row(
+                    "SELECT r.project_id, a.tool_name FROM approval a JOIN run r ON r.id = a.run_id WHERE a.run_id = ?1 AND a.request_id = ?2",
+                    params![run_id, request_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .unwrap_or((None, None));
+            Self::audit_in(
+                &tx,
+                "você",
+                &format!("approval.{}", kind.as_str()),
+                project_id.as_deref(),
+                serde_json::json!({"runId": run_id, "requestId": request_id, "tool": tool_name, "message": message}),
+            )?;
+        }
+        tx.commit()?;
         Ok(changed > 0)
     }
 
@@ -469,6 +514,16 @@ impl Store {
     }
 }
 
+fn run_project_id(tx: &rusqlite::Transaction<'_>, run_id: &str) -> Result<Option<String>> {
+    Ok(tx
+        .query_row(
+            "SELECT project_id FROM run WHERE id = ?1",
+            params![run_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
 /// Um run que termina leva junto seus pedidos pendentes: o sidecar já os negou.
 fn close_pending_approvals(tx: &rusqlite::Transaction<'_>, run_id: &str) -> Result<()> {
     tx.execute(
@@ -506,12 +561,13 @@ mod tests {
                 "0002_approvals".to_string(),
                 "0003_settings_backups".to_string(),
                 "0004_team".to_string(),
-                "0005_orchestration".to_string()
+                "0005_orchestration".to_string(),
+                "0006_audit".to_string()
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 5);
+        assert_eq!(s.applied_migrations().unwrap().len(), 6);
     }
 
     #[test]

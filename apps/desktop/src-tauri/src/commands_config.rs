@@ -55,6 +55,13 @@ pub fn set_setting(state: State<'_, AppState>, key: String, value: Value) -> Cmd
     } else {
         state.store.set_setting(key, &value).map_err(err)?;
     }
+    crate::commands_security::audit(
+        &state,
+        "você",
+        "config.setting",
+        None,
+        serde_json::json!({"key": key, "value": value}),
+    );
     auto_backup(&state);
     Ok(())
 }
@@ -275,6 +282,13 @@ pub fn config_backup_restore(
         .store
         .restore_snapshot(&input.id, input.mode, APP_VERSION)
         .map_err(err)?;
+    crate::commands_security::audit(
+        &state,
+        "você",
+        "config.restored",
+        None,
+        serde_json::json!({"snapshotId": input.id, "mode": input.mode, "result": result}),
+    );
     auto_backup(&state);
     Ok(result)
 }

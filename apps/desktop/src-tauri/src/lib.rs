@@ -6,6 +6,7 @@
 pub mod commands;
 pub mod commands_config;
 pub mod commands_orchestration;
+pub mod commands_security;
 pub mod commands_team;
 pub mod protocol;
 pub mod scheduler;
