@@ -22,7 +22,7 @@ JSON-RPC 2.0 em NDJSON (uma mensagem JSON por linha) pelo stdio do sidecar.
 | `sessions.rename` | `{ sessionId, cwd, title }` | `{ ok: true }` |
 | `sessions.tag` | `{ sessionId, cwd, tag: string \| null }` | `{ ok: true }` (`null` remove a tag) |
 
-`options` (`RunOptions`): `model`, `permissionMode`, `maxTurns`, `maxBudgetUsd`, `resumeSessionId`, `forkSession`, `systemPromptAppend`, `allowedTools`, `settingSources`, `env`, `includePartialMessages`.
+`options` (`RunOptions`): `model`, `permissionMode`, `maxTurns`, `maxBudgetUsd`, `resumeSessionId`, `forkSession`, `systemPromptAppend`, `allowedTools`, `settingSources`, `env`, `includePartialMessages`, `agents` (mapa nome → `{ description, prompt, tools?, model? }`, vira `options.agents` do SDK; o Octopus preenche com os membros do time que reportam ao agente do run).
 
 Retomar e bifurcar não têm método próprio: são um `run.start` com `options.resumeSessionId` (e `forkSession: true` para bifurcar); o SDK recebe `resume`/`forkSession`. O `session_init` do novo run traz o `sessionId` resultante (o mesmo, ao retomar; um novo, ao bifurcar).
 

@@ -2,9 +2,9 @@
  * Tipos da ponte UI <-> core Rust. Espelham `src-tauri/src/store/models.rs` e os comandos em `commands.rs`.
  * Eventos de run vêm de `@octopus/protocol`.
  */
-import type { HelloResult, PermissionDecision, RunEvent, RunEventNotification, RunOptions, SessionSummary } from "@octopus/protocol";
+import type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary } from "@octopus/protocol";
 
-export type { HelloResult, PermissionDecision, RunEvent, RunEventNotification, RunOptions, SessionSummary };
+export type { AgentDefinition, HelloResult, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SessionSummary };
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -36,6 +36,86 @@ export type Run = {
   stopReason: string | null;
   resultText: string | null;
   errorMessage: string | null;
+  /** Membro do time que executou o run (null = run avulso). */
+  agentProfileId: string | null;
+};
+
+// ---------------------------------------------------------------------------
+// Time (Fase 2b): cargos, perfis e membros. Espelham `store::team`.
+// ---------------------------------------------------------------------------
+
+export type RoleScope = "global" | "project";
+
+export type Role = {
+  id: string;
+  scope: RoleScope;
+  projectId: string | null;
+  title: string;
+  specialty: string;
+  responsibilitiesMd: string;
+  defaultModel: string | null;
+  defaultPermissionMode: PermissionMode | null;
+  defaultTools: string[] | null;
+  icon: string | null;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RoleInput = {
+  title: string;
+  specialty?: string;
+  responsibilitiesMd?: string;
+  defaultModel?: string | null;
+  defaultPermissionMode?: PermissionMode | null;
+  defaultTools?: string[] | null;
+  icon?: string | null;
+};
+
+export type AgentProfile = {
+  id: string;
+  projectId: string | null;
+  roleId: string;
+  name: string;
+  avatarSeed: string;
+  instructionsMd: string | null;
+  model: string | null;
+  permissionMode: PermissionMode | null;
+  allowedTools: string[] | null;
+  maxTurns: number | null;
+  maxBudgetUsd: number | null;
+  createdAt: string;
+};
+
+export type TeamMember = {
+  id: string;
+  projectId: string;
+  profile: AgentProfile;
+  role: Role;
+  /** null = reporta ao gestor (você). */
+  reportsToAgentId: string | null;
+  position: number;
+  createdAt: string;
+};
+
+export type TeamMemberInput = {
+  name: string;
+  roleId: string;
+  reportsToAgentId?: string | null;
+  instructionsMd?: string | null;
+  model?: string | null;
+  permissionMode?: PermissionMode | null;
+  allowedTools?: string[] | null;
+  maxTurns?: number | null;
+  maxBudgetUsd?: number | null;
+};
+
+export type AgentTotals = {
+  agentProfileId: string;
+  runs: number;
+  activeRuns: number;
+  costUsd: number;
+  lastRunAt: string | null;
 };
 
 export type StoredRunEvent = {
@@ -150,7 +230,7 @@ export type Commands = {
   list_runs: { args: { projectId: string; limit?: number }; result: Run[] };
   get_run: { args: { runId: string }; result: Run | null };
   list_run_events: { args: { runId: string }; result: StoredRunEvent[] };
-  start_run: { args: { input: { projectId: string; prompt: string; options?: RunOptions } }; result: Run };
+  start_run: { args: { input: { projectId: string; prompt: string; options?: RunOptions; agentProfileId?: string | null } }; result: Run };
   interrupt_run: { args: { runId: string }; result: boolean };
   decide_permission: { args: { input: { runId: string; requestId: string; decision: PermissionDecision; note?: string | null } }; result: boolean };
   list_sessions: { args: { projectId: string }; result: SessionSummary[] };
@@ -169,6 +249,15 @@ export type Commands = {
   config_backup_preview: { args: { id: string }; result: ImportPreview };
   config_backup_restore: { args: { input: { id: string; mode: ImportMode } }; result: ImportResult };
   config_backup_reveal: { args: { id: string }; result: null };
+  list_roles: { args: { projectId?: string | null }; result: Role[] };
+  create_role: { args: { input: { projectId?: string | null; input: RoleInput } }; result: Role };
+  update_role: { args: { roleId: string; input: RoleInput }; result: Role };
+  delete_role: { args: { roleId: string }; result: boolean };
+  list_team: { args: { projectId: string }; result: TeamMember[] };
+  add_team_member: { args: { projectId: string; input: TeamMemberInput }; result: TeamMember };
+  update_team_member: { args: { agentProfileId: string; input: TeamMemberInput }; result: TeamMember };
+  remove_team_member: { args: { agentProfileId: string }; result: boolean };
+  team_totals: { args: { projectId: string }; result: AgentTotals[] };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 

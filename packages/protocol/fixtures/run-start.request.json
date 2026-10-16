@@ -11,8 +11,21 @@
       "permissionMode": "default",
       "maxTurns": 20,
       "maxBudgetUsd": 4.5,
-      "settingSources": ["project"],
-      "includePartialMessages": true
+      "settingSources": [
+        "project"
+      ],
+      "includePartialMessages": true,
+      "systemPromptAppend": "Você é Ana, Implementador do time deste projeto.",
+      "agents": {
+        "teo": {
+          "description": "Testador · Testes e qualidade",
+          "prompt": "Você é Téo, Testador do time deste projeto.",
+          "tools": [
+            "Read",
+            "Bash"
+          ]
+        }
+      }
     }
   }
 }

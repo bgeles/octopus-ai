@@ -57,6 +57,18 @@ impl Usage {
 // Opções de run
 // ---------------------------------------------------------------------------
 
+/// Subagente programático (`options.agents` do SDK).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinition {
+    pub description: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunOptions {
@@ -82,6 +94,8 @@ pub struct RunOptions {
     pub env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_partial_messages: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<std::collections::BTreeMap<String, AgentDefinition>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +439,11 @@ mod tests {
         assert_eq!(
             params.options.setting_sources,
             Some(vec![SettingSource::Project])
+        );
+        let agents = params.options.agents.as_ref().unwrap();
+        assert_eq!(
+            agents["teo"].tools.as_ref().unwrap(),
+            &vec!["Read".to_string(), "Bash".to_string()]
         );
 
         // Serializar de volta deve produzir o mesmo JSON (modulo campos omitidos).

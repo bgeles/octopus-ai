@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::models::{AuthMode, Project};
+use super::team::{AgentProfile, Role, RoleScope};
 use super::{new_id, now, Store};
 
 /// Versão do formato do arquivo exportado. Incrementa em mudanças incompatíveis.
@@ -29,6 +30,25 @@ pub struct ConfigExport {
     pub settings: BTreeMap<String, Value>,
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Cargos do catálogo e dos projetos (sem segredos).
+    #[serde(default)]
+    pub roles: Vec<Role>,
+    #[serde(default)]
+    pub agent_profiles: Vec<AgentProfile>,
+    #[serde(default)]
+    pub team_members: Vec<TeamMemberRecord>,
+}
+
+/// Linha crua de `team_member` (o export não resolve perfil/cargo, só ids).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMemberRecord {
+    pub id: String,
+    pub project_id: String,
+    pub agent_profile_id: String,
+    pub reports_to_agent_id: Option<String>,
+    pub position: i64,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +72,10 @@ pub struct ImportPreview {
     /// Projetos locais ausentes do arquivo (removidos no modo `replace`, junto com o histórico).
     pub projects_removed: Vec<String>,
     pub settings: usize,
+    #[serde(default)]
+    pub roles: usize,
+    #[serde(default)]
+    pub team_members: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -61,6 +85,10 @@ pub struct ImportResult {
     pub projects_updated: usize,
     pub projects_removed: usize,
     pub settings_applied: usize,
+    #[serde(default)]
+    pub roles_applied: usize,
+    #[serde(default)]
+    pub team_members_applied: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,7 +178,46 @@ impl Store {
             app_version: app_version.to_string(),
             settings: self.list_settings()?,
             projects: self.list_projects()?,
+            roles: self.all_roles()?,
+            agent_profiles: self.all_agent_profiles()?,
+            team_members: self.all_team_member_records()?,
         })
+    }
+
+    fn all_roles(&self) -> Result<Vec<Role>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare("SELECT id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at FROM role ORDER BY position, title")?;
+        let rows = stmt
+            .query_map([], Role::from_row_pub)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn all_agent_profiles(&self) -> Result<Vec<AgentProfile>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at FROM agent_profile ORDER BY created_at")?;
+        let rows = stmt
+            .query_map([], AgentProfile::from_row_pub)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn all_team_member_records(&self) -> Result<Vec<TeamMemberRecord>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare("SELECT id, project_id, agent_profile_id, reports_to_agent_id, position, created_at FROM team_member ORDER BY project_id, position")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(TeamMemberRecord {
+                    id: r.get(0)?,
+                    project_id: r.get(1)?,
+                    agent_profile_id: r.get(2)?,
+                    reports_to_agent_id: r.get(3)?,
+                    position: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn preview_import(&self, export: &ConfigExport) -> Result<ImportPreview> {
@@ -159,6 +226,8 @@ impl Store {
             schema_version: export.schema_version,
             exported_at: export.exported_at.clone(),
             settings: export.settings.len(),
+            roles: export.roles.len(),
+            team_members: export.team_members.len(),
             ..Default::default()
         };
         for incoming in &export.projects {
@@ -247,6 +316,169 @@ impl Store {
                     params![key, serde_json::to_string(value)?, now()],
                 )?;
                 result.settings_applied += 1;
+            }
+            // Cargos, perfis e membros: por id. Merge só acrescenta; replace sobrescreve e remove os ausentes.
+            let upsert_role = |tx: &rusqlite::Transaction<'_>,
+                               r: &Role,
+                               replace: bool|
+             -> Result<usize> {
+                let scope = match r.scope {
+                    RoleScope::Global => "global",
+                    RoleScope::Project => "project",
+                };
+                let mode = serde_json::to_value(r.default_permission_mode)?;
+                let mode = mode.as_str().map(str::to_string);
+                let tools = r
+                    .default_tools
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
+                let sql = if replace {
+                    "INSERT INTO role (id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ON CONFLICT(id) DO UPDATE SET scope = excluded.scope, project_id = excluded.project_id, title = excluded.title, specialty = excluded.specialty,
+                        responsibilities_md = excluded.responsibilities_md, default_model = excluded.default_model, default_permission_mode = excluded.default_permission_mode,
+                        default_tools_json = excluded.default_tools_json, icon = excluded.icon, position = excluded.position, updated_at = excluded.updated_at"
+                } else {
+                    "INSERT OR IGNORE INTO role (id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                };
+                Ok(tx.execute(
+                    sql,
+                    params![
+                        r.id,
+                        scope,
+                        r.project_id,
+                        r.title,
+                        r.specialty,
+                        r.responsibilities_md,
+                        r.default_model,
+                        mode,
+                        tools,
+                        r.icon,
+                        r.position,
+                        r.created_at,
+                        r.updated_at
+                    ],
+                )?)
+            };
+            let replace = mode == ImportMode::Replace;
+            for role in &export.roles {
+                // Cargos de projeto só entram se o projeto existir após o passo anterior.
+                if let Some(pid) = &role.project_id {
+                    let exists: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM project WHERE id = ?1",
+                        params![pid],
+                        |r| r.get(0),
+                    )?;
+                    if exists == 0 {
+                        continue;
+                    }
+                }
+                result.roles_applied += upsert_role(&tx, role, replace)?;
+            }
+            for profile in &export.agent_profiles {
+                if let Some(pid) = &profile.project_id {
+                    let exists: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM project WHERE id = ?1",
+                        params![pid],
+                        |r| r.get(0),
+                    )?;
+                    if exists == 0 {
+                        continue;
+                    }
+                }
+                let role_exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM role WHERE id = ?1",
+                    params![profile.role_id],
+                    |r| r.get(0),
+                )?;
+                if role_exists == 0 {
+                    continue;
+                }
+                let mode_str = serde_json::to_value(profile.permission_mode)?;
+                let mode_str = mode_str.as_str().map(str::to_string);
+                let tools = profile
+                    .allowed_tools
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
+                let sql = if replace {
+                    "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, role_id = excluded.role_id, name = excluded.name, avatar_seed = excluded.avatar_seed,
+                        instructions_md = excluded.instructions_md, model = excluded.model, permission_mode = excluded.permission_mode, allowed_tools_json = excluded.allowed_tools_json,
+                        max_turns = excluded.max_turns, max_budget_usd = excluded.max_budget_usd"
+                } else {
+                    "INSERT OR IGNORE INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                };
+                tx.execute(
+                    sql,
+                    params![
+                        profile.id,
+                        profile.project_id,
+                        profile.role_id,
+                        profile.name,
+                        profile.avatar_seed,
+                        profile.instructions_md,
+                        profile.model,
+                        mode_str,
+                        tools,
+                        profile.max_turns.map(|n| n as i64),
+                        profile.max_budget_usd,
+                        profile.created_at
+                    ],
+                )?;
+            }
+            for member in &export.team_members {
+                let ok: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM project p, agent_profile a WHERE p.id = ?1 AND a.id = ?2",
+                    params![member.project_id, member.agent_profile_id],
+                    |r| r.get(0),
+                )?;
+                if ok == 0 {
+                    continue;
+                }
+                let sql = if replace {
+                    "INSERT INTO team_member (id, project_id, agent_profile_id, reports_to_agent_id, position, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, agent_profile_id = excluded.agent_profile_id, reports_to_agent_id = excluded.reports_to_agent_id, position = excluded.position"
+                } else {
+                    "INSERT OR IGNORE INTO team_member (id, project_id, agent_profile_id, reports_to_agent_id, position, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                };
+                result.team_members_applied += tx.execute(
+                    sql,
+                    params![
+                        member.id,
+                        member.project_id,
+                        member.agent_profile_id,
+                        member.reports_to_agent_id,
+                        member.position,
+                        member.created_at
+                    ],
+                )?;
+            }
+            if replace && !export.roles.is_empty() {
+                // Remove membros/perfis/cargos ausentes do arquivo (perfis via cascade do cargo não: cargo em uso não some).
+                let member_ids: Vec<String> =
+                    export.team_members.iter().map(|m| m.id.clone()).collect();
+                let profile_ids: Vec<String> =
+                    export.agent_profiles.iter().map(|p| p.id.clone()).collect();
+                let role_ids: Vec<String> = export.roles.iter().map(|r| r.id.clone()).collect();
+                delete_missing(&tx, "team_member", &member_ids)?;
+                delete_missing(&tx, "agent_profile", &profile_ids)?;
+                let orphan_roles: Vec<String> = {
+                    let mut stmt = tx.prepare("SELECT id FROM role WHERE id NOT IN (SELECT DISTINCT role_id FROM agent_profile)")?;
+                    let ids = stmt
+                        .query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    ids
+                };
+                for id in orphan_roles {
+                    if !role_ids.contains(&id) {
+                        tx.execute("DELETE FROM role WHERE id = ?1", params![id])?;
+                    }
+                }
             }
             tx.commit()?;
         }
@@ -365,6 +597,22 @@ impl Store {
     }
 }
 
+fn delete_missing(tx: &rusqlite::Transaction<'_>, table: &str, keep: &[String]) -> Result<()> {
+    let existing: Vec<String> = {
+        let mut stmt = tx.prepare(&format!("SELECT id FROM {table}"))?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids
+    };
+    for id in existing {
+        if !keep.contains(&id) {
+            tx.execute(&format!("DELETE FROM {table} WHERE id = ?1"), params![id])?;
+        }
+    }
+    Ok(())
+}
+
 pub fn read_export(path: &Path) -> Result<ConfigExport> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("lendo {}", path.display()))?;
@@ -427,9 +675,21 @@ mod tests {
         let p1 = a.create_project("alpha", "/tmp/alpha").unwrap();
         a.create_project("beta", "/tmp/beta").unwrap();
         a.set_setting("theme", &serde_json::json!("dark")).unwrap();
+        a.add_team_member(
+            &p1.id,
+            &super::super::team::TeamMemberInput {
+                name: "Ana".into(),
+                role_id: "role_implementador".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let export = a.export_config("0.1.0").unwrap();
         assert_eq!(export.schema_version, CONFIG_SCHEMA_VERSION);
         assert_eq!(export.projects.len(), 2);
+        assert_eq!(export.roles.len(), 7);
+        assert_eq!(export.agent_profiles.len(), 1);
+        assert_eq!(export.team_members.len(), 1);
         // Roundtrip JSON (é o que vai para o arquivo).
         let json = serde_json::to_string_pretty(&export).unwrap();
         assert!(!json.contains("run_event"));
@@ -460,14 +720,19 @@ mod tests {
 
         let merged = b.import_config(&export, ImportMode::Merge).unwrap();
         assert_eq!(
-            merged,
-            ImportResult {
-                projects_added: 1,
-                projects_updated: 0,
-                projects_removed: 0,
-                settings_applied: 1
-            }
+            (
+                merged.projects_added,
+                merged.projects_updated,
+                merged.projects_removed,
+                merged.settings_applied
+            ),
+            (1, 0, 0, 1)
         );
+        assert_eq!(
+            merged.team_members_applied, 1,
+            "membro de alpha entra (alpha existe em b)"
+        );
+        assert_eq!(b.list_team(&p1.id).unwrap().len(), 1);
         let names: Vec<String> = b
             .list_projects()
             .unwrap()
@@ -487,13 +752,13 @@ mod tests {
 
         let replaced = b.import_config(&export, ImportMode::Replace).unwrap();
         assert_eq!(
-            replaced,
-            ImportResult {
-                projects_added: 0,
-                projects_updated: 1,
-                projects_removed: 1,
-                settings_applied: 1
-            }
+            (
+                replaced.projects_added,
+                replaced.projects_updated,
+                replaced.projects_removed,
+                replaced.settings_applied
+            ),
+            (0, 1, 1, 1)
         );
         let mut names: Vec<String> = b
             .list_projects()
@@ -518,6 +783,9 @@ mod tests {
             app_version: "9".into(),
             settings: BTreeMap::new(),
             projects: vec![],
+            roles: vec![],
+            agent_profiles: vec![],
+            team_members: vec![],
         };
         assert!(s.import_config(&export, ImportMode::Merge).is_err());
     }

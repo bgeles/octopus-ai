@@ -40,6 +40,15 @@ export type Usage = z.infer<typeof UsageSchema>;
 // Opções de um run (subconjunto do Agent SDK que o orquestrador controla)
 // ---------------------------------------------------------------------------
 
+/** Subagente programático (`options.agents` do SDK): o Octopus usa para os membros delegados do time. */
+export const AgentDefinitionSchema = z.object({
+  description: z.string(),
+  prompt: z.string(),
+  tools: z.array(z.string()).optional(),
+  model: z.string().optional(),
+});
+export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
+
 export const RunOptionsSchema = z.object({
   model: z.string().optional(),
   permissionMode: PermissionModeSchema.optional(),
@@ -53,6 +62,8 @@ export const RunOptionsSchema = z.object({
   /** Variáveis adicionais para o processo do agente (ex.: ANTHROPIC_API_KEY em modo api_key). */
   env: z.record(z.string(), z.string()).optional(),
   includePartialMessages: z.boolean().optional(),
+  /** Subagentes disponíveis ao agente principal, por nome. */
+  agents: z.record(z.string(), AgentDefinitionSchema).optional(),
 });
 export type RunOptions = z.infer<typeof RunOptionsSchema>;
 

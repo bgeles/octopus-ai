@@ -113,11 +113,14 @@ pub struct Run {
     pub stop_reason: Option<String>,
     pub result_text: Option<String>,
     pub error_message: Option<String>,
+    /// Membro do time que executou o run (`None` = run avulso).
+    #[serde(default)]
+    pub agent_profile_id: Option<String>,
 }
 
 impl Run {
     pub const SELECT: &'static str = "SELECT id, project_id, prompt, options_json, status, claude_session_id, model, started_at, ended_at,
-        cost_usd, input_tokens, output_tokens, cache_read_tokens, num_turns, stop_reason, result_text, error_message FROM run";
+        cost_usd, input_tokens, output_tokens, cache_read_tokens, num_turns, stop_reason, result_text, error_message, agent_profile_id FROM run";
 
     pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let options_json: String = row.get(3)?;
@@ -142,6 +145,7 @@ impl Run {
             stop_reason: row.get(14)?,
             result_text: row.get(15)?,
             error_message: row.get(16)?,
+            agent_profile_id: row.get(17)?,
         })
     }
 }
