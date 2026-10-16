@@ -37,6 +37,9 @@ pub struct Project {
     pub path: String,
     pub auth_mode: AuthMode,
     pub created_at: String,
+    /// Perfil de sandbox (`sandbox_strict`, `sandbox_dev`, `sandbox_readonly` ou próprio).
+    #[serde(default)]
+    pub sandbox_profile_id: Option<String>,
 }
 
 impl Project {
@@ -47,6 +50,7 @@ impl Project {
             path: row.get(2)?,
             auth_mode: AuthMode::parse(&row.get::<_, String>(3)?),
             created_at: row.get(4)?,
+            sandbox_profile_id: row.get(5)?,
         })
     }
 }

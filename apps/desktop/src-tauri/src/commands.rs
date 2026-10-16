@@ -139,6 +139,11 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
         None => input.options,
     };
     options.policy_hooks = Some(true);
+    options.sandbox = state.store.sandbox_for_project(&project).map_err(err)?;
+    let options = state
+        .store
+        .apply_budget(&project.id, input.agent_profile_id.as_deref(), options)
+        .map_err(err)?;
     let run = state
         .store
         .create_run_for_agent(

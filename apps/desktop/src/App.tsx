@@ -18,7 +18,7 @@ import { Shell, type View } from "./components/Shell";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, PolicyRule, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, PolicyRule, SandboxProfile, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -61,6 +61,8 @@ export function App({ transport }: AppProps) {
   const [securityTab, setSecurityTab] = useState<SecurityTab>("policy");
   const [rules, setRules] = useState<PolicyRule[] | null>(null);
   const [policyEvents, setPolicyEvents] = useState<AuditEvent[]>([]);
+  const [sandboxProfiles, setSandboxProfiles] = useState<SandboxProfile[]>([]);
+  const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [audit, setAudit] = useState<AuditEvent[] | null>(null);
   const [auditVerification, setAuditVerification] = useState<AuditVerification | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
@@ -80,6 +82,10 @@ export function App({ transport }: AppProps) {
       setRuns(list);
       setTotals(projectTotals);
       setTeamTotals(agentTotals);
+      transport
+        .invoke("get_budget_status", { projectId })
+        .then(setBudget)
+        .catch(() => {});
       const currentId = currentRunIdRef.current;
       if (currentId) {
         const fresh = list.find((r) => r.id === currentId) ?? (await transport.invoke("get_run", { runId: currentId }));
@@ -176,6 +182,19 @@ export function App({ transport }: AppProps) {
     transport
       .invoke("list_workflow_templates", {})
       .then(setTemplates)
+      .catch(() => {});
+    transport
+      .invoke("list_sandbox_profiles", {})
+      .then(setSandboxProfiles)
+      .catch(() => {});
+  }, [transport]);
+
+  const refreshBudget = useCallback(() => {
+    const projectId = selectedProjectRef.current?.id;
+    if (!projectId) return;
+    transport
+      .invoke("get_budget_status", { projectId })
+      .then(setBudget)
       .catch(() => {});
   }, [transport]);
 
@@ -621,6 +640,8 @@ export function App({ transport }: AppProps) {
             onInterrupt={() => void interrupt()}
             interrupting={interrupting}
             totals={totals}
+            sandboxName={sandboxProfiles.find((p) => p.id === (selectedProject?.sandboxProfileId ?? "sandbox_dev"))?.name ?? null}
+            budget={budget}
             onContinue={() => {
               const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
               if (sessionId) beginResume({ sessionId, title: currentRun?.prompt ?? null }, false);
@@ -772,6 +793,19 @@ export function App({ transport }: AppProps) {
             const decision = await transport.invoke("evaluate_policy", { projectId: selectedProject.id, toolName, input });
             refreshPolicy();
             return decision;
+          }}
+          sandboxProfiles={sandboxProfiles}
+          onSelectSandbox={async (profileId) => {
+            if (!selectedProject) return;
+            const updated = await transport.invoke("set_project_sandbox", { projectId: selectedProject.id, profileId });
+            setProjects((list) => list.map((p) => (p.id === updated.id ? updated : p)));
+            setSelectedProject(updated);
+          }}
+          budget={budget}
+          onRefreshBudget={refreshBudget}
+          onSaveBudget={async (line, input) => {
+            await transport.invoke("set_budget_policy", { input: { scope: line.scope, scopeId: line.scopeId, input } });
+            refreshBudget();
           }}
         />
       )}

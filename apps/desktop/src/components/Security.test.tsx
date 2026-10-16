@@ -41,9 +41,9 @@ describe("Segurança · Auditoria", () => {
     await user.click(within(view).getByRole("button", { name: "Aprovações" }));
     await waitFor(() => expect(within(view).getAllByTestId("audit-row").every((r) => r.getAttribute("data-kind")?.startsWith("approval."))).toBe(true));
 
-    // A aba que ainda não existe fica desabilitada.
+    // Todas as abas da Fase 3 estão disponíveis.
     expect(within(view).getByRole("tab", { name: "Política" })).toBeEnabled();
-    expect(within(view).getByRole("tab", { name: "Orçamentos" })).toBeDisabled();
+    expect(within(view).getByRole("tab", { name: "Orçamentos" })).toBeEnabled();
   });
 
   it("alterar um evento fora do app quebra a verificação a partir dele", async () => {

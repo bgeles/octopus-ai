@@ -276,8 +276,8 @@ impl Store {
                 match (existing, mode) {
                     (None, _) => {
                         tx.execute(
-                            "INSERT INTO project (id, name, path, auth_mode, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                            params![incoming.id, incoming.name, incoming.path, incoming.auth_mode.as_str(), incoming.created_at],
+                            "INSERT INTO project (id, name, path, auth_mode, created_at, sandbox_profile_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![incoming.id, incoming.name, incoming.path, incoming.auth_mode.as_str(), incoming.created_at, incoming.sandbox_profile_id.clone().unwrap_or_else(|| "sandbox_dev".into())],
                         )?;
                         result.projects_added += 1;
                     }
@@ -626,7 +626,11 @@ pub fn default_backup_dir(db_path: &Path) -> Option<PathBuf> {
 }
 
 fn same_project(a: &Project, b: &Project) -> bool {
-    a.id == b.id && a.name == b.name && a.path == b.path && a.auth_mode == b.auth_mode
+    a.id == b.id
+        && a.name == b.name
+        && a.path == b.path
+        && a.auth_mode == b.auth_mode
+        && a.sandbox_profile_id == b.sandbox_profile_id
 }
 
 impl AuthMode {
@@ -701,7 +705,7 @@ mod tests {
         let conn_insert = |id: &str, name: &str, path: &str| {
             let conn = b.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO project (id, name, path, auth_mode, created_at) VALUES (?1, ?2, ?3, 'subscription', 't')",
+                "INSERT INTO project (id, name, path, auth_mode, created_at, sandbox_profile_id) VALUES (?1, ?2, ?3, 'subscription', 't', 'sandbox_dev')",
                 params![id, name, path],
             )
             .unwrap();
