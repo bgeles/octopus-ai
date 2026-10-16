@@ -214,16 +214,17 @@ Fontes mantidas: Plus Jakarta Sans (display), Inter (corpo), JetBrains Mono (có
 
 Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@theme` e adicionar o bloco escuro em `index.css`, ajustar o shell (sidebar deixa de ser preta fixa e segue a superfície escura do tema), repintar as três pranchas existentes no artefato Design e só então desenhar as da Fase 1.
 
-### Fase 1 — Sessões, aprovações e visão ao vivo
+### Fase 1 — Sessões, aprovações e visão ao vivo (concluída em 16/10/2026, tag `fase-1`)
 - Lista de sessões (`listSessions`), retomar, bifurcar, renomear, taguear.
 - `canUseTool` → aprovação na UI com diff/preview do input; `permissionMode` por run.
 - Árvore de tool calls e subagentes, medidor de custo/tokens.
 
-### Fase 2 — Onboarding, time e orquestração
+### Fase 2 — Onboarding, time e orquestração (concluída em 16/10/2026 na branch `fase-2/onboarding-time-orquestracao`)
 - **2a — Onboarding e backup local (primeira iteração; prancha no Design antes: `Onboarding.dc.html` com os 4 passos e `Backup.dc.html` com lista de cópias, exportar/importar e preview de restauração)**: tabelas `app_setting` e `backup_snapshot`, tela de boas-vindas com as checagens de ambiente, export/import e cópias automáticas.
 - **2b — Time (telas aprovadas no Design na Fase 1, iteração 03)**: catálogo de cargos com seed, CRUD de membros do time, tela Time com organograma (xyflow) e cards de membro, Ficha do membro, Board Kanban com responsável por card; nav "Agentes" vira "Time". Perfil de agente vira `options` do SDK (instruções do cargo + do membro em `systemPrompt.append`, `agents` para os delegados).
 - **2c — Orquestração**: CRUD de projetos, workflows e tasks; scheduler (locks, DAG, concorrência, worktrees, gates humanos); templates de workflow; grafo de estágios.
 - MCP in-process com `task_update` para o agente mover a própria task.
+- Entregue: migrations 0003–0005 (`app_setting`, `backup_snapshot`, `role`, `agent_profile`, `team_member`, `workflow`, `task`, `task_event`), scheduler em Rust (`scheduler.rs`, tick a cada 4 s + `scheduler_tick` manual, pausa por preferência), `RunOptions.agents` e `taskContext` no protocolo, tool MCP `task_update` no sidecar, telas Onboarding, Configurações, Time, Ficha do membro e Board. Fora: grafo xyflow (o organograma e a faixa de estágios são CSS), edição visual de estágios (só por modelo e comando `update_workflow`), heartbeats/metas (decisão de 16/10).
 
 ### Fase 3 — Segurança de execução
 - Perfis de sandbox → `options.sandbox`; motor PreToolUse em Rust; orçamentos; auditoria com hash chain; Keychain para API keys; tela Segurança (política, aprovações, auditoria).

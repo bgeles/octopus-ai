@@ -2,7 +2,7 @@
 
 Orquestrador de projetos com agentes de IA para macOS. App Tauri 2 (React + Rust) com um sidecar Node que hospeda o Claude Agent SDK.
 
-Estado atual: **Fase 0** (fundação). Um projeto aponta para uma pasta, você manda um prompt e acompanha o agente ao vivo: streaming de texto, chamadas de ferramenta, pedidos de permissão, uso de contexto e custo. Tudo persistido em SQLite.
+Estado atual: **Fase 2** (onboarding, time e orquestração) concluída na branch `fase-2/onboarding-time-orquestracao`, sobre a Fase 1 (tag `fase-1`). Um projeto aponta para uma pasta; você monta um **time** de agentes com cargos, especialidades e responsabilidades (organograma com delegação), define um **workflow** com estágios e gate humano, e o **scheduler** executa as tasks do board como o membro responsável, respeitando dependências e paralelismo. Cada run mostra streaming, chamadas de ferramenta, subagentes, pedidos de permissão com diff e custo. Onboarding na primeira abertura e backup local das configurações. Tudo persistido em SQLite.
 
 O plano completo (arquitetura, modelo de dados, fases 1 a 7) está em `docs/plano.md`. A proposta visual aprovada está no Claude Design.
 
@@ -55,6 +55,17 @@ O desenvolvimento segue as fases do `docs/plano.md`, uma branch por fase e uma p
 | `fase-N/iter-K-<slug>` | Iteração dentro da fase (ex.: `fase-1/iter-01-tema-grafite`), criada a partir da branch da fase, com PR de volta para ela. |
 
 Regras: PRs de iteração entram na branch da fase com a suíte de testes verde no CI; a branch da fase só vai para `main` quando os critérios de "pronto quando" da fase no plano forem cumpridos.
+
+## O que dá para fazer hoje
+
+| Tela | O que faz |
+|---|---|
+| Run ao vivo | Prompt, streaming, árvore de ferramentas e subagentes, aprovações inline com diff (Edit/Write), custo do run e do projeto. "Executar como" um membro do time. |
+| Sessões | Listar, retomar, bifurcar, renomear e taguear sessões do Claude na pasta do projeto. |
+| Aprovações | Pendentes (decidíveis fora do transcript) e decididas com motivo. |
+| Time | Cargos (catálogo com 7 seeds + cargos do projeto), membros com organograma (quem reporta a quem vira subagente), ficha com responsabilidades, "como trabalha" e runs. |
+| Board | Workflows por modelo ("Planejar → Implementar → Revisar → Aprovar", "Pesquisa paralela → Síntese"), tasks com dependências e critérios de aceite, Kanban por estágio, gates humanos, histórico. O scheduler roda a cada 4 s (ou em "Rodar agora"); o agente move a própria task pela tool MCP `task_update`. Worktree git por task opcional. |
+| Configurações | Checagem do ambiente (Node, runtime, login do Claude Code), autenticação padrão, tema, backup local das configurações (exportar/importar, cópias automáticas, restaurar com prévia), refazer onboarding. |
 
 ## Build de teste (.app / .dmg)
 
