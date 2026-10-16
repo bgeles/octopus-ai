@@ -5,10 +5,11 @@
  */
 import editApprovalEvents from "@octopus/protocol/fixtures/run-events-edit-approval.notifications.json";
 import subagentEvents from "@octopus/protocol/fixtures/run-events-subagent.notifications.json";
+import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications.json";
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, Approval, AppSettings, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, StoredRunEvent, TeamMember, TeamMemberInput } from "./types";
+import type { AgentProfile, Approval, AppSettings, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -76,6 +77,41 @@ export function subagentRunEvents(): RunEventNotification[] {
   return (subagentEvents as FixtureNotification[]).map((n) => n.params);
 }
 
+/** Roteiro de um run de task: o agente chama task_update(review) e termina. */
+export function taskRunEvents(): RunEventNotification[] {
+  return (taskEvents as FixtureNotification[]).map((n) => n.params);
+}
+
+export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
+  {
+    id: "plan-implement-review-approve",
+    name: "Planejar → Implementar → Revisar → Aprovar",
+    stages: [
+      { name: "Planejar", roleTitle: "Planejador", gate: false },
+      { name: "Implementar", roleTitle: "Implementador", gate: false },
+      { name: "Revisar", roleTitle: "Revisor", gate: false },
+      { name: "Aprovar", roleTitle: null, gate: true },
+    ],
+  },
+  {
+    id: "research-synthesis",
+    name: "Pesquisa paralela → Síntese",
+    stages: [
+      { name: "Pesquisar", roleTitle: "Pesquisador", gate: false },
+      { name: "Sintetizar", roleTitle: "Documentador", gate: false },
+    ],
+  },
+];
+
+const TEMPLATE_INSTRUCTIONS: Record<string, string> = {
+  Planejar: "Produza um plano curto com critérios de aceite e os passos de implementação. Não altere código.",
+  Implementar: "Implemente seguindo o plano e os critérios de aceite, com testes.",
+  Revisar: "Revise o diff produzido; aponte problemas com arquivo e linha.",
+  Aprovar: "Aprovação humana.",
+  Pesquisar: "Investigue a pergunta e entregue achados com fontes.",
+  Sintetizar: "Sintetize os achados em um documento curto, claro, em português.",
+};
+
 /** Conteúdo "atual" de arquivos do projeto de demonstração, para o diff de Write. */
 const MOCK_FILES: Record<string, string> = {
   "README.md": "# chat-core\n\nServiço de leads.\n",
@@ -139,6 +175,71 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       position: existing?.position ?? members.filter((m) => m.projectId === projectId).length + 1,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
     };
+  };
+  const workflows: Workflow[] = [];
+  const tasks: Task[] = [];
+  const taskEventsLog: TaskEvent[] = [];
+  let wfCounter = 0;
+  let taskCounter = 0;
+  let tevCounter = 0;
+  const pushTaskEvent = (taskId: string, kind: string, from: string | null, to: string | null, runId: string | null, actor: string, note: string | null) => {
+    taskEventsLog.push({ id: `tev_${++tevCounter}`, taskId, at: new Date().toISOString(), kind, fromStage: from, toStage: to, runId, actor, note });
+  };
+  const requestedByRun = new Map<string, string>();
+  const advanceTask = (task: Task, workflow: Workflow, actor: string, note: string | null, human: boolean) => {
+    const index = workflow.stages.findIndex((s) => s.id === task.stageId);
+    const next = workflow.stages[index + 1];
+    const from = task.stageId;
+    if (!next) task.status = "done";
+    else {
+      task.stageId = next.id;
+      task.status = next.gate ? "waiting_approval" : "ready";
+    }
+    task.lockRunId = null;
+    if (note) task.lastNote = note;
+    task.updatedAt = new Date().toISOString();
+    pushTaskEvent(task.id, human ? "approved" : task.status === "done" ? "completed" : "advanced", from, task.stageId, null, actor, note);
+  };
+  const finishTaskRun = (run: Run, success: boolean, error: string | null) => {
+    if (!run.taskId) return;
+    const task = tasks.find((t) => t.id === run.taskId);
+    if (!task || task.lockRunId !== run.id) return;
+    const workflow = workflows.find((w) => w.id === task.workflowId);
+    if (!workflow) return;
+    const requested = requestedByRun.get(run.id);
+    if (!success) {
+      task.status = "failed";
+      task.lockRunId = null;
+      task.lastNote = error ?? "run falhou";
+      pushTaskEvent(task.id, "run_failed", task.stageId, task.stageId, run.id, "scheduler", task.lastNote);
+    } else if (requested === "blocked") {
+      task.status = "blocked";
+      task.lockRunId = null;
+      pushTaskEvent(task.id, "blocked", task.stageId, task.stageId, run.id, "agente", task.lastNote);
+    } else if (requested === "review") {
+      task.status = "waiting_approval";
+      task.lockRunId = null;
+      pushTaskEvent(task.id, "run_finished", task.stageId, task.stageId, run.id, "agente", "pediu revisão");
+    } else {
+      advanceTask(task, workflow, "scheduler", task.lastNote, false);
+    }
+    emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+  };
+  const runnableTasks = (projectId: string): Array<{ task: Task; workflow: Workflow; stage: Stage }> => {
+    const out: Array<{ task: Task; workflow: Workflow; stage: Stage }> = [];
+    for (const workflow of workflows.filter((w) => w.projectId === projectId)) {
+      const active = tasks.filter((t) => t.workflowId === workflow.id && t.status === "running").length;
+      let slots = Math.max(0, workflow.maxParallel - active);
+      for (const task of tasks.filter((t) => t.workflowId === workflow.id && t.status === "ready")) {
+        if (slots === 0) break;
+        if (!task.dependsOn.every((dep) => tasks.some((t) => t.id === dep && t.status === "done"))) continue;
+        const stage = workflow.stages.find((s) => s.id === task.stageId);
+        if (!stage || stage.gate) continue;
+        out.push({ task, workflow, stage });
+        slots--;
+      }
+    }
+    return out;
   };
   const snapshots: BackupSnapshot[] = [];
   const snapshotFiles = new Map<string, ConfigExport>();
@@ -258,6 +359,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     }
   };
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+  const scriptByRun = new Map<string, RunEventNotification[]>();
+  const scriptFor = (runId: string) => scriptByRun.get(runId) ?? script;
   const pausedAt = new Map<string, number>();
   const seqByRun = new Map<string, number>();
   let runCounter = 0;
@@ -283,8 +386,9 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
 
   const deliver = (runId: string, index: number) => {
     const run = runs.get(runId);
-    if (!run || index >= script.length) return;
-    const template = script[index]!;
+    const runScript = scriptFor(runId);
+    if (!run || index >= runScript.length) return;
+    const template = runScript[index]!;
     let event = template.event;
     // Retomar mantém o id da sessão; bifurcar nasce com um id novo (como o SDK faz).
     if (event.type === "session_init" && run.options.resumeSessionId) {
@@ -315,6 +419,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       run.resultText = ev.resultText;
       run.endedAt = notification.at;
       closePendingApprovals(run.id);
+      finishTaskRun(run, !ev.isError, ev.resultText);
+    } else if (ev.type === "task_update") {
+      const task = tasks.find((t) => t.id === run.taskId);
+      if (task) {
+        requestedByRun.set(run.id, ev.status);
+        if (ev.note) task.lastNote = ev.note;
+        pushTaskEvent(task.id, "agent_update", null, null, run.id, "agente", `${ev.status}${ev.note ? `: ${ev.note}` : ""}`);
+      }
     } else if (ev.type === "permission_request") {
       run.status = "waiting_approval";
       recordApproval(run, notification.at, ev);
@@ -329,7 +441,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   };
 
   const schedule = (runId: string, index: number) => {
-    if (index >= script.length) return;
+    if (index >= scriptFor(runId).length) return;
     const timer = setTimeout(() => deliver(runId, index), tickMs);
     pendingTimers.set(runId, [...(pendingTimers.get(runId) ?? []), timer]);
   };
@@ -402,6 +514,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         prompt: input.prompt,
         options,
         agentProfileId: member?.profile.id ?? null,
+        taskId: null,
         status: "running",
         claudeSessionId: null,
         model: input.options?.model ?? null,
@@ -430,6 +543,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       run.status = "interrupted";
       run.endedAt = new Date().toISOString();
       closePendingApprovals(runId);
+      finishTaskRun(run, false, "Run interrompido pelo usuário");
       emitEvent(runId, { type: "error", message: "Run interrompido pelo usuário", fatal: true });
       return true;
     },
@@ -590,6 +704,154 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         byAgent.set(r.agentProfileId, t);
       }
       return [...byAgent].map(([agentProfileId, t]) => ({ agentProfileId, ...t }));
+    },
+    list_workflow_templates: async () => WORKFLOW_TEMPLATES.map((t) => ({ ...t, stages: t.stages.map((s) => ({ ...s })) })),
+    list_workflows: async ({ projectId }) => workflows.filter((w) => w.projectId === projectId).map((w) => ({ ...w, stages: w.stages.map((s) => ({ ...s })) })),
+    create_workflow: async ({ projectId, input }) => {
+      if (!input.name.trim()) throw new Error("Informe o nome do workflow");
+      if (input.stages.length === 0) throw new Error("Um workflow precisa de pelo menos um estágio");
+      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId, name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? false, maxParallel: Math.max(1, input.maxParallel ?? 1), createdAt: new Date().toISOString() };
+      workflows.push(wf);
+      writeSnapshot("auto");
+      return { ...wf };
+    },
+    create_workflow_from_template: async ({ input }) => {
+      const template = WORKFLOW_TEMPLATES.find((t) => t.id === input.templateId);
+      if (!template) throw new Error(`Modelo ${input.templateId} não existe`);
+      const team = members.filter((m) => m.projectId === input.projectId);
+      const stages: Stage[] = template.stages.map((s, i) => ({
+        id: `stage_${i + 1}`,
+        name: s.name,
+        agentProfileId: s.roleTitle ? (team.find((m) => m.role.title.toLowerCase() === s.roleTitle!.toLowerCase())?.profile.id ?? null) : null,
+        gate: s.gate,
+        instruction: TEMPLATE_INSTRUCTIONS[s.name] ?? null,
+      }));
+      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId: input.projectId, name: template.name, stages, useWorktrees: input.useWorktrees ?? false, maxParallel: 1, createdAt: new Date().toISOString() };
+      workflows.push(wf);
+      writeSnapshot("auto");
+      return { ...wf };
+    },
+    update_workflow: async ({ workflowId, input }) => {
+      const wf = workflows.find((w) => w.id === workflowId);
+      if (!wf) throw new Error(`Workflow ${workflowId} não encontrado`);
+      Object.assign(wf, { name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? wf.useWorktrees, maxParallel: Math.max(1, input.maxParallel ?? wf.maxParallel) });
+      return { ...wf };
+    },
+    delete_workflow: async ({ workflowId }) => {
+      const index = workflows.findIndex((w) => w.id === workflowId);
+      if (index === -1) return false;
+      workflows.splice(index, 1);
+      for (const t of [...tasks]) if (t.workflowId === workflowId) tasks.splice(tasks.indexOf(t), 1);
+      return true;
+    },
+    list_tasks: async ({ projectId }) => tasks.filter((t) => t.projectId === projectId).map((t) => ({ ...t, dependsOn: [...t.dependsOn] })),
+    create_task: async ({ projectId, workflowId, input }) => {
+      if (!input.title.trim()) throw new Error("Informe o título da task");
+      const wf = workflows.find((w) => w.id === workflowId);
+      if (!wf) throw new Error(`Workflow ${workflowId} não encontrado`);
+      const stageId = input.stageId ?? wf.stages[0]!.id;
+      if (!wf.stages.some((s) => s.id === stageId)) throw new Error(`Estágio ${stageId} não existe neste workflow`);
+      for (const dep of input.dependsOn ?? []) if (!tasks.some((t) => t.id === dep)) throw new Error(`Dependência ${dep} não encontrada`);
+      const at = new Date().toISOString();
+      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at };
+      tasks.push(task);
+      pushTaskEvent(task.id, "created", null, stageId, null, "você", null);
+      return { ...task };
+    },
+    update_task: async ({ taskId, input }) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} não encontrada`);
+      if (!input.title.trim()) throw new Error("Informe o título da task");
+      Object.assign(task, { title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? task.descriptionMd, acceptanceMd: input.acceptanceMd?.trim() ?? task.acceptanceMd, stageId: input.stageId ?? task.stageId, assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? task.dependsOn)], updatedAt: new Date().toISOString() });
+      return { ...task };
+    },
+    delete_task: async ({ taskId }) => {
+      const index = tasks.findIndex((t) => t.id === taskId);
+      if (index === -1) return false;
+      tasks.splice(index, 1);
+      return true;
+    },
+    move_task: async ({ input }) => {
+      const task = tasks.find((t) => t.id === input.taskId);
+      if (!task) throw new Error(`Task ${input.taskId} não encontrada`);
+      if (task.status === "running") throw new Error("A task está em run; interrompa o run antes de movê-la");
+      const from = task.stageId;
+      task.stageId = input.stageId ?? task.stageId;
+      task.status = input.status;
+      if (input.note) task.lastNote = input.note;
+      task.updatedAt = new Date().toISOString();
+      pushTaskEvent(task.id, "moved", from, task.stageId, null, "você", input.note ?? null);
+      return { ...task };
+    },
+    approve_task: async ({ taskId, note }) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} não encontrada`);
+      if (task.status !== "waiting_approval" && task.status !== "review") throw new Error("A task não está aguardando aprovação");
+      const wf = workflows.find((w) => w.id === task.workflowId)!;
+      advanceTask(task, wf, "você", note ?? "aprovado", true);
+      return { ...task };
+    },
+    return_task: async ({ taskId, stageId, note }) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} não encontrada`);
+      const from = task.stageId;
+      task.stageId = stageId;
+      task.status = "ready";
+      if (note) task.lastNote = note;
+      pushTaskEvent(task.id, "returned", from, stageId, null, "você", note ?? null);
+      return { ...task };
+    },
+    list_task_events: async ({ taskId }) => taskEventsLog.filter((e) => e.taskId === taskId).map((e) => ({ ...e })),
+    scheduler_tick: async () => {
+      const report: TickReport = { started: [], failed: [], parked: 0, paused: settings["scheduler.paused"] === true };
+      if (report.paused) return report;
+      for (const project of projects) {
+        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "ready")) {
+          const wf = workflows.find((w) => w.id === task.workflowId);
+          const stage = wf?.stages.find((s) => s.id === task.stageId);
+          if (stage?.gate) {
+            task.status = "waiting_approval";
+            report.parked++;
+          }
+        }
+        for (const { task, workflow, stage } of runnableTasks(project.id)) {
+          const agentId = stage.agentProfileId ?? task.assignedAgentId;
+          const member = agentId ? findMember(agentId) : undefined;
+          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}`;
+          const run: Run = {
+            id: `run_mock_${++runCounter}`,
+            projectId: project.id,
+            prompt,
+            options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"] }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
+            agentProfileId: member?.profile.id ?? null,
+            taskId: task.id,
+            status: "running",
+            claudeSessionId: null,
+            model: null,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            costUsd: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            numTurns: null,
+            stopReason: null,
+            resultText: null,
+            errorMessage: null,
+          };
+          runs.set(run.id, run);
+          events.set(run.id, []);
+          scriptByRun.set(run.id, taskRunEvents());
+          task.status = "running";
+          task.lockRunId = run.id;
+          task.updatedAt = run.startedAt;
+          pushTaskEvent(task.id, "run_started", task.stageId, task.stageId, run.id, "scheduler", null);
+          schedule(run.id, 0);
+          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id });
+        }
+      }
+      if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);
+      return report;
     },
     list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
     rename_session: async ({ input }) => {

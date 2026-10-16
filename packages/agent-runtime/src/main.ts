@@ -8,10 +8,11 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { PROTOCOL_VERSION, type RunEvent } from "@octopus/protocol";
-import { listSessions, query, renameSession, tagSession } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, listSessions, query, renameSession, tagSession, tool } from "@anthropic-ai/claude-agent-sdk";
 import { RpcServer } from "./rpc.js";
 import { RunManager, type QueryFn } from "./runner.js";
 import { toSessionSummary } from "./sessions.js";
+import { createTaskToolsFactory } from "./taskTools.js";
 
 const require = createRequire(import.meta.url);
 const runtimeVersion: string = require("../package.json").version;
@@ -56,7 +57,7 @@ const emit = (runId: string, event: RunEvent) => {
 };
 
 // O cast isola o restante do sidecar dos tipos do SDK; a compatibilidade estrutural é coberta por testes.
-const runs = new RunManager(query as unknown as QueryFn, emit, log);
+const runs = new RunManager(query as unknown as QueryFn, emit, log, createTaskToolsFactory(createSdkMcpServer as never, tool as never));
 
 server.register("runtime.hello", async () => ({ protocolVersion: PROTOCOL_VERSION, runtimeVersion, sdkVersion }));
 

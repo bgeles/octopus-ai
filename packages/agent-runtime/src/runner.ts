@@ -2,7 +2,7 @@
  * Gerencia runs do Agent SDK: inicia, interrompe, encaminha permissões e emite eventos.
  * O acesso ao SDK é injetado (QueryFn) para permitir testes sem rede nem binário do Claude.
  */
-import type { PermissionDecision, RunEvent, RunStartParams } from "@octopus/protocol";
+import type { PermissionDecision, RunEvent, RunStartParams, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 import { JsonRpcErrorCode } from "@octopus/protocol";
 import { mapSdkMessage, type SdkMessageLike } from "./events.js";
 import { RpcError } from "./rpc.js";
@@ -32,6 +32,8 @@ export type QueryOptionsLike = {
   env?: Record<string, string | undefined>;
   includePartialMessages?: boolean;
   agents?: Record<string, { description: string; prompt: string; tools?: string[]; model?: string }>;
+  /** MCP servers in-process (instâncias do SDK); o runner só repassa. */
+  mcpServers?: Record<string, unknown>;
   abortController: AbortController;
   canUseTool: CanUseToolLike;
 };
@@ -40,6 +42,11 @@ export type QueryHandleLike = AsyncIterable<SdkMessageLike> & { interrupt?: () =
 export type QueryFn = (args: { prompt: string; options: QueryOptionsLike }) => QueryHandleLike;
 
 export type EventSink = (runId: string, event: RunEvent) => void;
+
+/** Fábrica do MCP server `octopus` (createSdkMcpServer + tool do SDK), injetada para testes. */
+export type TaskToolsFactory = (ctx: TaskContext, onUpdate: (status: TaskStatusUpdate, note: string | null) => void) => unknown;
+
+export const TASK_UPDATE_TOOL = "mcp__octopus__task_update";
 
 type PendingPermission = {
   resolve: (decision: PermissionDecision) => void;
@@ -61,6 +68,7 @@ export class RunManager {
     private readonly queryFn: QueryFn,
     private readonly emit: EventSink,
     private readonly log: (level: "debug" | "info" | "warn" | "error", message: string) => void = () => {},
+    private readonly taskTools: TaskToolsFactory | null = null,
   ) {}
 
   get activeRunIds(): string[] {
@@ -142,6 +150,16 @@ export class RunManager {
     if (o.settingSources) options.settingSources = o.settingSources;
     if (o.env) options.env = { ...process.env, ...o.env };
     if (o.agents && Object.keys(o.agents).length > 0) options.agents = o.agents;
+    if (o.taskContext && this.taskTools) {
+      const ctx = o.taskContext;
+      const server = this.taskTools(ctx, (status, note) => {
+        this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note });
+      });
+      options.mcpServers = { octopus: server as never };
+      if (options.allowedTools && !options.allowedTools.includes(TASK_UPDATE_TOOL)) {
+        options.allowedTools = [...options.allowedTools, TASK_UPDATE_TOOL];
+      }
+    }
     return options;
   }
 

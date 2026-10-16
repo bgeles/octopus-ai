@@ -1,9 +1,9 @@
-import { BookOpen, CheckCircle2, ChevronDown, History, Lock, Play, Settings, Users } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronDown, History, KanbanSquare, Lock, Play, Settings, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Project, Run } from "../lib/types";
 import { THEME_LABELS, type ThemePreference } from "../lib/theme";
 
-export type View = "run" | "sessions" | "approvals" | "agents" | "memory" | "security" | "settings";
+export type View = "run" | "sessions" | "approvals" | "agents" | "board" | "memory" | "security" | "settings";
 
 type NavItem = { id: View; label: string; icon: ReactNode; badge?: number; live?: boolean; disabled?: boolean };
 
@@ -16,6 +16,8 @@ type ShellProps = {
   onChangeView: (view: View) => void;
   activeRuns: Run[];
   pendingApprovals: number;
+  /** Tasks aguardando sua aprovação no board. */
+  pendingGates?: number;
   theme: ThemePreference;
   onThemeChange: (theme: ThemePreference) => void;
   children: ReactNode;
@@ -23,12 +25,13 @@ type ShellProps = {
 
 const THEME_ORDER: ThemePreference[] = ["system", "light", "dark"];
 
-export function Shell({ projects, selectedProject, onSelectProject, onAddProject, view, onChangeView, activeRuns, pendingApprovals, theme, onThemeChange, children }: ShellProps) {
+export function Shell({ projects, selectedProject, onSelectProject, onAddProject, view, onChangeView, activeRuns, pendingApprovals, pendingGates = 0, theme, onThemeChange, children }: ShellProps) {
   const nav: NavItem[] = [
     { id: "run", label: "Run ao vivo", icon: <Play size={16} aria-hidden />, live: activeRuns.length > 0 },
     { id: "sessions", label: "Sessões", icon: <History size={16} aria-hidden /> },
     { id: "approvals", label: "Aprovações", icon: <CheckCircle2 size={16} aria-hidden />, badge: pendingApprovals },
     { id: "agents", label: "Time", icon: <Users size={16} aria-hidden /> },
+    { id: "board", label: "Board", icon: <KanbanSquare size={16} aria-hidden />, badge: pendingGates },
     { id: "memory", label: "Memória", icon: <BookOpen size={16} aria-hidden />, disabled: true },
     { id: "security", label: "Segurança", icon: <Lock size={16} aria-hidden />, disabled: true },
   ];

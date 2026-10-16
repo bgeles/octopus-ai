@@ -69,6 +69,25 @@ pub struct AgentDefinition {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatusUpdate {
+    Done,
+    Review,
+    Blocked,
+}
+
+/// Run que executa uma task do board: o sidecar expõe a tool `task_update` ao agente.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskContext {
+    pub task_id: String,
+    pub title: String,
+    pub stage: String,
+    #[serde(default)]
+    pub allowed_statuses: Vec<TaskStatusUpdate>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunOptions {
@@ -96,6 +115,8 @@ pub struct RunOptions {
     pub include_partial_messages: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<std::collections::BTreeMap<String, AgentDefinition>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_context: Option<TaskContext>,
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +325,13 @@ pub enum RunEvent {
         #[serde(default)]
         fatal: bool,
     },
+    #[serde(rename_all = "camelCase")]
+    TaskUpdate {
+        task_id: String,
+        status: TaskStatusUpdate,
+        #[serde(default)]
+        note: Option<String>,
+    },
 }
 
 impl RunEvent {
@@ -319,6 +347,7 @@ impl RunEvent {
             RunEvent::PermissionRequest { .. } => "permission_request",
             RunEvent::Result { .. } => "result",
             RunEvent::Error { .. } => "error",
+            RunEvent::TaskUpdate { .. } => "task_update",
         }
     }
 
@@ -520,6 +549,39 @@ mod tests {
                 "result"
             ]
         );
+    }
+
+    #[test]
+    fn task_fixture_parses_task_update() {
+        let raw = read_fixture("run-events-task.notifications.json");
+        let mut kinds = Vec::new();
+        for item in raw.as_array().unwrap() {
+            let incoming: IncomingMessage = serde_json::from_value(item.clone()).unwrap();
+            if let IncomingMessage::Notification { params, .. } = incoming {
+                let n: RunEventNotification = serde_json::from_value(params.unwrap()).unwrap();
+                if let RunEvent::TaskUpdate {
+                    task_id,
+                    status,
+                    note,
+                } = &n.event
+                {
+                    assert_eq!(task_id, "task_01");
+                    assert_eq!(*status, TaskStatusUpdate::Review);
+                    assert!(note.as_deref().unwrap().contains("V12"));
+                }
+                kinds.push(n.event.kind());
+            }
+        }
+        assert!(kinds.contains(&"task_update"));
+        let ctx = TaskContext {
+            task_id: "t".into(),
+            title: "x".into(),
+            stage: "Implementar".into(),
+            allowed_statuses: vec![TaskStatusUpdate::Done],
+        };
+        let value = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(value["allowedStatuses"][0], "done");
+        assert_eq!(value["taskId"], "t");
     }
 
     #[test]

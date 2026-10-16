@@ -5,8 +5,10 @@
 
 pub mod commands;
 pub mod commands_config;
+pub mod commands_orchestration;
 pub mod commands_team;
 pub mod protocol;
+pub mod scheduler;
 pub mod sidecar;
 pub mod store;
 
@@ -93,6 +95,26 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         error!(?code, "sidecar encerrou; runs ativos ficarão sem eventos");
                         let _ = app.emit(RUNTIME_EXITED, code);
                     }
+                }
+            }
+        });
+    }
+
+    // Scheduler: um tick a cada poucos segundos; a UI é avisada quando o board muda.
+    {
+        let app = app.clone();
+        let store = store.clone();
+        let sidecar = sidecar.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(4));
+            loop {
+                interval.tick().await;
+                match scheduler::tick(&store, &sidecar).await {
+                    Ok(report) if report.changed() => {
+                        let _ = app.emit(commands_orchestration::BOARD_CHANGED, &report);
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!("tick do scheduler falhou: {e:#}"),
                 }
             }
         });

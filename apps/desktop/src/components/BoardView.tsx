@@ -1,0 +1,372 @@
+import { Plus } from "lucide-react";
+import { useState } from "react";
+import type { Project, Run, Task, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
+import { Avatar } from "./Avatar";
+import { formatUsd } from "./RunSidebar";
+import { formatRelative } from "./SessionsView";
+
+type BoardViewProps = {
+  project: Project | null;
+  workflows: Workflow[] | null;
+  templates: WorkflowTemplate[];
+  tasks: Task[];
+  team: TeamMember[];
+  runs: Run[];
+  selectedWorkflowId: string | null;
+  onSelectWorkflow: (id: string) => void;
+  onCreateFromTemplate: (templateId: string, useWorktrees: boolean) => Promise<void>;
+  onNewTask: () => void;
+  onOpenTask: (task: Task) => void;
+  schedulerPaused: boolean;
+  onTogglePaused: () => void;
+  onTick: () => void;
+  selectedTask: Task | null;
+  taskEvents: TaskEvent[];
+  onApprove: (task: Task, note: string | null) => Promise<void>;
+  onReturn: (task: Task, stageId: string, note: string | null) => Promise<void>;
+  onMove: (task: Task, stageId: string | null, status: TaskStatus, note: string | null) => Promise<void>;
+  onOpenRun: (run: Run) => void;
+  onCloseTask: () => void;
+};
+
+export const STATUS_LABELS: Record<TaskStatus, string> = {
+  backlog: "backlog",
+  ready: "pronta",
+  running: "em run",
+  waiting_approval: "aguardando você",
+  review: "em revisão",
+  done: "concluída",
+  blocked: "bloqueada",
+  failed: "falhou",
+};
+
+export function BoardView(props: BoardViewProps) {
+  const { project, workflows, templates, tasks, team, runs, selectedWorkflowId, onSelectWorkflow, onNewTask, onOpenTask, schedulerPaused, onTogglePaused, onTick, selectedTask } = props;
+  const [useWorktrees, setUseWorktrees] = useState(false);
+  const [creating, setCreating] = useState<string | null>(null);
+  const workflow = workflows?.find((w) => w.id === selectedWorkflowId) ?? workflows?.[0] ?? null;
+  const wfTasks = workflow ? tasks.filter((t) => t.workflowId === workflow.id) : [];
+  const memberOf = (id: string | null) => (id ? (team.find((m) => m.profile.id === id) ?? null) : null);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-6" data-testid="board-view">
+      <div className="flex flex-wrap items-center gap-4">
+        <div>
+          <div className="eyebrow text-brand">{project?.name ?? ""} · Orquestração</div>
+          <h1 className="m-0 font-display text-xl font-bold tracking-tight">{workflow ? `Workflow "${workflow.name}"` : "Board"}</h1>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {workflows && workflows.length > 1 && (
+            <select aria-label="Workflow" value={workflow?.id ?? ""} onChange={(e) => onSelectWorkflow(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-2 py-1.5 text-[13px]">
+              {workflows.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <span className={["inline-flex items-center gap-1.5 rounded-full border hairline-strong px-2.5 py-1.5 text-xs font-medium", schedulerPaused ? "text-warning-ink" : ""].join(" ")} data-testid="scheduler-status">
+            <span className={["size-1.5 rounded-full", schedulerPaused ? "bg-warning" : "bg-success"].join(" ")} />
+            {schedulerPaused ? "Scheduler pausado" : `Scheduler ativo · ${workflow?.maxParallel ?? 1} run por vez`}
+          </span>
+          <button type="button" onClick={onTogglePaused} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink">
+            {schedulerPaused ? "Retomar scheduler" : "Pausar scheduler"}
+          </button>
+          <button type="button" onClick={onTick} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink" title="Verificar agora se há tasks prontas">
+            Rodar agora
+          </button>
+          {workflow && (
+            <button type="button" onClick={onNewTask} className="inline-flex items-center gap-1.5 rounded-full bg-brand px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-brand-hover">
+              <Plus size={14} aria-hidden /> Nova task
+            </button>
+          )}
+        </div>
+      </div>
+
+      {workflows && workflows.length === 0 && (
+        <section aria-label="Começar um workflow" className="flex flex-col gap-4 rounded-xl border hairline bg-surface p-6">
+          <div>
+            <h2 className="m-0 font-display text-sm font-semibold">Escolha um modelo de workflow</h2>
+            <p className="m-0 mt-1 text-[13px] text-slate">Cada estágio tem um responsável do time (pelo cargo) e o último pode ser um gate humano. Dá para editar depois.</p>
+          </div>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(320px,100%),1fr))] gap-3">
+            {templates.map((t) => (
+              <article key={t.id} className="flex flex-col gap-3 rounded-xl border hairline p-4" data-testid="workflow-template">
+                <h3 className="m-0 font-display text-[15px] font-bold">{t.name}</h3>
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  {t.stages.map((s, i) => (
+                    <span key={s.name} className="inline-flex items-center gap-1.5">
+                      <span className={["rounded-full px-2 py-0.5", s.gate ? "bg-warning-soft text-warning-ink" : "border hairline-strong"].join(" ")}>
+                        {s.name}
+                        {s.roleTitle ? ` · ${s.roleTitle}` : s.gate ? " · você" : ""}
+                      </span>
+                      {i < t.stages.length - 1 && <span className="text-slate">→</span>}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  disabled={creating !== null}
+                  onClick={() => {
+                    setCreating(t.id);
+                    void props.onCreateFromTemplate(t.id, useWorktrees).finally(() => setCreating(null));
+                  }}
+                  className="self-start rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold text-paper disabled:opacity-50"
+                >
+                  {creating === t.id ? "Criando…" : "Usar este workflow"}
+                </button>
+              </article>
+            ))}
+          </div>
+          <label className="flex items-center gap-2 text-[13px]">
+            <input type="checkbox" checked={useWorktrees} onChange={(e) => setUseWorktrees(e.target.checked)} />
+            Usar um worktree git por task (.octopus/worktrees/&lt;task&gt;)
+          </label>
+        </section>
+      )}
+
+      {workflow && (
+        <>
+          <section aria-label="Estágios do workflow" className="flex flex-wrap items-stretch gap-2.5 rounded-xl border hairline bg-surface p-4">
+            {workflow.stages.map((stage, i) => {
+              const inStage = wfTasks.filter((t) => t.stageId === stage.id);
+              const running = inStage.some((t) => t.status === "running");
+              const waiting = inStage.some((t) => t.status === "waiting_approval" || t.status === "review");
+              const member = memberOf(stage.agentProfileId);
+              return (
+                <div key={stage.id} className="flex items-center gap-2.5">
+                  <div className={["flex min-w-[180px] flex-col gap-1.5 rounded-lg border px-3.5 py-3", running ? "border-[1.5px] border-brand" : waiting ? "border-[1.5px] border-warning" : "hairline"].join(" ")} data-testid="stage-chip">
+                    <div className="flex items-center gap-2">
+                      <span className={["size-2 rounded-full", running ? "animate-pulse bg-brand" : waiting ? "bg-warning" : inStage.some((t) => t.status === "done") ? "bg-success" : "bg-mist"].join(" ")} />
+                      <span className="font-display text-[13px] font-bold">{stage.name}</span>
+                      {stage.gate && <span className="rounded-full bg-warning-soft px-1.5 text-[10px] font-semibold text-warning-ink">gate humano</span>}
+                      <span className="ml-auto text-xs text-slate">{inStage.length}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs text-slate">
+                      {stage.gate ? <Avatar initials="VC" size={20} manager /> : member ? <Avatar initials={member.profile.avatarSeed} size={20} active={running} /> : null}
+                      <span>{stage.gate ? "Você" : member ? `${member.profile.name} · ${member.role.title}` : "sem responsável (run avulso)"}</span>
+                    </div>
+                  </div>
+                  {i < workflow.stages.length - 1 && <span className="text-slate">→</span>}
+                </div>
+              );
+            })}
+          </section>
+
+          <div className="flex min-h-0 flex-wrap gap-5">
+            <section aria-label="Tasks por estágio" className="grid min-w-0 flex-1 basis-[640px] grid-cols-[repeat(auto-fit,minmax(min(220px,100%),1fr))] gap-3" data-testid="kanban">
+              {workflow.stages.map((stage) => {
+                const inStage = wfTasks.filter((t) => t.stageId === stage.id);
+                return (
+                  <div key={stage.id} className="flex min-w-0 flex-col gap-2" data-testid="kanban-column">
+                    <div className="flex items-center gap-2 px-1">
+                      <h2 className="m-0 font-display text-[13px] font-semibold">{stage.name}</h2>
+                      <span className="text-xs text-slate">{inStage.length}</span>
+                    </div>
+                    {inStage.length === 0 && <div className="rounded-lg border border-dashed hairline p-3 text-center text-xs text-slate">vazio</div>}
+                    {inStage.map((task) => (
+                      <TaskCard key={task.id} task={task} member={memberOf(stage.agentProfileId ?? task.assignedAgentId)} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
+                    ))}
+                  </div>
+                );
+              })}
+            </section>
+
+            {selectedTask && workflow && (
+              <TaskDetail task={selectedTask} workflow={workflow} team={team} runs={runs} events={props.taskEvents} tasks={tasks} onApprove={props.onApprove} onReturn={props.onReturn} onMove={props.onMove} onOpenRun={props.onOpenRun} onClose={props.onCloseTask} />
+            )}
+          </div>
+        </>
+      )}
+
+      {workflows === null && <p className="m-0 text-[13px] text-slate">Carregando workflows…</p>}
+    </div>
+  );
+}
+
+function TaskCard({ task, member, run, selected, onOpen }: { task: Task; member: TeamMember | null; run: Run | null; selected: boolean; onOpen: () => void }) {
+  const border = task.status === "running" ? "border-[1.5px] border-brand" : task.status === "waiting_approval" || task.status === "review" ? "border-[1.5px] border-warning" : task.status === "failed" || task.status === "blocked" ? "border-[1.5px] border-brand/50" : selected ? "border-ink" : "hairline";
+  return (
+    <button type="button" onClick={onOpen} className={["flex flex-col gap-2 rounded-lg border bg-surface px-3.5 py-3 text-left hover:border-ink", border].join(" ")} data-testid="task-card" data-status={task.status} aria-current={selected ? "true" : undefined}>
+      <div className="flex items-center gap-2">
+        <StatusDot status={task.status} />
+        <span className="text-[11px] font-semibold text-slate">{STATUS_LABELS[task.status]}</span>
+        <span className="ml-auto font-mono text-[11px] text-slate">{shortId(task.id)}</span>
+      </div>
+      <span className="text-[13px] font-semibold">{task.title}</span>
+      <div className="flex items-center gap-2 text-xs text-slate">
+        {member ? <Avatar initials={member.profile.avatarSeed} size={20} active={task.status === "running"} /> : <Avatar initials="VC" size={20} manager />}
+        <span className="truncate">{member ? member.profile.name : "Você"}</span>
+        {run?.costUsd != null && <span className="ml-auto font-mono">{formatUsd(run.costUsd)}</span>}
+        {task.dependsOn.length > 0 && <span className="ml-auto" title={`Depende de ${task.dependsOn.join(", ")}`}>↳ {task.dependsOn.length}</span>}
+      </div>
+    </button>
+  );
+}
+
+export function StatusDot({ status }: { status: TaskStatus }) {
+  const cls = status === "running" ? "animate-pulse bg-brand" : status === "waiting_approval" || status === "review" ? "bg-warning" : status === "done" ? "bg-success" : status === "failed" || status === "blocked" ? "bg-brand" : "bg-mist";
+  return <span className={["size-2 shrink-0 rounded-full", cls].join(" ")} />;
+}
+
+export function shortId(id: string): string {
+  return id.replace(/^task_/, "T-").slice(0, 10);
+}
+
+function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onReturn, onMove, onOpenRun, onClose }: { task: Task; workflow: Workflow; team: TeamMember[]; runs: Run[]; events: TaskEvent[]; tasks: Task[]; onApprove: BoardViewProps["onApprove"]; onReturn: BoardViewProps["onReturn"]; onMove: BoardViewProps["onMove"]; onOpenRun: (run: Run) => void; onClose: () => void }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const stage = workflow.stages.find((s) => s.id === task.stageId) ?? null;
+  const stageIndex = workflow.stages.findIndex((s) => s.id === task.stageId);
+  const member = team.find((m) => m.profile.id === (stage?.agentProfileId ?? task.assignedAgentId)) ?? null;
+  const taskRuns = runs.filter((r) => r.taskId === task.id);
+  const currentRun = taskRuns.find((r) => r.id === task.lockRunId) ?? null;
+  const previous = workflow.stages.slice(0, Math.max(0, stageIndex)).reverse();
+  const act = (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    fn()
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
+  const waiting = task.status === "waiting_approval" || task.status === "review";
+  return (
+    <aside aria-label={`Task: ${task.title}`} className={["flex w-full basis-[380px] flex-col gap-3.5 self-start rounded-xl border bg-surface p-5 lg:w-auto lg:flex-1", waiting ? "border-[1.5px] border-warning" : task.status === "running" ? "border-[1.5px] border-brand" : "hairline"].join(" ")} data-testid="task-detail">
+      <div className="flex items-start gap-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <span className="eyebrow text-slate">
+            {shortId(task.id)} · {stage?.name ?? "?"} · {STATUS_LABELS[task.status]}
+          </span>
+          <h2 className="m-0 font-display text-lg font-bold tracking-tight">{task.title}</h2>
+        </div>
+        <button type="button" onClick={onClose} className="ml-auto text-xs font-medium text-slate hover:text-ink">
+          Fechar
+        </button>
+      </div>
+      {task.descriptionMd && <p className="m-0 text-[13px] whitespace-pre-line">{task.descriptionMd}</p>}
+      {task.acceptanceMd && (
+        <div className="rounded-md bg-paper px-3.5 py-3 text-[13px]">
+          <div className="mb-1 text-xs font-medium text-slate">Critérios de aceite</div>
+          <p className="m-0 whitespace-pre-line">{task.acceptanceMd}</p>
+        </div>
+      )}
+      {task.lastNote && (
+        <div className="rounded-md border hairline px-3.5 py-2.5 text-[13px]" data-testid="task-note">
+          <div className="mb-0.5 text-xs font-medium text-slate">Última nota</div>
+          {task.lastNote}
+        </div>
+      )}
+      <div className="flex flex-col text-[13px]">
+        <Row label="Responsável" value={stage?.gate ? "Você (gate humano)" : member ? `${member.profile.name} · ${member.role.title}` : "run avulso"} />
+        {task.dependsOn.length > 0 && <Row label="Depende de" value={task.dependsOn.map((id) => tasks.find((t) => t.id === id)?.title ?? id).join(", ")} />}
+        {currentRun && <Row label="Run atual" value={`${currentRun.id.slice(-6)} · ${currentRun.status}`} />}
+        {task.worktreePath && <Row label="Worktree" value={task.worktreePath} />}
+      </div>
+
+      {(waiting || task.status === "blocked" || task.status === "failed" || task.status === "backlog") && (
+        <div className="flex flex-col gap-2 border-t hairline pt-3">
+          <label className="sr-only" htmlFor={`task-note-${task.id}`}>
+            Observação
+          </label>
+          <input id={`task-note-${task.id}`} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Observação (fica no histórico da task)" className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px]" />
+          <div className="flex flex-wrap gap-2">
+            {waiting && (
+              <button type="button" disabled={busy} onClick={() => act(() => onApprove(task, note.trim() || null))} className="rounded-full bg-brand px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-brand-hover disabled:opacity-50">
+                {stageIndex === workflow.stages.length - 1 ? "Aprovar e concluir" : "Aprovar e seguir"}
+              </button>
+            )}
+            {waiting && previous[0] && (
+              <button type="button" disabled={busy} onClick={() => act(() => onReturn(task, previous[0]!.id, note.trim() || null))} className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium hover:border-ink disabled:opacity-50">
+                Devolver para {previous[0].name}
+              </button>
+            )}
+            {(task.status === "blocked" || task.status === "failed" || task.status === "backlog") && (
+              <button type="button" disabled={busy} onClick={() => act(() => onMove(task, null, "ready", note.trim() || null))} className="rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold text-paper disabled:opacity-50">
+                {task.status === "backlog" ? "Colocar na fila" : "Tentar de novo"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {error && (
+        <div role="alert" className="rounded-md bg-brand-soft px-3 py-2 text-[13px] text-brand-hover">
+          {error}
+        </div>
+      )}
+
+      {taskRuns.length > 0 && (
+        <div className="flex flex-col gap-1 border-t hairline pt-3">
+          <span className="text-xs font-medium text-slate">Runs</span>
+          {taskRuns.map((r) => (
+            <button key={r.id} type="button" onClick={() => onOpenRun(r)} className="flex items-center gap-2 text-left text-[13px] hover:text-brand-hover">
+              <StatusDot status={r.status === "running" || r.status === "queued" ? "running" : r.status === "waiting_approval" ? "waiting_approval" : r.status === "completed" ? "done" : "failed"} />
+              <span className="truncate">{r.id.slice(-6)}</span>
+              <span className="ml-auto text-xs text-slate">{formatRelative(r.startedAt)}</span>
+              {r.costUsd != null && <span className="font-mono text-xs">{formatUsd(r.costUsd)}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-1 border-t hairline pt-3" data-testid="task-history">
+        <span className="text-xs font-medium text-slate">Movimentos</span>
+        {events.length === 0 && <span className="text-xs text-slate">—</span>}
+        {events
+          .slice()
+          .reverse()
+          .map((e) => (
+            <div key={e.id} className="flex items-baseline gap-2 text-xs">
+              <span className="font-mono text-slate">{formatRelative(e.at)}</span>
+              <span>
+                <strong>{e.actor}</strong> · {eventLabel(e, workflow)}
+                {e.note ? ` · ${e.note}` : ""}
+              </span>
+            </div>
+          ))}
+      </div>
+    </aside>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-3 border-b hairline py-1.5 last:border-b-0">
+      <span className="text-slate">{label}</span>
+      <span className="truncate text-right font-mono text-xs" title={value}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function eventLabel(e: TaskEvent, workflow: Workflow): string {
+  const name = (id: string | null) => workflow.stages.find((s) => s.id === id)?.name ?? id ?? "";
+  switch (e.kind) {
+    case "created":
+      return `criou em ${name(e.toStage)}`;
+    case "run_started":
+      return `iniciou run em ${name(e.toStage)}`;
+    case "agent_update":
+      return "agente atualizou";
+    case "advanced":
+      return `${name(e.fromStage)} → ${name(e.toStage)}`;
+    case "completed":
+      return "concluiu";
+    case "approved":
+      return `aprovou ${name(e.fromStage)} → ${name(e.toStage)}`;
+    case "returned":
+      return `devolveu para ${name(e.toStage)}`;
+    case "moved":
+      return `moveu para ${name(e.toStage)}`;
+    case "blocked":
+      return "bloqueou";
+    case "run_finished":
+      return "run terminou";
+    case "run_failed":
+    case "failed":
+      return "falhou";
+    default:
+      return e.kind;
+  }
+}
