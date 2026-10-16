@@ -56,6 +56,13 @@ pub fn create_project(state: State<'_, AppState>, input: CreateProjectInput) -> 
         .store
         .create_project(&input.name, &input.path)
         .map_err(err)?;
+    crate::commands_security::audit(
+        &state,
+        "você",
+        "config.project.created",
+        Some(&project.id),
+        serde_json::json!({"name": project.name, "path": project.path}),
+    );
     crate::commands_config::auto_backup(&state);
     Ok(project)
 }
@@ -64,6 +71,13 @@ pub fn create_project(state: State<'_, AppState>, input: CreateProjectInput) -> 
 pub fn delete_project(state: State<'_, AppState>, project_id: String) -> CmdResult<bool> {
     let deleted = state.store.delete_project(&project_id).map_err(err)?;
     if deleted {
+        crate::commands_security::audit(
+            &state,
+            "você",
+            "config.project.deleted",
+            Some(&project_id),
+            serde_json::json!({}),
+        );
         crate::commands_config::auto_backup(&state);
     }
     Ok(deleted)
@@ -146,6 +160,13 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
                 .store
                 .set_run_status(&run.id, RunStatus::Running)
                 .map_err(err)?;
+            crate::commands_security::audit(
+                &state,
+                "você",
+                "run.requested",
+                Some(&project.id),
+                serde_json::json!({"runId": run.id, "agentProfileId": input.agent_profile_id, "resume": run.options.resume_session_id, "permissionMode": run.options.permission_mode}),
+            );
             state
                 .store
                 .get_run(&run.id)
@@ -171,6 +192,13 @@ pub async fn interrupt_run(state: State<'_, AppState>, run_id: String) -> CmdRes
             .store
             .set_run_status(&run_id, RunStatus::Interrupted)
             .map_err(err)?;
+        crate::commands_security::audit(
+            &state,
+            "você",
+            "run.interrupted",
+            None,
+            serde_json::json!({"runId": run_id}),
+        );
     }
     Ok(result.interrupted)
 }

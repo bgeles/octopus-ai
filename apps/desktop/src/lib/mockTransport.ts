@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, Approval, AppSettings, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, Approval, AppSettings, AuditEvent, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Role, Run, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -130,7 +130,7 @@ const MOCK_FILES: Record<string, string> = {
   ].join("\n"),
 };
 
-export function createMockTransport(options: MockOptions = {}): Transport & { emit: <E extends EventName>(e: E, p: Events[E]) => void } {
+export function createMockTransport(options: MockOptions = {}): Transport & { emit: <E extends EventName>(e: E, p: Events[E]) => void; tamperAudit: (seq: number) => void } {
   const tickMs = options.tickMs ?? 120;
   const script = options.events ?? fixtureRunEvents();
   const listeners = new Map<EventName, Set<(payload: never) => void>>();
@@ -240,6 +240,19 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
     }
     return out;
+  };
+  const auditLog: AuditEvent[] = [];
+  let tampered: number | null = null;
+  const fakeHash = (seed: string) => {
+    let h = 2166136261;
+    for (const ch of seed) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+    return h.toString(16).padStart(8, "0").repeat(8);
+  };
+  const audit = (actor: string, kind: string, projectId: string | null, payload: unknown) => {
+    const prevHash = auditLog[auditLog.length - 1]?.hash ?? "0".repeat(64);
+    const ts = new Date().toISOString();
+    const hash = fakeHash(`${prevHash}|${ts}|${actor}|${kind}|${projectId ?? ""}|${JSON.stringify(payload)}`);
+    auditLog.push({ seq: auditLog.length + 1, ts, actor, kind, projectId, payload, prevHash, hash });
   };
   const snapshots: BackupSnapshot[] = [];
   const snapshotFiles = new Map<string, ConfigExport>();
@@ -404,6 +417,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       run.status = "running";
       run.claudeSessionId = ev.sessionId;
       run.model = ev.model;
+      audit("sistema", "run.started", run.projectId, { runId, sessionId: ev.sessionId, model: ev.model });
       if (!sessions.some((s) => s.sessionId === ev.sessionId)) {
         const project = projects.find((p) => p.id === run.projectId);
         sessions.unshift({ sessionId: ev.sessionId, cwd: project?.path ?? "/", title: run.prompt, tags: [], createdAt: notification.at, lastUsedAt: notification.at });
@@ -420,6 +434,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       run.endedAt = notification.at;
       closePendingApprovals(run.id);
       finishTaskRun(run, !ev.isError, ev.resultText);
+      audit("sistema", "run.finished", run.projectId, { runId, status: run.status, costUsd: ev.costUsd, numTurns: ev.numTurns });
     } else if (ev.type === "task_update") {
       const task = tasks.find((t) => t.id === run.taskId);
       if (task) {
@@ -458,6 +473,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         createdAt: new Date().toISOString(),
       };
       projects.unshift(project);
+      audit("você", "config.project.created", project.id, { name: project.name, path: project.path });
       writeSnapshot("auto");
       return project;
     },
@@ -562,6 +578,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         approval.decision = decision.behavior;
         approval.decisionMessage = decision.behavior === "deny" ? decision.message : (input.note?.trim() || null);
         approval.decidedAt = new Date().toISOString();
+        audit("você", `approval.${decision.behavior}`, run.projectId, { runId: input.runId, requestId: input.requestId, tool: toolName, message: approval.decisionMessage });
       }
       // Como no SDK: a ferramenta aprovada ou negada aparece como tool_use seguido do seu tool_result.
       const toolUseId = `toolu_${input.requestId}`;
@@ -591,6 +608,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     set_setting: async ({ key, value }) => {
       if (value === null || value === undefined) delete settings[key];
       else settings[key] = value;
+      audit("você", "config.setting", null, { key, value });
       writeSnapshot("auto");
       return null;
     },
@@ -672,6 +690,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     add_team_member: async ({ projectId, input }) => {
       const member = buildMember(projectId, input);
       members.push(member);
+      audit("você", "team.member.added", projectId, { agentProfileId: member.profile.id, name: member.profile.name, role: member.role.title });
       writeSnapshot("auto");
       return { ...member };
     },
@@ -853,6 +872,31 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);
       return report;
     },
+    list_audit_events: async ({ projectId, kindPrefix, limit }) =>
+      auditLog
+        .filter((e) => (!projectId || e.projectId === projectId || e.projectId === null) && (!kindPrefix || e.kind.startsWith(kindPrefix)))
+        .slice()
+        .reverse()
+        .slice(0, limit ?? 200)
+        .map((e) => ({ ...e })),
+    verify_audit: async () => {
+      let expectedPrev = "0".repeat(64);
+      let firstBroken: number | null = null;
+      for (const e of auditLog) {
+        const recomputed = tampered === e.seq ? "deadbeef".repeat(8) : fakeHash(`${e.prevHash}|${e.ts}|${e.actor}|${e.kind}|${e.projectId ?? ""}|${JSON.stringify(e.payload)}`);
+        if (firstBroken === null && (e.prevHash !== expectedPrev || recomputed !== e.hash)) firstBroken = e.seq;
+        expectedPrev = e.hash;
+      }
+      return { ok: firstBroken === null, events: auditLog.length, firstBrokenSeq: firstBroken, intactBefore: firstBroken === null ? auditLog.length : firstBroken - 1, checkedAt: new Date().toISOString() };
+    },
+    export_audit: async ({ destination }) => {
+      const jsonl = auditLog.map((e) => JSON.stringify(e)).join("\n") + (auditLog.length ? "\n" : "");
+      if (destination) {
+        audit("você", "audit.exported", null, { path: destination, events: auditLog.length });
+        return destination;
+      }
+      return jsonl;
+    },
     list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
     rename_session: async ({ input }) => {
       const session = sessions.find((s) => s.sessionId === input.sessionId);
@@ -872,6 +916,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
 
   return {
     emit,
+    /** Só para testes: simula edição manual do log fora do app. */
+    tamperAudit: (seq: number) => {
+      tampered = seq;
+    },
     invoke: async (command, args) => handlers[command](args as never) as never,
     listen: async (event, handler) => {
       const set = listeners.get(event) ?? new Set();

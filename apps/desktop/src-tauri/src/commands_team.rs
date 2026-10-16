@@ -5,6 +5,7 @@ use tauri::State;
 
 use crate::commands::AppState;
 use crate::commands_config::auto_backup;
+use crate::commands_security::audit;
 use crate::store::team::{AgentTotals, Role, RoleInput, TeamMember, TeamMemberInput};
 
 type CmdResult<T> = Result<T, String>;
@@ -71,6 +72,13 @@ pub fn add_team_member(
         .store
         .add_team_member(&project_id, &input)
         .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "team.member.added",
+        Some(&project_id),
+        serde_json::json!({"agentProfileId": member.profile.id, "name": member.profile.name, "role": member.role.title}),
+    );
     auto_backup(&state);
     Ok(member)
 }
@@ -85,6 +93,13 @@ pub fn update_team_member(
         .store
         .update_team_member(&agent_profile_id, &input)
         .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "team.member.updated",
+        Some(&member.project_id),
+        serde_json::json!({"agentProfileId": member.profile.id, "name": member.profile.name, "role": member.role.title, "reportsTo": member.reports_to_agent_id}),
+    );
     auto_backup(&state);
     Ok(member)
 }
@@ -96,6 +111,13 @@ pub fn remove_team_member(state: State<'_, AppState>, agent_profile_id: String) 
         .remove_team_member(&agent_profile_id)
         .map_err(err)?;
     if removed {
+        audit(
+            &state,
+            "você",
+            "team.member.removed",
+            None,
+            serde_json::json!({"agentProfileId": agent_profile_id}),
+        );
         auto_backup(&state);
     }
     Ok(removed)
