@@ -53,6 +53,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0011_run_kind",
         include_str!("migrations/0011_run_kind.sql"),
     ),
+    (
+        "0012_context_pin",
+        include_str!("migrations/0012_context_pin.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -492,6 +496,22 @@ impl Store {
                     )?;
                 }
             }
+            RunEvent::InstructionsLoaded {
+                file_path,
+                memory_type,
+                load_reason,
+            } => {
+                if let Some(project_id) = run_project_id(&tx, run_id)? {
+                    Self::record_context_event_in(
+                        &tx,
+                        &project_id,
+                        run_id,
+                        "instructions",
+                        serde_json::json!({"filePath": file_path, "memoryType": memory_type, "loadReason": load_reason}),
+                        at,
+                    )?;
+                }
+            }
             RunEvent::BriefInjected { chars, items } => {
                 if let Some(project_id) = run_project_id(&tx, run_id)? {
                     Self::record_context_event_in(
@@ -699,11 +719,12 @@ mod tests {
                 "0009_memory".to_string(),
                 "0010_memory_handoff".to_string(),
                 "0011_run_kind".to_string(),
+                "0012_context_pin".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 11);
+        assert_eq!(s.applied_migrations().unwrap().len(), 12);
     }
 
     #[test]

@@ -5,7 +5,7 @@
  */
 import type { RunEvent } from "@octopus/protocol";
 
-export const MEMORY_HOOK_EVENTS = ["PostToolUse", "Stop", "SubagentStop", "SessionEnd", "PreCompact", "PostCompact"] as const;
+export const MEMORY_HOOK_EVENTS = ["PostToolUse", "Stop", "SubagentStop", "SessionEnd", "PreCompact", "PostCompact", "InstructionsLoaded"] as const;
 
 /** Campos que os hooks de memória usam; os demais ficam como `unknown`. */
 export type MemoryHookInputLike = {
@@ -21,6 +21,9 @@ export type MemoryHookInputLike = {
   reason?: string;
   trigger?: string;
   compact_summary?: string;
+  file_path?: string;
+  memory_type?: string;
+  load_reason?: string;
 };
 
 export const MAX_TOOL_BODY = 2_000;
@@ -98,6 +101,11 @@ export function eventFromMemoryHook(input: MemoryHookInputLike): RunEvent | null
       return { type: "compaction", phase: "pre", trigger: input.trigger === "manual" ? "manual" : "auto", summary: null };
     case "PostCompact":
       return { type: "compaction", phase: "post", trigger: input.trigger === "manual" ? "manual" : "auto", summary: input.compact_summary ? truncate(input.compact_summary, MAX_SUMMARY_BODY) : null };
+    case "InstructionsLoaded": {
+      if (!input.file_path) return null;
+      const memoryType = (["User", "Project", "Local", "Managed"] as const).find((t) => t === input.memory_type) ?? "Project";
+      return { type: "instructions_loaded", filePath: input.file_path, memoryType, loadReason: input.load_reason ?? "session_start" };
+    }
     default:
       return null;
   }

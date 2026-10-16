@@ -561,6 +561,12 @@ pub enum RunEvent {
         #[serde(default)]
         items: Vec<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    InstructionsLoaded {
+        file_path: String,
+        memory_type: String,
+        load_reason: String,
+    },
 }
 
 impl RunEvent {
@@ -580,6 +586,7 @@ impl RunEvent {
             RunEvent::Observation { .. } => "observation",
             RunEvent::Compaction { .. } => "compaction",
             RunEvent::BriefInjected { .. } => "brief_injected",
+            RunEvent::InstructionsLoaded { .. } => "instructions_loaded",
         }
     }
 
@@ -865,6 +872,13 @@ mod tests {
             .unwrap();
         assert_eq!(brief.0, 1840);
         assert_eq!(brief.1.len(), 3);
+        let loaded = raw
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["params"]["event"]["type"] == "instructions_loaded")
+            .count();
+        assert_eq!(loaded, 1);
 
         // Chamadas de memória e a resposta do core.
         let calls = read_fixture("run-memory-call.notifications.json");

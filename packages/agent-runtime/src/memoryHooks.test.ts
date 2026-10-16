@@ -26,6 +26,8 @@ describe("hooks de memória", () => {
     expect(eventFromMemoryHook({ hook_event_name: "PreCompact", trigger: "auto" })).toEqual({ type: "compaction", phase: "pre", trigger: "auto", summary: null });
     expect(eventFromMemoryHook({ hook_event_name: "PostCompact", trigger: "manual", compact_summary: "resumo" })).toEqual({ type: "compaction", phase: "post", trigger: "manual", summary: "resumo" });
     expect(eventFromMemoryHook({ hook_event_name: "Notification" })).toBeNull();
+    expect(eventFromMemoryHook({ hook_event_name: "InstructionsLoaded", file_path: "/p/CLAUDE.md", memory_type: "Project", load_reason: "session_start" })).toEqual({ type: "instructions_loaded", filePath: "/p/CLAUDE.md", memoryType: "Project", loadReason: "session_start" });
+    expect(eventFromMemoryHook({ hook_event_name: "InstructionsLoaded" })).toBeNull();
   });
 
   it("helpers", () => {

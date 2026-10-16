@@ -446,7 +446,17 @@ export type Commands = {
   /** Reconstrói o índice a partir dos arquivos .md da wiki; devolve quantas páginas entraram. */
   rebuild_memory_index: { args: { projectId: string }; result: number };
   list_memory_handoffs: { args: { projectId: string }; result: MemoryHandoff[] };
+  list_context_pins: { args: { projectId: string }; result: ContextPin[] };
+  add_context_pin: { args: { projectId: string; input: ContextPinInput }; result: ContextPin };
+  remove_context_pin: { args: { projectId: string; pinId: string }; result: boolean };
 };
+
+/** Pin de contexto: arquivo do projeto, página da memória ou texto, sempre injetado no brief. */
+export type ContextPinKind = "file" | "page" | "text";
+export type ContextPin = { id: string; projectId: string; kind: ContextPinKind; ref: string; label: string; position: number; createdAt: string };
+export type ContextPinInput = { kind: ContextPinKind; ref: string; label?: string | null };
+export type SettingSourcesChoice = "default" | "project" | "none";
+export const settingSourcesKey = (projectId: string) => `project.${projectId}.settingSources`;
 
 // ---------------------------------------------------------------------- memória
 

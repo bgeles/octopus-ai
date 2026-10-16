@@ -411,6 +411,27 @@ export function App({ transport }: AppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, selectedProject]);
 
+  /** Retoma a sessão com `/compact`: o Claude Code compacta o contexto e devolve o resumo (experimental). */
+  const compactSession = async (sessionId: string) => {
+    if (!selectedProject) return;
+    setStarting(true);
+    setToast(null);
+    try {
+      const run = await transport.invoke("start_run", {
+        input: { projectId: selectedProject.id, prompt: "/compact", options: { permissionMode: "default", maxTurns: 1, includePartialMessages: true, resumeSessionId: sessionId } },
+      });
+      currentRunIdRef.current = run.id;
+      setCurrentRun(run);
+      setRunState(withUserPrompt(initialRunViewState(run.id), "/compact", run.startedAt));
+      setView("run");
+      await refreshRuns(selectedProject.id);
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
   const beginResume = (session: { sessionId: string; title: string | null }, fork: boolean) => {
     setResumeTarget({ sessionId: session.sessionId, title: session.title, fork });
     setView("run");
@@ -662,7 +683,19 @@ export function App({ transport }: AppProps) {
             <section aria-label="Transcript do run" className="flex min-w-0 flex-1 flex-col overflow-y-auto">
               <Transcript runId={currentRun?.id ?? null} items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(runId, id, d, note) => void decide(runId, id, d, note)} deciding={deciding} readFile={readProjectFile} />
             </section>
-            <RunSidebar state={runState} run={currentRun} elapsedMs={elapsedMs} />
+            <RunSidebar
+              state={runState}
+              run={currentRun}
+              elapsedMs={elapsedMs}
+              onCompact={
+                !active && (runState.sessionId ?? currentRun?.claudeSessionId)
+                  ? () => {
+                      const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
+                      if (sessionId) void compactSession(sessionId);
+                    }
+                  : null
+              }
+            />
           </div>
           <Composer
             disabled={!selectedProject}

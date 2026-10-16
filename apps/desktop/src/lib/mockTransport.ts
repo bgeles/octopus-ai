@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -347,6 +347,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const pageVersions: MemoryPageVersion[] = [];
   const contextEvents: ContextEvent[] = [];
   const handoffs: MemoryHandoff[] = [];
+  const pins: ContextPin[] = [];
   const normMock = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   /** Brief do run, como o core: handoff pendente da task (claim único) + páginas que casam com o pedido. */
   const buildBriefMock = (projectId: string, taskId: string | null, prompt: string, runId: string): { text: string; items: string[] } | null => {
@@ -361,9 +362,18 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       .slice(0, 16);
     let relevant = pages.filter((p) => p.projectId === projectId && !p.archivedAt && words.some((w) => normMock(p.title).includes(w) || normMock(p.bodyMd).includes(w))).slice(0, 3);
     if (relevant.length === 0) relevant = pages.filter((p) => p.projectId === projectId && !p.archivedAt && p.kind !== "tasklog").sort((a, b) => b.score - a.score).slice(0, 2);
-    if (!pending && relevant.length === 0) return null;
+    const projectPins = pins.filter((p) => p.projectId === projectId);
+    if (!pending && relevant.length === 0 && projectPins.length === 0) return null;
     const items: string[] = [];
     let text = "## Memória do projeto (Octopus)\n";
+    if (projectPins.length) {
+      text += "\n### Pins de contexto (sempre presentes)\n";
+      for (const pin of projectPins) {
+        const content = pin.kind === "page" ? (pages.find((p) => p.id === pin.ref)?.bodyMd ?? "") : pin.kind === "file" ? `(conteúdo de ${pin.ref})` : pin.ref;
+        text += `#### ${pin.label}\n${content.slice(0, 1500)}\n`;
+        items.push(`pin: ${pin.label}`);
+      }
+    }
     if (pending) {
       text += `\n### Handoff pendente do run anterior desta task\n${pending.bodyMd.slice(0, 800)}\n`;
       items.push(`handoff: ${pending.bodyMd.slice(0, 60)}`);
@@ -694,6 +704,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const [title, r1] = sanitizeMock(ev.title);
       const [body, r2] = sanitizeMock(ev.body);
       observations.unshift({ id: `obs_${Math.random().toString(36).slice(2, 10)}`, projectId: run.projectId, runId: run.id, taskId: run.taskId ?? null, agentProfileId: run.agentProfileId ?? null, kind: ev.kind, title, body, toolName: ev.toolName, redacted: r1 || r2, createdAt: notification.at, consolidatedAt: null });
+    } else if (ev.type === "brief_injected") {
+      contextEvents.push({ id: `ctx_${Math.random().toString(36).slice(2, 10)}`, projectId: run.projectId, runId: run.id, kind: "brief", payload: { chars: ev.chars, items: ev.items }, createdAt: notification.at });
+    } else if (ev.type === "instructions_loaded") {
+      contextEvents.push({ id: `ctx_${Math.random().toString(36).slice(2, 10)}`, projectId: run.projectId, runId: run.id, kind: "instructions", payload: { filePath: ev.filePath, memoryType: ev.memoryType, loadReason: ev.loadReason }, createdAt: notification.at });
     } else if (ev.type === "compaction") {
       contextEvents.push({ id: `ctx_${Math.random().toString(36).slice(2, 10)}`, projectId: run.projectId, runId: run.id, kind: `compaction_${ev.phase}`, payload: { trigger: ev.trigger, summary: ev.summary }, createdAt: notification.at });
     } else if (ev.type === "task_update") {
@@ -1293,6 +1307,25 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     list_memory_page_versions: async ({ pageId }) => pageVersions.filter((v) => v.pageId === pageId).map((v) => ({ ...v })),
     list_memory_observations: async ({ projectId, runId, limit }) => observations.filter((o) => o.projectId === projectId && (!runId || o.runId === runId)).slice(0, limit ?? 200).map((o) => ({ ...o })),
     list_context_events: async ({ runId }) => contextEvents.filter((c) => c.runId === runId).map((c) => ({ ...c })),
+    list_context_pins: async ({ projectId }) => pins.filter((p) => p.projectId === projectId).map((p) => ({ ...p })),
+    add_context_pin: async ({ projectId, input }) => {
+      const ref = input.ref.trim();
+      if (!ref) throw new Error("O pin precisa de um arquivo, página ou texto");
+      if (input.kind === "page" && !pages.some((p) => p.id === ref)) throw new Error(`Página ${ref} não encontrada`);
+      const label = input.label?.trim() || (input.kind === "page" ? (pages.find((p) => p.id === ref)?.title ?? ref) : input.kind === "text" ? ref.slice(0, 60) : ref);
+      const pin: ContextPin = { id: `pin_${Math.random().toString(36).slice(2, 10)}`, projectId, kind: input.kind, ref, label, position: pins.length + 1, createdAt: new Date().toISOString() };
+      pins.push(pin);
+      audit("você", "context.pin.added", projectId, { pinId: pin.id, kind: pin.kind, label: pin.label });
+      writeSnapshot("auto");
+      return { ...pin };
+    },
+    remove_context_pin: async ({ projectId, pinId }) => {
+      const index = pins.findIndex((p) => p.id === pinId);
+      if (index === -1) return false;
+      pins.splice(index, 1);
+      audit("você", "context.pin.removed", projectId, { pinId });
+      return true;
+    },
     list_memory_handoffs: async ({ projectId }) => handoffs.filter((h) => h.projectId === projectId).sort((a, b) => Number(Boolean(a.consumedAt)) - Number(Boolean(b.consumedAt)) || b.createdAt.localeCompare(a.createdAt)).map((h) => ({ ...h })),
     rebuild_memory_index: async ({ projectId }) => {
       const n = pages.filter((p) => p.projectId === projectId).length;
