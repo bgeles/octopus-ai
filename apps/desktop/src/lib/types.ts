@@ -81,6 +81,56 @@ export type ProjectTotals = {
   cacheReadTokens: number;
 };
 
+/** Preferências do app (`app_setting`), chave -> valor JSON. */
+export type AppSettings = Record<string, unknown>;
+
+export type CheckItem = { ok: boolean; detail: string };
+
+/** Espelha `commands_config::EnvironmentCheck`. */
+export type EnvironmentCheck = {
+  node: CheckItem;
+  sidecar: CheckItem;
+  claudeAuth: CheckItem;
+  authMethod: "keychain" | "api_key" | "credentials_file" | null;
+  checkedAt: string;
+};
+
+/** Espelha `store::config::ConfigExport` (só configurações; nunca runs, eventos ou chaves). */
+export type ConfigExport = {
+  schemaVersion: number;
+  exportedAt: string;
+  appVersion: string;
+  settings: AppSettings;
+  projects: Project[];
+};
+
+export type ImportMode = "merge" | "replace";
+
+export type ImportPreview = {
+  schemaVersion: number;
+  exportedAt: string;
+  projectsNew: string[];
+  projectsSame: string[];
+  projectsConflict: string[];
+  projectsRemoved: string[];
+  settings: number;
+};
+
+export type ImportResult = { projectsAdded: number; projectsUpdated: number; projectsRemoved: number; settingsApplied: number };
+
+export type SnapshotReason = "auto" | "manual" | "pre-restore";
+
+export type BackupSnapshot = {
+  id: string;
+  createdAt: string;
+  path: string;
+  schemaVersion: number;
+  reason: SnapshotReason;
+  sizeBytes: number;
+};
+
+export type ExportOutcome = { snapshot: BackupSnapshot; copiedTo: string | null };
+
 /** Espelha `commands::FilePreview`. */
 export type FilePreview = {
   path: string;
@@ -108,6 +158,17 @@ export type Commands = {
   tag_session: { args: { input: { projectId: string; sessionId: string; tag: string | null } }; result: boolean };
   list_approvals: { args: { projectId: string; limit?: number }; result: Approval[] };
   get_project_totals: { args: { projectId: string }; result: ProjectTotals };
+  get_settings: { args: Record<string, never>; result: AppSettings };
+  set_setting: { args: { key: string; value: unknown }; result: null };
+  check_environment: { args: Record<string, never>; result: EnvironmentCheck };
+  config_export: { args: { destination?: string | null }; result: ExportOutcome };
+  config_export_json: { args: Record<string, never>; result: ConfigExport };
+  config_import_preview: { args: { path: string }; result: ImportPreview };
+  config_import: { args: { input: { path: string; mode: ImportMode } }; result: ImportResult };
+  config_backups_list: { args: Record<string, never>; result: BackupSnapshot[] };
+  config_backup_preview: { args: { id: string }; result: ImportPreview };
+  config_backup_restore: { args: { input: { id: string; mode: ImportMode } }; result: ImportResult };
+  config_backup_reveal: { args: { id: string }; result: null };
   read_project_file: { args: { projectId: string; path: string; maxBytes?: number }; result: FilePreview };
 };
 

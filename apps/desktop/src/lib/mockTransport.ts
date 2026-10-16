@@ -8,7 +8,7 @@ import subagentEvents from "@octopus/protocol/fixtures/run-events-subagent.notif
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { Approval, CommandName, Commands, EventName, Events, Project, Run, SessionSummary, StoredRunEvent } from "./types";
+import type { Approval, AppSettings, BackupSnapshot, CommandName, Commands, ConfigExport, EventName, Events, ImportMode, ImportPreview, ImportResult, Project, Run, SessionSummary, StoredRunEvent } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -19,7 +19,25 @@ export type MockOptions = {
   events?: RunEventNotification[];
   /** Projetos iniciais. */
   projects?: Project[];
+  /** Instalação nova: sem projetos, sem preferências, onboarding pendente. */
+  freshInstall?: boolean;
+  /** Resultado das checagens de ambiente (padrão: tudo ok). */
+  environment?: Partial<{ node: boolean; claudeAuth: boolean }>;
 };
+
+/** Export de demonstração que o mock "lê" de qualquer caminho terminado em `.json`. */
+export function demoConfigExport(): ConfigExport {
+  return {
+    schemaVersion: 1,
+    exportedAt: "2026-10-16T12:00:00.000Z",
+    appVersion: "0.1.0",
+    settings: { theme: "dark", defaultAuthMode: "subscription", "onboarding.completedAt": "2026-10-16T11:00:00.000Z" },
+    projects: [
+      { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: "2026-10-15T10:00:00.000Z" },
+      { id: "proj_frontend", name: "frontend-chat", path: "/Users/dev/projetos/frontend-chat", authMode: "subscription", createdAt: "2026-10-15T11:00:00.000Z" },
+    ],
+  };
+}
 
 export function fixtureRunEvents(): RunEventNotification[] {
   return (fixtureEvents as FixtureNotification[]).map((n) => n.params);
@@ -57,9 +75,86 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const tickMs = options.tickMs ?? 120;
   const script = options.events ?? fixtureRunEvents();
   const listeners = new Map<EventName, Set<(payload: never) => void>>();
-  const projects: Project[] = options.projects ?? [
+  const fresh = options.freshInstall ?? false;
+  const projects: Project[] = options.projects ?? (fresh ? [] : [
     { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString() },
-  ];
+  ]);
+  const settings: AppSettings = fresh ? {} : { "onboarding.completedAt": "2026-10-15T10:00:00.000Z", defaultAuthMode: "subscription" };
+  const snapshots: BackupSnapshot[] = [];
+  const snapshotFiles = new Map<string, ConfigExport>();
+  let snapshotCounter = 0;
+  const exportConfig = (): ConfigExport => ({
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    appVersion: "0.1.0-mock",
+    settings: { ...settings },
+    projects: projects.map((p) => ({ ...p })),
+  });
+  const writeSnapshot = (reason: BackupSnapshot["reason"]): BackupSnapshot => {
+    const config = exportConfig();
+    const snapshot: BackupSnapshot = {
+      id: `bkp_${++snapshotCounter}`,
+      createdAt: config.exportedAt,
+      path: `/mock/backups/octopus-config-${snapshotCounter}-${reason}.json`,
+      schemaVersion: 1,
+      reason,
+      sizeBytes: JSON.stringify(config).length,
+    };
+    snapshots.unshift(snapshot);
+    snapshotFiles.set(snapshot.id, config);
+    const autos = snapshots.filter((s) => s.reason === "auto");
+    for (const old of autos.slice(20)) {
+      snapshots.splice(snapshots.indexOf(old), 1);
+      snapshotFiles.delete(old.id);
+    }
+    return snapshot;
+  };
+  const sameProject = (a: Project, b: Project) => a.id === b.id && a.name === b.name && a.path === b.path && a.authMode === b.authMode;
+  const previewImport = (config: ConfigExport): ImportPreview => {
+    const preview: ImportPreview = { schemaVersion: config.schemaVersion, exportedAt: config.exportedAt, projectsNew: [], projectsSame: [], projectsConflict: [], projectsRemoved: [], settings: Object.keys(config.settings).length };
+    for (const incoming of config.projects) {
+      const existing = projects.find((p) => p.id === incoming.id || p.path === incoming.path);
+      if (!existing) preview.projectsNew.push(incoming.name);
+      else if (sameProject(existing, incoming)) preview.projectsSame.push(incoming.name);
+      else preview.projectsConflict.push(`${incoming.name} ↔ ${existing.name}`);
+    }
+    for (const existing of projects) {
+      if (!config.projects.some((p) => p.id === existing.id || p.path === existing.path)) preview.projectsRemoved.push(existing.name);
+    }
+    return preview;
+  };
+  const importConfig = (config: ConfigExport, mode: ImportMode): ImportResult => {
+    const result: ImportResult = { projectsAdded: 0, projectsUpdated: 0, projectsRemoved: 0, settingsApplied: 0 };
+    for (const incoming of config.projects) {
+      const existing = projects.find((p) => p.id === incoming.id || p.path === incoming.path);
+      if (!existing) {
+        projects.push({ ...incoming });
+        result.projectsAdded++;
+      } else if (mode === "replace" && !sameProject(existing, incoming)) {
+        Object.assign(existing, { name: incoming.name, path: incoming.path, authMode: incoming.authMode });
+        result.projectsUpdated++;
+      }
+    }
+    if (mode === "replace") {
+      for (const existing of [...projects]) {
+        if (!config.projects.some((p) => p.id === existing.id || p.path === existing.path)) {
+          projects.splice(projects.indexOf(existing), 1);
+          result.projectsRemoved++;
+        }
+      }
+      for (const key of Object.keys(settings)) delete settings[key];
+    }
+    for (const [key, value] of Object.entries(config.settings)) {
+      settings[key] = value;
+      result.settingsApplied++;
+    }
+    return result;
+  };
+  const readExport = (path: string): ConfigExport => {
+    if (!path.endsWith(".json")) throw new Error(`${path} não é um export válido`);
+    const bySnapshot = snapshots.find((s) => s.path === path);
+    return bySnapshot ? snapshotFiles.get(bySnapshot.id)! : demoConfigExport();
+  };
   const runs = new Map<string, Run>();
   const events = new Map<string, StoredRunEvent[]>();
   const sessions: SessionSummary[] = [
@@ -191,12 +286,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         createdAt: new Date().toISOString(),
       };
       projects.unshift(project);
+      writeSnapshot("auto");
       return project;
     },
     delete_project: async ({ projectId }) => {
       const index = projects.findIndex((p) => p.id === projectId);
       if (index === -1) return false;
       projects.splice(index, 1);
+      writeSnapshot("auto");
       return true;
     },
     list_runs: async ({ projectId, limit }) =>
@@ -297,6 +394,48 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const limit = maxBytes ?? 256 * 1024;
       return { path, exists: true, content: content.slice(0, limit), truncated: content.length > limit };
     },
+    get_settings: async () => ({ ...settings }),
+    set_setting: async ({ key, value }) => {
+      if (value === null || value === undefined) delete settings[key];
+      else settings[key] = value;
+      writeSnapshot("auto");
+      return null;
+    },
+    check_environment: async () => {
+      const env = { node: true, claudeAuth: true, ...options.environment };
+      return {
+        node: env.node ? { ok: true, detail: "/opt/homebrew/bin/node · v23.1.0" } : { ok: false, detail: "Node.js não encontrado no PATH nem nos caminhos usuais. Instale o Node ou aponte OCTOPUS_NODE." },
+        sidecar: { ok: true, detail: "agent-runtime mock · Claude Agent SDK mock" },
+        claudeAuth: env.claudeAuth ? { ok: true, detail: "credencial do Claude Code no Keychain · login pessoal" } : { ok: false, detail: "nenhuma credencial do Claude Code no Keychain nem ANTHROPIC_API_KEY. Rode `claude` no Terminal e faça login." },
+        authMethod: env.claudeAuth ? "keychain" : null,
+        checkedAt: new Date().toISOString(),
+      };
+    },
+    config_export: async ({ destination }) => ({ snapshot: writeSnapshot("manual"), copiedTo: destination ?? null }),
+    config_export_json: async () => exportConfig(),
+    config_import_preview: async ({ path }) => previewImport(readExport(path)),
+    config_import: async ({ input }) => {
+      const config = readExport(input.path);
+      writeSnapshot("pre-restore");
+      const result = importConfig(config, input.mode);
+      writeSnapshot("auto");
+      return result;
+    },
+    config_backups_list: async () => snapshots.map((s) => ({ ...s })),
+    config_backup_preview: async ({ id }) => {
+      const config = snapshotFiles.get(id);
+      if (!config) throw new Error(`Cópia ${id} não encontrada`);
+      return previewImport(config);
+    },
+    config_backup_restore: async ({ input }) => {
+      const config = snapshotFiles.get(input.id);
+      if (!config) throw new Error(`Cópia ${input.id} não encontrada`);
+      writeSnapshot("pre-restore");
+      const result = importConfig(config, input.mode);
+      writeSnapshot("auto");
+      return result;
+    },
+    config_backup_reveal: async () => null,
     list_sessions: async () => sessions.map((s) => ({ ...s, tags: [...s.tags] })),
     rename_session: async ({ input }) => {
       const session = sessions.find((s) => s.sessionId === input.sessionId);

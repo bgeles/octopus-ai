@@ -52,15 +52,21 @@ pub fn create_project(state: State<'_, AppState>, input: CreateProjectInput) -> 
     if !path.is_dir() {
         return Err(format!("A pasta {} não existe", input.path));
     }
-    state
+    let project = state
         .store
         .create_project(&input.name, &input.path)
-        .map_err(err)
+        .map_err(err)?;
+    crate::commands_config::auto_backup(&state);
+    Ok(project)
 }
 
 #[tauri::command]
 pub fn delete_project(state: State<'_, AppState>, project_id: String) -> CmdResult<bool> {
-    state.store.delete_project(&project_id).map_err(err)
+    let deleted = state.store.delete_project(&project_id).map_err(err)?;
+    if deleted {
+        crate::commands_config::auto_backup(&state);
+    }
+    Ok(deleted)
 }
 
 #[tauri::command]

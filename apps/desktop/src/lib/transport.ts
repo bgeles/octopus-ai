@@ -38,5 +38,6 @@ export async function resolveTransport(): Promise<Transport> {
   if (typeof window !== "undefined" && window.__OCTOPUS_TRANSPORT__) return window.__OCTOPUS_TRANSPORT__;
   if (isTauri()) return createTauriTransport();
   const { createMockTransport } = await import("./mockTransport");
-  return createMockTransport();
+  const params = new URLSearchParams(window.location.search);
+  return createMockTransport({ freshInstall: params.get("fresh") === "1", environment: params.get("auth") === "0" ? { claudeAuth: false } : undefined });
 }

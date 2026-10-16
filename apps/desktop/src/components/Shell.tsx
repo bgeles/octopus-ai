@@ -1,9 +1,9 @@
-import { BookOpen, CheckCircle2, ChevronDown, History, Lock, Play, Users } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronDown, History, Lock, Play, Settings, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Project, Run } from "../lib/types";
-import { THEME_LABELS, useTheme, type ThemePreference } from "../lib/theme";
+import { THEME_LABELS, type ThemePreference } from "../lib/theme";
 
-export type View = "run" | "sessions" | "approvals" | "agents" | "memory" | "security";
+export type View = "run" | "sessions" | "approvals" | "agents" | "memory" | "security" | "settings";
 
 type NavItem = { id: View; label: string; icon: ReactNode; badge?: number; live?: boolean; disabled?: boolean };
 
@@ -16,13 +16,14 @@ type ShellProps = {
   onChangeView: (view: View) => void;
   activeRuns: Run[];
   pendingApprovals: number;
+  theme: ThemePreference;
+  onThemeChange: (theme: ThemePreference) => void;
   children: ReactNode;
 };
 
 const THEME_ORDER: ThemePreference[] = ["system", "light", "dark"];
 
-export function Shell({ projects, selectedProject, onSelectProject, onAddProject, view, onChangeView, activeRuns, pendingApprovals, children }: ShellProps) {
-  const [theme, setTheme] = useTheme();
+export function Shell({ projects, selectedProject, onSelectProject, onAddProject, view, onChangeView, activeRuns, pendingApprovals, theme, onThemeChange, children }: ShellProps) {
   const nav: NavItem[] = [
     { id: "run", label: "Run ao vivo", icon: <Play size={16} aria-hidden />, live: activeRuns.length > 0 },
     { id: "sessions", label: "Sessões", icon: <History size={16} aria-hidden /> },
@@ -103,6 +104,18 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
         </ul>
 
         <div className="mt-auto flex flex-col gap-3">
+          <button
+            type="button"
+            aria-current={view === "settings" ? "page" : undefined}
+            onClick={() => onChangeView("settings")}
+            className={[
+              "flex w-full items-center gap-2.5 rounded-md px-3 py-2.5 text-left text-sm",
+              view === "settings" ? "bg-brand/16 font-medium text-sidebar-ink" : "text-sidebar-ink/72 hover:bg-sidebar-ink/6 hover:text-sidebar-ink",
+            ].join(" ")}
+          >
+            <Settings size={16} aria-hidden />
+            <span>Configurações</span>
+          </button>
           <div className="flex flex-col gap-2.5 rounded-xl border hairline-dark p-3">
             <div className="eyebrow text-sidebar-ink/72">Runs ativos</div>
             {activeRuns.length === 0 && <div className="text-[13px] text-sidebar-ink/50">Nenhum run em andamento</div>}
@@ -124,7 +137,7 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  onClick={() => setTheme(option)}
+                  onClick={() => onThemeChange(option)}
                   className={["flex-1 rounded-sm px-2 py-1.5 font-medium", selected ? "bg-sidebar-ink/12 text-sidebar-ink" : "text-sidebar-ink/60 hover:text-sidebar-ink"].join(" ")}
                 >
                   {THEME_LABELS[option]}
