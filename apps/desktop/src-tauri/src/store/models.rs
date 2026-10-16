@@ -123,11 +123,18 @@ pub struct Run {
     /// Task do board que este run executa (`None` = run avulso).
     #[serde(default)]
     pub task_id: Option<String>,
+    /// `agent` (pedido do usuário ou do scheduler) ou `consolidation` (memória com Haiku).
+    #[serde(default = "default_run_kind")]
+    pub kind: String,
+}
+
+fn default_run_kind() -> String {
+    "agent".into()
 }
 
 impl Run {
     pub const SELECT: &'static str = "SELECT id, project_id, prompt, options_json, status, claude_session_id, model, started_at, ended_at,
-        cost_usd, input_tokens, output_tokens, cache_read_tokens, num_turns, stop_reason, result_text, error_message, agent_profile_id, task_id FROM run";
+        cost_usd, input_tokens, output_tokens, cache_read_tokens, num_turns, stop_reason, result_text, error_message, agent_profile_id, task_id, kind FROM run";
 
     pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let options_json: String = row.get(3)?;
@@ -154,6 +161,7 @@ impl Run {
             error_message: row.get(16)?,
             agent_profile_id: row.get(17)?,
             task_id: row.get(18)?,
+            kind: row.get(19)?,
         })
     }
 }

@@ -111,6 +111,8 @@ export const RunOptionsSchema = z.object({
   forkSession: z.boolean().optional(),
   systemPromptAppend: z.string().optional(),
   allowedTools: z.array(z.string()).optional(),
+  /** Ferramentas que o agente não pode usar neste run (vira `disallowedTools` do SDK). */
+  disallowedTools: z.array(z.string()).optional(),
   settingSources: z.array(SettingSourceSchema).optional(),
   /** Variáveis adicionais para o processo do agente (ex.: ANTHROPIC_API_KEY em modo api_key). */
   env: z.record(z.string(), z.string()).optional(),

@@ -169,6 +169,8 @@ pub struct RunOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disallowed_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setting_sources: Option<Vec<SettingSource>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<std::collections::BTreeMap<String, String>>,

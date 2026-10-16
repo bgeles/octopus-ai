@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, EventName, Events, ImportMode, ImportPreview, ImportResult, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -447,6 +447,45 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     if (!existing) saved.slug = slug;
     const ts = new Date().toISOString();
     for (const o of observations) if (o.runId === run.id && !o.consolidatedAt) o.consolidatedAt = ts;
+    // Consolidação com Haiku: um run só de memória, que grava páginas via memory_write.
+    if (settings["memory.consolidation"] === "haiku" && run.kind === "agent" && observations.some((o) => o.runId === run.id)) {
+      const crun: Run = {
+        id: `run_mock_${++runCounter}`,
+        projectId: run.projectId,
+        prompt: `Consolidação de memória do run ${run.id}`,
+        options: { model: "claude-haiku-5-5", permissionMode: "dontAsk", maxTurns: 8, maxBudgetUsd: 0.25, allowedTools: ["mcp__octopus__memory_write", "mcp__octopus__memory_search"], disallowedTools: ["Bash", "Edit", "Write", "Read"], policyHooks: false, memory: { capture: false, tools: true } },
+        agentProfileId: null,
+        taskId: null,
+        kind: "consolidation",
+        status: "running",
+        claudeSessionId: null,
+        model: "claude-haiku-5-5",
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        costUsd: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        numTurns: null,
+        stopReason: null,
+        resultText: null,
+        errorMessage: null,
+      };
+      runs.set(crun.id, crun);
+      events.set(crun.id, []);
+      const summary = notes[0] ?? run.resultText ?? run.prompt;
+      const at = new Date().toISOString();
+      const script: RunEventNotification[] = [
+        { runId: crun.id, seq: 0, at, event: { type: "session_init", sessionId: `sess_${crun.id}`, model: "claude-haiku-5-5", tools: ["mcp__octopus__memory_write", "mcp__octopus__memory_search"], mcpServers: [{ name: "octopus", status: "connected" }], permissionMode: "dontAsk" } },
+        { runId: crun.id, seq: 1, at, event: { type: "tool_use", toolUseId: `toolu_${crun.id}`, name: "mcp__octopus__memory_write", input: { kind: "decisions", title: `Aprendizados do run ${run.id.slice(-4)}`, body: summary.slice(0, 600), source: "haiku" }, parentToolUseId: null } },
+        { runId: crun.id, seq: 2, at, event: { type: "tool_result", toolUseId: `toolu_${crun.id}`, content: "Página gravada na memória do projeto (decisions).", isError: false, parentToolUseId: null } },
+        { runId: crun.id, seq: 3, at, event: { type: "assistant_text", messageId: null, text: "ok", parentToolUseId: null } },
+        { runId: crun.id, seq: 4, at, event: { type: "result", sessionId: `sess_${crun.id}`, subtype: "success", isError: false, costUsd: 0.01, durationMs: 900, numTurns: 2, usage: null, stopReason: "end_turn", resultText: "ok" } },
+      ];
+      scriptByRun.set(crun.id, script);
+      audit("sistema", "memory.consolidation.started", run.projectId, { runId: crun.id, sourceRunId: run.id, model: "claude-haiku-5-5" });
+      schedule(crun.id, 0);
+    }
     // Run de task que não terminou bem e sem handoff do agente: nota automática.
     if (run.status !== "completed" && run.taskId && !handoffs.some((h) => h.runId === run.id)) {
       let body = `Run ${statusLabel} sem handoff do agente.`;
@@ -647,6 +686,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       finishTaskRun(run, !ev.isError, ev.resultText);
       audit("sistema", "run.finished", run.projectId, { runId, status: run.status, costUsd: ev.costUsd, numTurns: ev.numTurns });
       consolidateRunMock(run);
+    } else if (ev.type === "tool_use" && ev.name === "mcp__octopus__memory_write" && run.kind === "consolidation") {
+      const input = ev.input as { kind: MemoryPageKind; title: string; body: string; source?: string };
+      const existing = pages.find((p) => p.projectId === run.projectId && !p.archivedAt && p.slug === slugifyMock(input.title));
+      savePageMock({ projectId: run.projectId, pageId: existing?.id ?? null, kind: input.kind, title: input.title, bodyMd: input.body }, `run ${run.id} (agente)`, input.source === "haiku" ? "haiku" : "agent");
     } else if (ev.type === "observation") {
       const [title, r1] = sanitizeMock(ev.title);
       const [body, r2] = sanitizeMock(ev.body);
@@ -777,6 +820,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         prompt: input.prompt,
         options,
         agentProfileId: member?.profile.id ?? null,
+        kind: "agent",
         taskId: null,
         status: "running",
         claudeSessionId: null,
@@ -1094,6 +1138,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
             prompt,
             options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"] }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
             agentProfileId: member?.profile.id ?? null,
+            kind: "agent",
             taskId: task.id,
             status: "running",
             claudeSessionId: null,
