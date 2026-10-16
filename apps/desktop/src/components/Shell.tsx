@@ -1,6 +1,7 @@
 import { BookOpen, Bot, CheckCircle2, ChevronDown, History, Lock, Play } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Project, Run } from "../lib/types";
+import { THEME_LABELS, useTheme, type ThemePreference } from "../lib/theme";
 
 export type View = "run" | "sessions" | "approvals" | "agents" | "memory" | "security";
 
@@ -18,7 +19,10 @@ type ShellProps = {
   children: ReactNode;
 };
 
+const THEME_ORDER: ThemePreference[] = ["system", "light", "dark"];
+
 export function Shell({ projects, selectedProject, onSelectProject, onAddProject, view, onChangeView, activeRuns, pendingApprovals, children }: ShellProps) {
+  const [theme, setTheme] = useTheme();
   const nav: NavItem[] = [
     { id: "run", label: "Run ao vivo", icon: <Play size={16} aria-hidden />, live: activeRuns.length > 0 },
     { id: "sessions", label: "Sessões", icon: <History size={16} aria-hidden /> },
@@ -30,7 +34,7 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
 
   return (
     <div className="flex h-full min-h-0 bg-paper">
-      <nav aria-label="Navegação principal" className="flex w-60 shrink-0 flex-col gap-6 bg-black p-4 text-white">
+      <nav aria-label="Navegação principal" className="flex w-60 shrink-0 flex-col gap-6 bg-sidebar p-4 text-sidebar-ink">
         <div className="flex items-center gap-2.5 px-2 py-1">
           <div className="flex size-7 items-center justify-center rounded-lg bg-brand">
             <OctopusMark />
@@ -55,7 +59,7 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
                 const project = projects.find((p) => p.id === e.target.value);
                 if (project) onSelectProject(project);
               }}
-              className="w-full appearance-none rounded-md border hairline-dark bg-night px-3 py-2.5 pr-8 text-sm font-medium text-white"
+              className="w-full appearance-none rounded-md border hairline-dark bg-sidebar-line/50 px-3 py-2.5 pr-8 text-sm font-medium text-sidebar-ink"
             >
               {projects.length === 0 && <option value="">Nenhum projeto</option>}
               {projects.map((p) => (
@@ -65,7 +69,7 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
               ))}
               <option value="__add__">+ Adicionar projeto…</option>
             </select>
-            <ChevronDown size={14} aria-hidden className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-white/70" />
+            <ChevronDown size={14} aria-hidden className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-sidebar-ink/70" />
           </div>
         </div>
 
@@ -82,8 +86,8 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
                   title={item.disabled ? "Disponível nas próximas fases" : undefined}
                   className={[
                     "flex w-full items-center gap-2.5 rounded-md px-3 py-2.5 text-left text-sm",
-                    current ? "bg-brand/16 font-medium text-white" : "text-white/72 hover:bg-white/6 hover:text-white",
-                    item.disabled ? "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-white/72" : "",
+                    current ? "bg-brand/16 font-medium text-sidebar-ink" : "text-sidebar-ink/72 hover:bg-sidebar-ink/6 hover:text-sidebar-ink",
+                    item.disabled ? "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-sidebar-ink/72" : "",
                   ].join(" ")}
                 >
                   {item.icon}
@@ -98,16 +102,36 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
           })}
         </ul>
 
-        <div className="mt-auto flex flex-col gap-2.5 rounded-xl border hairline-dark bg-night p-3">
-          <div className="eyebrow text-white/72">Runs ativos</div>
-          {activeRuns.length === 0 && <div className="text-[13px] text-white/50">Nenhum run em andamento</div>}
-          {activeRuns.slice(0, 3).map((run) => (
-            <div key={run.id} className="flex items-center gap-2 text-[13px]">
-              <span className={["size-2 rounded-full", run.status === "waiting_approval" ? "bg-warning" : "bg-brand"].join(" ")} />
-              <span className="flex-1 truncate">{run.prompt}</span>
-              <span className="font-mono text-xs text-white/72">{run.status === "waiting_approval" ? "aguardando" : "ativo"}</span>
-            </div>
-          ))}
+        <div className="mt-auto flex flex-col gap-3">
+          <div className="flex flex-col gap-2.5 rounded-xl border hairline-dark p-3">
+            <div className="eyebrow text-sidebar-ink/72">Runs ativos</div>
+            {activeRuns.length === 0 && <div className="text-[13px] text-sidebar-ink/50">Nenhum run em andamento</div>}
+            {activeRuns.slice(0, 3).map((run) => (
+              <div key={run.id} className="flex items-center gap-2 text-[13px]">
+                <span className={["size-2 rounded-full", run.status === "waiting_approval" ? "bg-warning" : "bg-brand"].join(" ")} />
+                <span className="flex-1 truncate">{run.prompt}</span>
+                <span className="font-mono text-xs text-sidebar-ink/72">{run.status === "waiting_approval" ? "aguardando" : "ativo"}</span>
+              </div>
+            ))}
+          </div>
+
+          <div role="radiogroup" aria-label="Tema" className="flex rounded-md border hairline-dark p-0.5 text-xs">
+            {THEME_ORDER.map((option) => {
+              const selected = option === theme;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => setTheme(option)}
+                  className={["flex-1 rounded-sm px-2 py-1.5 font-medium", selected ? "bg-sidebar-ink/12 text-sidebar-ink" : "text-sidebar-ink/60 hover:text-sidebar-ink"].join(" ")}
+                >
+                  {THEME_LABELS[option]}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </nav>
 

@@ -17,7 +17,7 @@ export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
   const budget = run?.options.maxBudgetUsd ?? null;
 
   return (
-    <aside aria-label="Estado do run" className="flex w-[340px] shrink-0 flex-col gap-4 border-l hairline bg-white p-5">
+    <aside aria-label="Estado do run" className="flex w-[340px] shrink-0 flex-col gap-4 border-l hairline bg-surface p-5">
       <section className="flex flex-col gap-2.5">
         <h2 className="m-0 font-display text-sm font-semibold">Contexto</h2>
         <div className="flex items-baseline gap-1.5">
@@ -59,18 +59,18 @@ export function RunSidebar({ state, run, elapsedMs }: RunSidebarProps) {
           <span className="ml-auto text-xs text-slate">{state.model ?? "modelo padrão"}</span>
         </div>
         {state.subagentIds.map((id) => (
-          <div key={id} className="flex items-center gap-2 py-1 pl-6 text-[13px] text-graphite">
+          <div key={id} className="flex items-center gap-2 py-1 pl-6 text-[13px] text-ink">
             <span className="size-2 rounded-full bg-success" />
             <span>Subagente</span>
             <span className="ml-auto font-mono text-xs text-slate">{id.slice(0, 12)}</span>
           </div>
         ))}
         <div className="flex flex-wrap gap-1.5 pt-1">
-          {Object.entries(state.toolCounts).length === 0 && <span className="text-xs text-fog">Nenhuma ferramenta chamada</span>}
+          {Object.entries(state.toolCounts).length === 0 && <span className="text-xs text-slate">Nenhuma ferramenta chamada</span>}
           {Object.entries(state.toolCounts)
             .sort((a, b) => b[1] - a[1])
             .map(([name, count]) => (
-              <span key={name} className="rounded-full border hairline-strong px-2 py-0.5 text-xs text-graphite">
+              <span key={name} className="rounded-full border hairline-strong px-2 py-0.5 text-xs text-ink">
                 {name} {count}
               </span>
             ))}

@@ -27,10 +27,10 @@ export function Transcript({ items, pendingPermissions, onDecide, deciding }: Tr
       {groups.map((group) =>
         group.kind === "user" ? (
           <article key={group.id} className="flex gap-3" data-testid="transcript-user">
-            <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink text-[11px] font-semibold text-white">Você</div>
+            <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink text-[11px] font-semibold text-paper">Você</div>
             <div className="flex flex-1 flex-col gap-1">
               <div className="text-xs text-slate">Você · {formatTime(group.at)}</div>
-              <div className="rounded-xl border hairline bg-white px-3.5 py-3 whitespace-pre-wrap">{group.text}</div>
+              <div className="rounded-xl border hairline bg-surface px-3.5 py-3 whitespace-pre-wrap">{group.text}</div>
             </div>
           </article>
         ) : (
@@ -47,7 +47,7 @@ export function Transcript({ items, pendingPermissions, onDecide, deciding }: Tr
               {group.items.map((item) => {
                 if (item.kind === "assistant") {
                   return (
-                    <p key={item.id} className={["m-0 whitespace-pre-wrap text-graphite", item.parentToolUseId ? "border-l-2 border-mist pl-3 text-[13px]" : ""].join(" ")}>
+                    <p key={item.id} className={["m-0 whitespace-pre-wrap text-ink", item.parentToolUseId ? "border-l-2 border-mist pl-3 text-[13px]" : ""].join(" ")}>
                       {item.text}
                       {item.streaming && <span aria-label="gerando" className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-brand" />}
                     </p>
@@ -81,14 +81,14 @@ function ToolCall({ item }: { item: Extract<TranscriptItem, { kind: "tool" }> })
   const summary = summarizeInput(item.name, item.input);
   const status = item.result === null ? "pending" : item.isError ? "error" : "ok";
   return (
-    <div className={["rounded-md border hairline bg-white text-[13px]", item.parentToolUseId ? "ml-3" : ""].join(" ")} data-testid="tool-call">
+    <div className={["rounded-md border hairline bg-surface text-[13px]", item.parentToolUseId ? "ml-3" : ""].join(" ")} data-testid="tool-call">
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex w-full items-center gap-2 px-3 py-2 text-left">
         {status === "pending" && <span aria-label="executando" className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-mist border-t-brand" />}
         {status === "ok" && <Check size={14} aria-label="concluída" className="shrink-0 text-success" />}
         {status === "error" && <X size={14} aria-label="falhou" className="shrink-0 text-brand" />}
         <span className="font-semibold text-ink">{item.name}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate">{summary}</span>
-        <ChevronRight size={14} aria-hidden className={["shrink-0 text-fog transition-transform", open ? "rotate-90" : ""].join(" ")} />
+        <ChevronRight size={14} aria-hidden className={["shrink-0 text-slate transition-transform", open ? "rotate-90" : ""].join(" ")} />
       </button>
       {open && (
         <div className="flex flex-col gap-2 border-t hairline px-3 py-2">
@@ -112,7 +112,7 @@ export function ApprovalCard({ permission, onDecide, busy }: { permission: Pendi
   const [denyReason, setDenyReason] = useState("");
   const summary = summarizeInput(permission.toolName, permission.input);
   return (
-    <section aria-label={`Aprovação necessária: ${permission.toolName}`} className="ml-10 flex flex-col gap-2.5 rounded-xl border-[1.5px] border-brand bg-white p-3.5" data-testid="approval-card">
+    <section aria-label={`Aprovação necessária: ${permission.toolName}`} className="ml-10 flex flex-col gap-2.5 rounded-xl border-[1.5px] border-brand bg-surface p-3.5" data-testid="approval-card">
       <div className="flex items-center gap-2">
         <span className="eyebrow text-brand">Aprovação necessária</span>
         {permission.reason && <span className="ml-auto text-xs text-slate">{permission.reason}</span>}
@@ -142,13 +142,13 @@ export function ApprovalCard({ permission, onDecide, busy }: { permission: Pendi
           value={denyReason}
           onChange={(e) => setDenyReason(e.target.value)}
           placeholder="Motivo (opcional)"
-          className="min-w-0 flex-1 rounded-sm border hairline-strong bg-white px-2.5 py-1.5 text-[13px]"
+          className="min-w-0 flex-1 rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px]"
         />
         <button
           type="button"
           disabled={busy}
           onClick={() => onDecide(permission.requestId, { behavior: "deny", message: denyReason.trim() || "Negado pelo usuário" })}
-          className="rounded-md border hairline-strong bg-white px-3.5 py-2 text-[13px] font-medium text-ink hover:border-ink disabled:opacity-50"
+          className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium text-ink hover:border-ink disabled:opacity-50"
         >
           Negar
         </button>

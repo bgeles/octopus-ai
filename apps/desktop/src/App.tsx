@@ -233,9 +233,9 @@ export function App({ transport }: AppProps) {
       )}
 
       {toast && (
-        <div role="status" className="fixed right-6 bottom-6 flex items-center gap-3 rounded-xl bg-black px-4 py-3 text-[13px] text-white shadow-md">
+        <div role="status" className="fixed right-6 bottom-6 flex items-center gap-3 rounded-xl bg-ink px-4 py-3 text-[13px] text-paper shadow-md">
           <span>{toast}</span>
-          <button type="button" onClick={() => setToast(null)} className="text-white/70 hover:text-white">
+          <button type="button" onClick={() => setToast(null)} className="text-paper/70 hover:text-paper">
             Fechar
           </button>
         </div>
@@ -254,7 +254,7 @@ function SessionsView({ runs, sessions, onOpenRun, onRefresh }: { runs: Run[]; s
           <div className="eyebrow text-brand">Histórico</div>
           <h1 className="m-0 font-display text-xl font-bold tracking-tight">Sessões</h1>
         </div>
-        <button type="button" onClick={onRefresh} className="ml-auto rounded-md border hairline-strong bg-white px-3 py-1.5 text-[13px] font-medium">
+        <button type="button" onClick={onRefresh} className="ml-auto rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium">
           Atualizar
         </button>
       </div>
@@ -265,7 +265,7 @@ function SessionsView({ runs, sessions, onOpenRun, onRefresh }: { runs: Run[]; s
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
           {runs.map((run) => (
             <li key={run.id}>
-              <button type="button" onClick={() => onOpenRun(run)} className="flex w-full items-center gap-3 rounded-xl border hairline bg-white px-4 py-3 text-left hover:border-ink/30">
+              <button type="button" onClick={() => onOpenRun(run)} className="flex w-full items-center gap-3 rounded-xl border hairline bg-surface px-4 py-3 text-left hover:border-ink/30">
                 <span className={["size-2 shrink-0 rounded-full", dotFor(run.status)].join(" ")} />
                 <span className="min-w-0 flex-1 truncate font-medium">{run.prompt}</span>
                 <span className="text-xs text-slate">{labelFor(run.status)}</span>
@@ -282,18 +282,18 @@ function SessionsView({ runs, sessions, onOpenRun, onRefresh }: { runs: Run[]; s
         {sessions && sessions.length === 0 && <p className="m-0 text-[13px] text-slate">Nenhuma sessão encontrada para esta pasta.</p>}
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
           {(sessions ?? []).map((s) => (
-            <li key={s.sessionId} className="flex items-center gap-3 rounded-xl border hairline bg-white px-4 py-3">
+            <li key={s.sessionId} className="flex items-center gap-3 rounded-xl border hairline bg-surface px-4 py-3">
               <span className="min-w-0 flex-1 truncate font-medium">{s.title ?? "(sem título)"}</span>
               {s.tags.map((t) => (
-                <span key={t} className="rounded-full border hairline-strong px-2 text-xs text-graphite">
+                <span key={t} className="rounded-full border hairline-strong px-2 text-xs text-ink">
                   {t}
                 </span>
               ))}
-              <span className="font-mono text-[11px] text-fog">{s.sessionId.slice(0, 8)}…</span>
+              <span className="font-mono text-[11px] text-slate">{s.sessionId.slice(0, 8)}…</span>
             </li>
           ))}
         </ul>
-        <p className="m-0 text-xs text-fog">Retomar e bifurcar sessões chega na Fase 1.</p>
+        <p className="m-0 text-xs text-slate">Retomar e bifurcar sessões chega na Fase 1.</p>
       </section>
     </div>
   );

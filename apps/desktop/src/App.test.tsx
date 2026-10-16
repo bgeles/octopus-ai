@@ -80,6 +80,24 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/interrompido/i);
   });
 
+  it("alterna o tema pelo seletor da sidebar e persiste a escolha", async () => {
+    window.localStorage.clear();
+    delete document.documentElement.dataset.theme;
+    const { user } = setup();
+    await screen.findByDisplayValue("chat-core");
+
+    const group = screen.getByRole("radiogroup", { name: "Tema" });
+    expect(within(group).getByRole("radio", { name: "Sistema" })).toHaveAttribute("aria-checked", "true");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+
+    await user.click(within(group).getByRole("radio", { name: "Escuro" }));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(window.localStorage.getItem("octopus.theme")).toBe("dark");
+
+    await user.click(within(group).getByRole("radio", { name: "Sistema" }));
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+
   it("lista runs e sessões na visão Sessões e reabre um run com seu histórico", async () => {
     const { user } = setup();
     await screen.findByDisplayValue("chat-core");

@@ -52,7 +52,7 @@ export function AddProjectDialog({ open, onClose, onCreate }: AddProjectDialogPr
   };
 
   return (
-    <dialog ref={dialogRef} onClose={onClose} aria-labelledby="add-project-title" className="m-auto w-[480px] max-w-[calc(100vw-32px)] rounded-xl border hairline bg-white p-0 shadow-md backdrop:bg-black/40">
+    <dialog ref={dialogRef} onClose={onClose} aria-labelledby="add-project-title" className="m-auto w-[480px] max-w-[calc(100vw-32px)] rounded-xl border hairline bg-surface p-0 shadow-md backdrop:bg-black/40">
       <form
         method="dialog"
         onSubmit={(e) => {

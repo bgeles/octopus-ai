@@ -2,31 +2,32 @@
 @import "tailwindcss";
 
 /*
- * Tokens derivados do design system TIVIT Fintech (vermelho único, neutros quentes, radii modestos).
- * Fontes: Plus Jakarta Sans (display) + Inter (corpo) são substitutas da fonte corporativa.
+ * Tema Grafite (docs/plano.md, "Tema visual"): minimalista, quase monocromático, um único acento.
+ * Os tokens do Tailwind apontam para variáveis de runtime definidas em `:root`, que trocam de valor
+ * no modo escuro (via `prefers-color-scheme` ou `data-theme` no <html>). A sidebar usa sempre a
+ * superfície escura do tema, nos dois modos.
  */
-@theme {
-  --color-brand: #e4002b;
-  --color-brand-hover: #b80022;
-  --color-brand-soft: #ffe5ea;
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-slate: var(--slate);
+  --color-mist: var(--mist);
 
-  --color-ink: #1a1a1a;
-  --color-graphite: #2b2b2b;
-  --color-slate: #4a4a4a;
-  --color-fog: #8a8a8a;
-  --color-mist: #c8c8c8;
-  --color-paper: #f4f4f4;
-  --color-cream: #fafafa;
-  --color-night: #141414;
-  --color-black: #0a0a0a;
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-soft: var(--brand-soft);
 
-  --color-success: #1f8a4c;
-  --color-success-soft: #e6f4ec;
-  --color-success-ink: #14633a;
-  --color-warning: #d98900;
-  --color-warning-soft: #fff4e0;
-  --color-warning-ink: #8a5a00;
-  --color-info: #1d4ed8;
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-ink: var(--success-ink);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-ink: var(--warning-ink);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-ink: var(--sidebar-ink);
+  --color-sidebar-line: var(--sidebar-line);
 
   --font-display: "Plus Jakarta Sans", "Helvetica Neue", Arial, sans-serif;
   --font-sans: "Inter", "Helvetica Neue", Arial, sans-serif;
@@ -36,12 +37,12 @@
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
-  --radius-xl: 24px;
+  --radius-xl: 16px;
 
-  --shadow-xs: 0 1px 2px rgba(10, 10, 10, 0.06);
-  --shadow-sm: 0 2px 6px rgba(10, 10, 10, 0.06), 0 1px 2px rgba(10, 10, 10, 0.04);
-  --shadow-md: 0 8px 20px rgba(10, 10, 10, 0.08), 0 2px 4px rgba(10, 10, 10, 0.04);
-  --shadow-focus: 0 0 0 3px rgba(228, 0, 43, 0.25);
+  --shadow-xs: 0 1px 2px rgba(10, 10, 10, 0.05);
+  --shadow-sm: 0 1px 3px rgba(10, 10, 10, 0.06);
+  --shadow-md: 0 6px 16px rgba(10, 10, 10, 0.08);
+  --shadow-focus: 0 0 0 3px color-mix(in srgb, var(--brand) 30%, transparent);
 
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 }
@@ -49,7 +50,74 @@
 @layer base {
   :root {
     color-scheme: light;
+
+    --paper: #fafaf9;
+    --surface: #ffffff;
+    --ink: #111111;
+    --slate: #6b6b6b;
+    --mist: #d6d3d1;
+
+    --brand: #e4002b;
+    --brand-hover: #b80022;
+    --brand-soft: #fde8ec;
+
+    --success: #2e7d4f;
+    --success-soft: #e6f2ea;
+    --success-ink: #1f5c3a;
+    --warning: #c98a1b;
+    --warning-soft: #fbf1dd;
+    --warning-ink: #7a5410;
+
+    /* Superfície escura do tema, fixa nos dois modos. */
+    --sidebar: #151517;
+    --sidebar-ink: #ececea;
+    --sidebar-line: #2a2a2d;
   }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+
+      --paper: #0b0b0c;
+      --surface: #151517;
+      --ink: #ececea;
+      --slate: #a1a19d;
+      --mist: #2a2a2d;
+
+      --brand: #ff3355;
+      --brand-hover: #ff5c78;
+      --brand-soft: color-mix(in srgb, #ff3355 18%, #151517);
+
+      --success: #4caf78;
+      --success-soft: color-mix(in srgb, #4caf78 18%, #151517);
+      --success-ink: #4caf78;
+      --warning: #e0a63a;
+      --warning-soft: color-mix(in srgb, #e0a63a 18%, #151517);
+      --warning-ink: #e0a63a;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+
+    --paper: #0b0b0c;
+    --surface: #151517;
+    --ink: #ececea;
+    --slate: #a1a19d;
+    --mist: #2a2a2d;
+
+    --brand: #ff3355;
+    --brand-hover: #ff5c78;
+    --brand-soft: color-mix(in srgb, #ff3355 18%, #151517);
+
+    --success: #4caf78;
+    --success-soft: color-mix(in srgb, #4caf78 18%, #151517);
+    --success-ink: #4caf78;
+    --warning: #e0a63a;
+    --warning-soft: color-mix(in srgb, #e0a63a 18%, #151517);
+    --warning-ink: #e0a63a;
+  }
+
   html,
   body,
   #root {
@@ -57,8 +125,8 @@
   }
   body {
     margin: 0;
-    background: var(--color-paper);
-    color: var(--color-ink);
+    background: var(--paper);
+    color: var(--ink);
     font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
@@ -77,14 +145,15 @@
   }
 }
 
+/* Linhas: sempre derivadas do token `mist`, para seguirem o tema. */
 @utility hairline {
-  border-color: rgba(10, 10, 10, 0.08);
+  border-color: var(--mist);
 }
 @utility hairline-strong {
-  border-color: rgba(10, 10, 10, 0.14);
+  border-color: color-mix(in srgb, var(--mist) 70%, var(--ink));
 }
 @utility hairline-dark {
-  border-color: rgba(255, 255, 255, 0.16);
+  border-color: var(--sidebar-line);
 }
 @utility eyebrow {
   font-size: 11px;
