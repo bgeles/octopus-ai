@@ -15,6 +15,7 @@ pub mod scheduler;
 pub mod secrets;
 pub mod sidecar;
 pub mod store;
+pub mod tray;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -93,6 +94,16 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         if let Err(e) = app.emit(RUN_EVENT, &ev) {
                             warn!("falha emitindo {RUN_EVENT}: {e}");
                         }
+                        tray::notify(&app, &store, &ev.run_id, &ev.event);
+                        if matches!(
+                            ev.event,
+                            protocol::RunEvent::SessionInit { .. }
+                                | protocol::RunEvent::PermissionRequest { .. }
+                                | protocol::RunEvent::TaskUpdate { .. }
+                        ) || ev.event.is_terminal()
+                        {
+                            tray::refresh(&app, &store);
+                        }
                         if ev.event.is_terminal() {
                             maybe_consolidate(&store, &sidecar, &ev.run_id).await;
                         }
@@ -155,6 +166,7 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                 match scheduler::tick(&store, &sidecar, secrets.as_ref()).await {
                     Ok(report) if report.changed() => {
                         let _ = app.emit(commands_orchestration::BOARD_CHANGED, &report);
+                        tray::refresh(&app, &store);
                     }
                     Ok(_) => {}
                     Err(e) => warn!("tick do scheduler falhou: {e:#}"),
@@ -163,6 +175,9 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
         });
     }
 
+    if let Err(e) = tray::install(app, &store) {
+        warn!("ícone da menu bar indisponível: {e}");
+    }
     app.manage(AppState {
         store,
         sidecar,
@@ -277,6 +292,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        // Fechar a janela não encerra os runs: o app continua na menu bar.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::block_on(async move {
@@ -382,6 +407,14 @@ pub fn run() {
             commands_harness::save_skill,
             commands_harness::preview_run_options,
         ])
-        .run(tauri::generate_context!())
-        .expect("erro ao iniciar o Octopus AI");
+        .build(tauri::generate_context!())
+        .expect("erro ao iniciar o Octopus AI")
+        .run(|app, event| {
+            // Clique no ícone do Dock com a janela escondida: mostra de novo.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                tray::show_main(app, None);
+            }
+            let _ = (app, event);
+        });
 }

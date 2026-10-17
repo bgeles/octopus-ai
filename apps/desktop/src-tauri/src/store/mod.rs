@@ -4,6 +4,7 @@
 //! Migrations são SQL versionado aplicado em `open()`. Todo acesso passa por `Store`,
 //! que serializa escritas com um `Mutex` (SQLite tem um único escritor).
 
+pub mod attention;
 pub mod audit;
 pub mod config;
 pub mod harness;

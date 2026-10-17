@@ -150,6 +150,26 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
         </section>
 
+        <section aria-label="Notificações e menu bar" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="notification-prefs">
+          <h2 className="m-0 font-display text-sm font-semibold">Notificações e menu bar</h2>
+          <span className="text-xs text-slate">O ícone na menu bar mostra os runs ativos e um ponto quando algo espera você. Fechar a janela não encerra os runs: o Octopus continua na menu bar (Sair pelo menu do ícone).</span>
+          {NOTIFICATION_PREFS.map((pref) => {
+            const on = typeof settings[pref.key] === "boolean" ? (settings[pref.key] as boolean) : pref.default;
+            return (
+              <label key={pref.key} className="flex items-center gap-3 border-b hairline py-2 text-[13px] last:border-b-0">
+                <button type="button" role="switch" aria-checked={on} aria-label={pref.title} onClick={() => void onSetSetting(pref.key, !on)} className={["relative inline-block h-[18px] w-[30px] shrink-0 rounded-full", on ? "bg-ink" : "bg-mist"].join(" ")}>
+                  <span className={["absolute top-0.5 size-3.5 rounded-full bg-surface", on ? "right-0.5" : "left-0.5"].join(" ")} />
+                </button>
+                <span className="flex flex-col">
+                  <span className="font-semibold">{pref.title}</span>
+                  <span className="text-xs text-slate">{pref.description}</span>
+                </span>
+              </label>
+            );
+          })}
+          <span className="text-xs text-slate">As notificações só aparecem com a janela do Octopus fora de foco.</span>
+        </section>
+
         <section aria-label="Backup de configurações" className="col-span-full flex flex-col gap-4 rounded-xl border hairline bg-surface p-5">
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex flex-col gap-0.5">
@@ -238,3 +258,9 @@ export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
+
+export const NOTIFICATION_PREFS: { key: string; title: string; description: string; default: boolean }[] = [
+  { key: "notifications.approvals", title: "Aprovação pendente", description: "Um agente pediu para usar uma ferramenta e está esperando você", default: true },
+  { key: "notifications.tasks", title: "Task aguardando você", description: "O agente pediu revisão ou ficou bloqueado numa task do board", default: true },
+  { key: "notifications.runs", title: "Run concluído ou falhou", description: "Avisa ao fim de cada run", default: false },
+];

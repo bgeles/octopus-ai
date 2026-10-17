@@ -590,6 +590,10 @@ export type Events = {
   "runtime:log": RuntimeLog;
   "runtime:exited": number | null;
   "board:changed": TickReport;
+  /** Menu bar ou notificação pediu para abrir uma tela. */
+  "app:navigate": string;
+  /** Menu bar pediu para abrir um run ativo. */
+  "app:open-run": string;
 };
 
 export type EventName = keyof Events;
