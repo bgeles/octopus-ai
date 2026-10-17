@@ -1094,6 +1094,18 @@ impl Store {
         prompt: &str,
         run_id: &str,
     ) -> Result<Option<MemoryBrief>> {
+        self.memory_brief_with(project_id, task_id, prompt, Some(run_id), true)
+    }
+
+    /// `claim = false` (preview): não consome o handoff nem sobe o uso das páginas.
+    pub fn memory_brief_with(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+        prompt: &str,
+        run_id: Option<&str>,
+        claim: bool,
+    ) -> Result<Option<MemoryBrief>> {
         let handoff: Option<MemoryHandoff> = {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
@@ -1107,7 +1119,7 @@ impl Store {
                     MemoryHandoff::from_row,
                 )
                 .optional()?;
-            if let Some(h) = &found {
+            if let (Some(h), true) = (&found, claim) {
                 tx.execute(
                     "UPDATE memory_handoff SET consumed_by_run_id = ?2, consumed_at = ?3 WHERE id = ?1",
                     params![h.id, run_id, now()],
@@ -1202,7 +1214,9 @@ impl Store {
 Use a tool memory_search para mais contexto, memory_write para registrar decisões/armadilhas e memory_handoff para deixar uma nota ao próximo run se não terminar.
 ");
         let ids: Vec<String> = pages.iter().map(|p| p.id.clone()).collect();
-        self.touch_pages(&ids)?;
+        if claim {
+            self.touch_pages(&ids)?;
+        }
         Ok(Some(MemoryBrief { text, items }))
     }
 

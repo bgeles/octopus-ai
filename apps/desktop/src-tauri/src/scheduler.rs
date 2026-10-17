@@ -80,8 +80,10 @@ pub async fn tick(
             } else {
                 project.path.clone()
             };
+            let defaults = store.project_defaults(&project.id)?;
             let base = RunOptions {
-                max_turns: Some(DEFAULT_MAX_TURNS),
+                max_turns: Some(defaults.max_turns.unwrap_or(DEFAULT_MAX_TURNS)),
+                model: defaults.model.clone(),
                 include_partial_messages: Some(true),
                 task_context: Some(Store::task_context(&task, &stage)),
                 policy_hooks: Some(true),
