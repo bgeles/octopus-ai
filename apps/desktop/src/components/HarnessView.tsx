@@ -402,10 +402,12 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
               {preview ? (
                 <ul className="m-0 flex list-none flex-col p-0">
                   {preview.hooks.map((h) => (
-                    <li key={h.event} className="grid grid-cols-[150px_minmax(0,1fr)_auto] items-baseline gap-3 border-b hairline py-2 text-[13px] last:border-b-0" data-testid="hook-row">
-                      <code className="font-mono text-xs">{h.event}</code>
-                      <span>{h.description}</span>
-                      <span className="eyebrow text-right text-slate">{h.origin}</span>
+                    <li key={h.event} className="flex flex-col gap-0.5 border-b hairline py-2 text-[13px] last:border-b-0" data-testid="hook-row">
+                      <span className="flex flex-wrap items-baseline justify-between gap-x-3">
+                        <code className="font-mono text-xs">{h.event}</code>
+                        <span className="eyebrow text-slate">{h.origin}</span>
+                      </span>
+                      <span className="text-slate">{h.description}</span>
                     </li>
                   ))}
                 </ul>
