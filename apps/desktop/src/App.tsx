@@ -220,6 +220,31 @@ export function App({ transport }: AppProps) {
       .catch(() => {});
   }, [transport]);
 
+  // Menu bar: abrir uma tela ou um run ativo.
+  useEffect(() => {
+    const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    const keep = (fn: () => void) => (disposed ? fn() : unlisteners.push(fn));
+    transport
+      .listen("app:navigate", (target) => {
+        if (["run", "sessions", "approvals", "agents", "board", "memory", "harness", "security", "settings"].includes(target)) setView(target as View);
+      })
+      .then(keep)
+      .catch(() => {});
+    transport
+      .listen("app:open-run", (runId) => {
+        void transport.invoke("get_run", { runId }).then((run) => {
+          if (run) void openRunRef.current?.(run);
+        });
+      })
+      .then(keep)
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisteners.forEach((fn) => fn());
+    };
+  }, [transport]);
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
@@ -382,6 +407,7 @@ export function App({ transport }: AppProps) {
     [transport],
   );
 
+  const openRunRef = useRef<((run: Run) => Promise<void>) | null>(null);
   const openRun = async (run: Run) => {
     const events = await transport.invoke("list_run_events", { runId: run.id });
     let state = withUserPrompt(initialRunViewState(run.id), run.prompt, run.startedAt);
@@ -421,6 +447,8 @@ export function App({ transport }: AppProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, selectedProject]);
+
+  openRunRef.current = openRun;
 
   /** Retoma a sessão com `/compact`: o Claude Code compacta o contexto e devolve o resumo (experimental). */
   const compactSession = async (sessionId: string) => {
