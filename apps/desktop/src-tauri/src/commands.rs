@@ -139,6 +139,10 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
             .map_err(err)?,
         None => input.options,
     };
+    state
+        .store
+        .apply_project_defaults(&project.id, &mut options)
+        .map_err(err)?;
     options.policy_hooks = Some(true);
     options.memory.get_or_insert_with(Default::default);
     options.sandbox = state.store.sandbox_for_project(&project).map_err(err)?;

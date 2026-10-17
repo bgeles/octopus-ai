@@ -153,5 +153,46 @@ describe("Harness · MCP servers", () => {
     expect(Object.keys(run!.options.mcpServers ?? {})).toEqual(["docs"]);
     expect(run!.options.plugins).toEqual([{ type: "local", path: `/mock/data/projects/proj_demo/harness/plugin-${member!.profile.id}`, skipMcpDiscovery: true }]);
   });
+
+  it("perfil de execução: defaults do projeto entram no preview com origem e o JSON não traz segredos", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await transport.invoke("update_project_auth", { projectId: "proj_demo", authMode: "api_key" });
+    await transport.invoke("set_project_api_key", { projectId: "proj_demo", apiKey: "sk-ant-teste-preview" });
+    await transport.invoke("save_mcp_server", { input: { projectId: null, name: "docs", config: { type: "stdio", command: "npx" } } });
+
+    await user.click(screen.getByRole("button", { name: "Harness" }));
+    await user.click(await screen.findByRole("tab", { name: "Perfil de execução" }));
+    const defaultsBox = await screen.findByTestId("project-defaults");
+    await user.type(within(defaultsBox).getByLabelText("Modelo padrão do projeto"), "claude-sonnet-5-5");
+    await user.tab();
+    await user.type(within(defaultsBox).getByLabelText("Máximo de turnos do projeto"), "25");
+    await user.tab();
+    await waitFor(async () => expect((await transport.invoke("get_settings", {}))["project.proj_demo.defaults"]).toEqual({ model: "claude-sonnet-5-5", maxTurns: 25 }));
+
+    await user.click(screen.getByRole("button", { name: "Gerar preview" }));
+    const notes = await screen.findAllByTestId("preview-note");
+    const byField = (f: string) => notes.filter((n) => n.getAttribute("data-field") === f).map((n) => n.getAttribute("data-origin"));
+    expect(byField("model")).toEqual(["projeto"]);
+    expect(byField("maxTurns")).toEqual(["projeto"]);
+    expect(byField("policyHooks")).toEqual(["segurança"]);
+    expect(byField("mcpServers")).toEqual(["harness"]);
+    expect(notes.find((n) => n.getAttribute("data-field") === "mcpServers")).toHaveTextContent("octopus (sdk), docs (stdio)");
+    expect(notes.find((n) => n.getAttribute("data-field") === "env")).toHaveTextContent("••• do Keychain");
+    expect(screen.getAllByTestId("hook-row").map((r) => r.textContent)).toEqual(expect.arrayContaining([expect.stringContaining("PreToolUse"), expect.stringContaining("PostToolUse")]));
+    await user.click(screen.getByRole("button", { name: "JSON completo (segredos redigidos)" }));
+    const json = screen.getByTestId("preview-json").textContent ?? "";
+    expect(json).toContain('"model": "claude-sonnet-5-5"');
+    expect(json).not.toContain("sk-ant-teste-preview");
+    expect((await transport.invoke("list_runs", { projectId: "proj_demo" })).length).toBe(0);
+
+    // O default de modelo vale no run avulso.
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
+    await user.type(screen.getByLabelText("Instrução para o agente"), "oi");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    await screen.findByTestId("approval-card");
+    const [run] = await transport.invoke("list_runs", { projectId: "proj_demo" });
+    expect(run?.options.model).toBe("claude-sonnet-5-5");
+  });
 });
 

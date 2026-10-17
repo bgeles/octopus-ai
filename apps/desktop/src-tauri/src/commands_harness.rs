@@ -5,6 +5,7 @@ use tauri::State;
 use crate::commands::AppState;
 use crate::commands_security::audit;
 use crate::store::harness::{McpServer, McpServerInput};
+use crate::store::preview::RunPreview;
 use crate::store::skills::{Skill, SkillInput};
 
 type CmdResult<T> = Result<T, String>;
@@ -177,4 +178,36 @@ pub fn save_skill(state: State<'_, AppState>, input: SkillInput) -> CmdResult<Sk
         serde_json::json!({"skillId": skill.id, "name": skill.name, "path": skill.path}),
     );
     Ok(skill)
+}
+
+// ---------------------------------------------------------------------- perfil de execução
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewInput {
+    pub project_id: String,
+    #[serde(default)]
+    pub agent_profile_id: Option<String>,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub options: crate::protocol::RunOptions,
+}
+
+/// Preview, sem efeitos colaterais, do `RunOptions` que um run receberia (segredos redigidos).
+#[tauri::command]
+pub fn preview_run_options(
+    state: State<'_, AppState>,
+    input: PreviewInput,
+) -> CmdResult<RunPreview> {
+    state
+        .store
+        .preview_run_options(
+            state.secrets.as_ref(),
+            &input.project_id,
+            input.agent_profile_id.as_deref(),
+            &input.prompt,
+            &input.options,
+        )
+        .map_err(err)
 }

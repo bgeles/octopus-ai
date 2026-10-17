@@ -292,17 +292,14 @@ impl Store {
             .context("skill gravada não apareceu na varredura")
     }
 
-    /// Monta o plugin local com as skills ativas que o Claude Code não carrega sozinho (as do
-    /// usuário sempre; as do projeto só quando `settingSources` exclui `project`). `None` sem skills.
-    pub fn materialize_plugin(
+    /// Skills que entram no plugin local: ativas, escolhidas pelo membro (ou todas) e que o Claude
+    /// Code não carrega sozinho (as do projeto só quando `settingSources` exclui `project`).
+    pub fn plugin_skills(
         &self,
         project_id: &str,
         agent_profile_id: Option<&str>,
         setting_sources: Option<&[SettingSource]>,
-    ) -> Result<Option<SdkPlugin>> {
-        let Some(data_dir) = &self.data_dir else {
-            return Ok(None);
-        };
+    ) -> Result<Vec<Skill>> {
         let chosen: Option<Vec<String>> = match agent_profile_id {
             Some(id) => {
                 let conn = self.conn.lock().expect("store mutex");
@@ -319,14 +316,27 @@ impl Store {
         };
         let project_auto_loaded =
             setting_sources.is_none_or(|s| s.contains(&SettingSource::Project));
-        let skills: Vec<Skill> = self
+        Ok(self
             .list_skills(project_id)?
             .into_iter()
             .filter(|s| s.enabled)
             .filter(|s| chosen.as_ref().is_none_or(|ids| ids.contains(&s.id)))
             .filter(|s| !(project_auto_loaded && s.project_id.is_some()))
             .filter(|s| Path::new(&s.path).join("SKILL.md").is_file())
-            .collect();
+            .collect())
+    }
+
+    /// Monta o plugin local com as skills de `plugin_skills`. `None` sem skills.
+    pub fn materialize_plugin(
+        &self,
+        project_id: &str,
+        agent_profile_id: Option<&str>,
+        setting_sources: Option<&[SettingSource]>,
+    ) -> Result<Option<SdkPlugin>> {
+        let Some(data_dir) = &self.data_dir else {
+            return Ok(None);
+        };
+        let skills = self.plugin_skills(project_id, agent_profile_id, setting_sources)?;
         let plugin_dir = data_dir
             .join("projects")
             .join(project_id)

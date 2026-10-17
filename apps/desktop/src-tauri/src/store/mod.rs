@@ -11,6 +11,7 @@ pub mod memory;
 pub mod models;
 pub mod orchestration;
 pub mod policy;
+pub mod preview;
 pub mod security;
 pub mod skills;
 pub mod team;

@@ -380,6 +380,7 @@ pub fn run() {
             commands_harness::set_skill_enabled,
             commands_harness::read_skill,
             commands_harness::save_skill,
+            commands_harness::preview_run_options,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI");

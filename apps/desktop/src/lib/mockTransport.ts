@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, Project, Role, Run, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, Role, Run, RunOptions, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -391,9 +391,9 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const describeMcp = (c: McpServer["config"]) => (c.type === "stdio" ? c.command : c.url);
   const normMock = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   /** Brief do run, como o core: handoff pendente da task (claim único) + páginas que casam com o pedido. */
-  const buildBriefMock = (projectId: string, taskId: string | null, prompt: string, runId: string): { text: string; items: string[] } | null => {
+  const buildBriefMock = (projectId: string, taskId: string | null, prompt: string, runId: string, claim = true): { text: string; items: string[] } | null => {
     const pending = handoffs.find((h) => h.projectId === projectId && !h.consumedAt && (taskId ? h.taskId === taskId : h.taskId === null));
-    if (pending) {
+    if (pending && claim) {
       pending.consumedByRunId = runId;
       pending.consumedAt = new Date().toISOString();
     }
@@ -424,8 +424,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       for (const p of relevant) {
         text += `- **${p.title}** (${p.kind}): ${p.bodyMd.slice(0, 400)}\n`;
         items.push(p.title);
-        p.accessCount += 1;
-        p.score = Math.min(1, p.score + 0.05);
+        if (claim) {
+          p.accessCount += 1;
+          p.score = Math.min(1, p.score + 0.05);
+        }
       }
     }
     text += "\nUse a tool memory_search para mais contexto, memory_write para registrar decisões/armadilhas e memory_handoff para deixar uma nota ao próximo run se não terminar.\n";
@@ -866,6 +868,11 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           }
         : requested;
       if (options.agents && Object.keys(options.agents).length === 0) delete options.agents;
+      {
+        const defaults = (settings[`project.${project.id}.defaults`] as { model?: string | null; maxTurns?: number | null } | undefined) ?? {};
+        if (!options.model && defaults.model) options.model = defaults.model;
+        if (!options.maxTurns && defaults.maxTurns) options.maxTurns = defaults.maxTurns;
+      }
       {
         const chosen = member?.profile.mcpServerIds ?? null;
         const active = mcpServers.filter((s) => s.enabled && (s.projectId === null || s.projectId === project.id) && (!chosen || chosen.includes(s.id)));
@@ -1459,6 +1466,82 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       skillFiles.set(skill.id, content);
       audit("você", input.skillId ? "harness.skill.updated" : "harness.skill.created", project.id, { skillId: skill.id, name: skill.name, path: skill.path });
       return { ...skill };
+    },
+    preview_run_options: async ({ input }) => {
+      const project = projects.find((p) => p.id === input.projectId);
+      if (!project) throw new Error(`Projeto ${input.projectId} não encontrado`);
+      const member = input.agentProfileId ? findMember(input.agentProfileId) : undefined;
+      if (input.agentProfileId && !member) throw new Error(`Membro ${input.agentProfileId} não encontrado`);
+      const requested = input.options ?? {};
+      const notes: PreviewNote[] = [];
+      const note = (field: string, value: string, origin: string) => notes.push({ field, value, origin });
+      const options: RunOptions = { ...requested };
+      if (member) {
+        options.systemPromptAppend = `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`;
+        options.model = requested.model ?? member.profile.model ?? member.role.defaultModel ?? undefined;
+        options.permissionMode = requested.permissionMode ?? member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined;
+        options.allowedTools = requested.allowedTools ?? member.profile.allowedTools ?? member.role.defaultTools ?? undefined;
+        options.maxTurns = requested.maxTurns ?? member.profile.maxTurns ?? undefined;
+        options.maxBudgetUsd = requested.maxBudgetUsd ?? member.profile.maxBudgetUsd ?? undefined;
+        if (options.model) note("model", options.model, requested.model ? "pedido" : member.profile.model ? "membro" : "cargo");
+        if (options.permissionMode) note("permissionMode", options.permissionMode, requested.permissionMode ? "pedido" : member.profile.permissionMode ? "membro" : "cargo");
+        if (options.allowedTools) note("allowedTools", options.allowedTools.join(", "), requested.allowedTools ? "pedido" : member.profile.allowedTools ? "membro" : "cargo");
+        if (options.maxTurns) note("maxTurns", String(options.maxTurns), requested.maxTurns ? "pedido" : "membro");
+        if (options.maxBudgetUsd) note("maxBudgetUsd", options.maxBudgetUsd.toFixed(2), requested.maxBudgetUsd ? "pedido" : "membro");
+        note("systemPrompt.append", `${options.systemPromptAppend.length} caracteres (cargo + membro)`, "cargo + membro");
+      } else {
+        if (options.model) note("model", options.model, "pedido");
+        if (options.permissionMode) note("permissionMode", options.permissionMode, "pedido");
+        if (options.maxTurns) note("maxTurns", String(options.maxTurns), "pedido");
+      }
+      const defaults = (settings[`project.${project.id}.defaults`] as { model?: string | null; maxTurns?: number | null } | undefined) ?? {};
+      if (!options.model && defaults.model) {
+        options.model = defaults.model;
+        note("model", defaults.model, "projeto");
+      }
+      if (!options.maxTurns && defaults.maxTurns) {
+        options.maxTurns = defaults.maxTurns;
+        note("maxTurns", String(defaults.maxTurns), "projeto");
+      }
+      if (!options.model) note("model", "padrão do Claude Code", "padrão");
+      options.policyHooks = true;
+      const activeRules = rules.filter((r) => r.enabled && (r.scope === "global" || r.projectId === project.id));
+      note("policyHooks", `true · ${activeRules.length} regras ativas (${activeRules.filter((r) => r.scope === "global").length} globais, ${activeRules.filter((r) => r.scope !== "global").length} do projeto)`, "segurança");
+      const profile = sandboxProfiles.find((sp) => sp.id === (project.sandboxProfileId ?? "sandbox_dev"));
+      if (profile) options.sandbox = profile.settings;
+      note("sandbox", profile?.name ?? "Dev padrão", "segurança");
+      const brief = buildBriefMock(project.id, null, input.prompt ?? "", "preview", false);
+      options.memory = { capture: true, tools: true, ...(brief ? { brief: brief.text, briefItems: brief.items } : {}) };
+      note("memory.brief", brief ? `${brief.text.length} caracteres · ${brief.items.join(" · ")}` : "nada ainda (memória vazia para este pedido)", "memória");
+      note("memory.capture", "observações por hooks", "memória");
+      const sources = settings[`project.${project.id}.settingSources`];
+      if (Array.isArray(sources)) options.settingSources = sources as RunOptions["settingSources"];
+      note("settingSources", !Array.isArray(sources) ? "padrão do Claude Code (usuário + projeto)" : sources.length === 0 ? "nenhuma (sem CLAUDE.md nem rules)" : sources.join(", "), "contexto");
+      const chosen = member?.profile.mcpServerIds ?? null;
+      const active = mcpServers.filter((s) => s.enabled && (s.projectId === null || s.projectId === project.id) && (!chosen || chosen.includes(s.id)));
+      if (active.length) options.mcpServers = Object.fromEntries(active.map((s) => [s.name, s.config]));
+      note("mcpServers", ["octopus (sdk)", ...active.map((s) => `${s.name} (${s.transport})`)].join(", "), "harness");
+      const chosenSkills = member?.profile.skillIds ?? null;
+      const projectAuto = !Array.isArray(sources) || sources.includes("project");
+      const pluginSkills = skills.filter((s) => s.enabled && (s.projectId === null || s.projectId === project.id) && (!chosenSkills || chosenSkills.includes(s.id)) && !(projectAuto && s.projectId !== null)).map((s) => s.name);
+      note("plugins", pluginSkills.length ? `1 local · skills ${pluginSkills.join(", ")}` : "nenhum plugin (skills do projeto já entram pelo settingSources)", "harness");
+      if (project.authMode === "api_key") {
+        const has = secrets.has(project.id);
+        options.env = { ANTHROPIC_API_KEY: has ? "••• (Keychain)" : "(sem chave no Keychain!)" };
+        note("env", `ANTHROPIC_API_KEY=${has ? "••• do Keychain" : "AUSENTE: o run vai falhar"}`, "autenticação");
+      } else {
+        note("env", "login do Claude Code (sem chave)", "autenticação");
+      }
+      const hooks: HookInfo[] = [{ event: "PreToolUse", description: `Motor de política em Rust (${activeRules.length} regras ativas): nega, pergunta ou deixa passar antes de cada ferramenta`, origin: "Segurança · Política" }];
+      if (brief) hooks.push({ event: "UserPromptSubmit", description: "Injeta o brief de memória (handoff pendente, páginas relevantes, pins) uma vez por run", origin: "Memória · Contexto" });
+      hooks.push(
+        { event: "PostToolUse", description: "Observação por ferramenta (sanitizada) para a memória", origin: "Memória" },
+        { event: "Stop · SubagentStop", description: "Resumo do turno e dos subagentes vira observação", origin: "Memória" },
+        { event: "PreCompact · PostCompact", description: "Registra compactações e o resumo gerado", origin: "Memória · Contexto" },
+        { event: "InstructionsLoaded", description: "Lista CLAUDE.md e rules carregados", origin: "Memória · Contexto" },
+        { event: "SessionEnd", description: "Fecha o run; consolidação da memória em seguida", origin: "Memória" },
+      );
+      return { options, notes, hooks, pluginSkills };
     },
     list_memory_handoffs: async ({ projectId }) => handoffs.filter((h) => h.projectId === projectId).sort((a, b) => Number(Boolean(a.consumedAt)) - Number(Boolean(b.consumedAt)) || b.createdAt.localeCompare(a.createdAt)).map((h) => ({ ...h })),
     rebuild_memory_index: async ({ projectId }) => {

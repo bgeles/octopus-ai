@@ -1,7 +1,7 @@
 import { Plus, RefreshCw, Server, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { Transport } from "../lib/transport";
-import type { McpServer, McpServerConfig, McpServerInput, Project, Skill } from "../lib/types";
+import { KNOWN_MODELS, projectDefaultsKey, type McpServer, type McpServerConfig, type McpServerInput, type Project, type ProjectDefaults, type RunPreview, type Skill, type TeamMember } from "../lib/types";
 import { formatRelative } from "./SessionsView";
 
 export type HarnessTab = "mcp" | "skills" | "profile";
@@ -12,28 +12,55 @@ type HarnessViewProps = {
   availableTabs?: HarnessTab[];
 };
 
-export function HarnessView({ project, transport, availableTabs = ["mcp", "skills"] }: HarnessViewProps) {
+export function HarnessView({ project, transport, availableTabs = ["mcp", "skills", "profile"] }: HarnessViewProps) {
   const [tab, setTab] = useState<HarnessTab>("mcp");
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const [editing, setEditing] = useState<McpServer | "new" | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [skills, setSkills] = useState<Skill[] | null>(null);
   const [skillEditor, setSkillEditor] = useState<{ skillId: string | null; name: string; content: string } | null>(null);
+  const [defaults, setDefaults] = useState<ProjectDefaults | null>(null);
+  const [team, setTeam] = useState<TeamMember[]>([]);
+  const [previewAgent, setPreviewAgent] = useState<string>("");
+  const [previewPrompt, setPreviewPrompt] = useState("crie a próxima migração do banco");
+  const [preview, setPreview] = useState<RunPreview | null>(null);
+  const [showJson, setShowJson] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const projectId = project?.id ?? null;
 
   const refresh = useCallback(async () => {
     setServers(await transport.invoke("list_mcp_servers", { projectId }));
-    if (projectId) setSkills(await transport.invoke("list_skills", { projectId }));
-    else setSkills([]);
+    if (projectId) {
+      setSkills(await transport.invoke("list_skills", { projectId }));
+      const [settings, members] = await Promise.all([transport.invoke("get_settings", {}), transport.invoke("list_team", { projectId }).catch(() => [] as TeamMember[])]);
+      const raw = settings[projectDefaultsKey(projectId)] as ProjectDefaults | undefined;
+      setDefaults(raw ?? {});
+      setTeam(members);
+    } else {
+      setSkills([]);
+      setDefaults({});
+      setTeam([]);
+    }
   }, [transport, projectId]);
+
+  const saveDefaults = async (next: ProjectDefaults) => {
+    if (!projectId) return;
+    const clean: ProjectDefaults = {};
+    if (next.model) clean.model = next.model;
+    if (next.maxTurns) clean.maxTurns = next.maxTurns;
+    await transport.invoke("set_setting", { key: projectDefaultsKey(projectId), value: Object.keys(clean).length ? clean : null });
+    setDefaults(clean);
+    setPreview(null);
+  };
 
   useEffect(() => {
     setServers(null);
     setSkills(null);
     setEditing(null);
     setSkillEditor(null);
+    setPreview(null);
+    setPreviewAgent("");
     void refresh().catch((e) => setError(String(e)));
   }, [refresh]);
 
@@ -281,6 +308,112 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
               <span>Escolha uma skill para ver ou editar o SKILL.md, ou crie uma nova dentro do projeto.</span>
             </div>
           )}
+        </div>
+      )}
+
+      {tab === "profile" && (
+        <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] gap-5 max-[900px]:grid-cols-1">
+          <section aria-label="Preview do run" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="run-preview">
+            <div className="flex flex-col gap-0.5">
+              <h2 className="m-0 font-display text-sm font-semibold">O que vai para o SDK</h2>
+              <span className="text-xs text-slate">cada camada deixa sua marca: cargo → membro → projeto → segurança → memória → harness. Nada aqui é editável; mude na origem. Sem efeitos colaterais (não consome handoff nem cria run).</span>
+            </div>
+            <form
+              className="flex flex-wrap items-end gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void run(async () => {
+                  if (!projectId) return;
+                  setPreview(await transport.invoke("preview_run_options", { input: { projectId, agentProfileId: previewAgent || null, prompt: previewPrompt, options: { includePartialMessages: true } } }));
+                });
+              }}
+            >
+              <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                Executar como
+                <select aria-label="Membro do preview" value={previewAgent} onChange={(e) => setPreviewAgent(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-2 py-1.5 text-[13px] text-ink">
+                  <option value="">Run avulso (sem membro)</option>
+                  {team.map((m) => (
+                    <option key={m.profile.id} value={m.profile.id}>
+                      {m.profile.name} · {m.role.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-xs font-medium text-slate">
+                Pedido de exemplo
+                <input aria-label="Pedido do preview" value={previewPrompt} onChange={(e) => setPreviewPrompt(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px] text-ink" />
+              </label>
+              <button type="submit" disabled={!projectId} className="rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold text-paper disabled:opacity-40">
+                Gerar preview
+              </button>
+            </form>
+            {preview && (
+              <>
+                <div className="flex flex-col" data-testid="preview-notes">
+                  {preview.notes.map((n, i) => (
+                    <div key={`${n.field}_${i}`} className="grid grid-cols-[150px_minmax(0,1fr)_auto] items-baseline gap-3 border-b hairline py-1.5 text-[13px] last:border-b-0" data-testid="preview-note" data-field={n.field} data-origin={n.origin}>
+                      <span className="text-slate">{n.field}</span>
+                      <code className="truncate font-mono text-xs" title={n.value}>
+                        {n.value}
+                      </code>
+                      <span className="eyebrow text-right text-slate">{n.origin}</span>
+                    </div>
+                  ))}
+                </div>
+                <button type="button" aria-expanded={showJson} onClick={() => setShowJson((v) => !v)} className="self-start text-xs text-slate underline-offset-2 hover:underline">
+                  {showJson ? "Esconder JSON" : "JSON completo (segredos redigidos)"}
+                </button>
+                {showJson && (
+                  <pre className="m-0 max-h-80 overflow-auto rounded-md bg-sidebar p-3 font-mono text-[11px] leading-relaxed text-sidebar-ink" data-testid="preview-json">
+                    {JSON.stringify(preview.options, null, 2)}
+                  </pre>
+                )}
+              </>
+            )}
+          </section>
+          <div className="flex min-w-0 flex-col gap-5">
+            <section aria-label="Defaults do projeto" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="project-defaults">
+              <div className="flex flex-col gap-0.5">
+                <h2 className="m-0 font-display text-sm font-semibold">Defaults do projeto</h2>
+                <span className="text-xs text-slate">valem para runs avulsos e para membros sem valor próprio (modelo) e para as tasks do board (turnos)</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                  Modelo padrão
+                  <input aria-label="Modelo padrão do projeto" list="known-models" value={defaults?.model ?? ""} placeholder="padrão do Claude Code" onChange={(e) => setDefaults({ ...(defaults ?? {}), model: e.target.value || null })} onBlur={() => void run(() => saveDefaults(defaults ?? {}))} className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 font-mono text-xs text-ink" />
+                  <datalist id="known-models">
+                    {KNOWN_MODELS.map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
+                </label>
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                  Máx. turnos por run do board
+                  <input aria-label="Máximo de turnos do projeto" inputMode="numeric" value={defaults?.maxTurns ?? ""} placeholder="40" onChange={(e) => setDefaults({ ...(defaults ?? {}), maxTurns: e.target.value ? Number(e.target.value) : null })} onBlur={() => void run(() => saveDefaults(defaults ?? {}))} className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 font-mono text-xs text-ink" />
+                </label>
+              </div>
+              <span className="text-xs text-slate">Permissões, sandbox e orçamento ficam em Segurança; fontes de instruções em Memória → Contexto.</span>
+            </section>
+            <section aria-label="Hooks ativos" className="flex flex-col gap-2 rounded-xl border hairline bg-surface p-5" data-testid="hooks-list">
+              <div className="flex flex-col gap-0.5">
+                <h2 className="m-0 font-display text-sm font-semibold">Hooks declarativos ativos</h2>
+                <span className="text-xs text-slate">o Octopus registra os hooks do SDK por você; cada linha diz onde se configura</span>
+              </div>
+              {preview ? (
+                <ul className="m-0 flex list-none flex-col p-0">
+                  {preview.hooks.map((h) => (
+                    <li key={h.event} className="grid grid-cols-[150px_minmax(0,1fr)_auto] items-baseline gap-3 border-b hairline py-2 text-[13px] last:border-b-0" data-testid="hook-row">
+                      <code className="font-mono text-xs">{h.event}</code>
+                      <span>{h.description}</span>
+                      <span className="eyebrow text-right text-slate">{h.origin}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="m-0 text-[13px] text-slate">Gere um preview para ver os hooks que entram nesse run.</p>
+              )}
+            </section>
+          </div>
         </div>
       )}
 

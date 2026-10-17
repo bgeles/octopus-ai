@@ -469,7 +469,16 @@ export type Commands = {
   set_skill_enabled: { args: { skillId: string; enabled: boolean }; result: Skill };
   read_skill: { args: { skillId: string }; result: string };
   save_skill: { args: { input: SkillInput }; result: Skill };
+  /** Preview, sem efeitos colaterais, do RunOptions que um run receberia (segredos redigidos). */
+  preview_run_options: { args: { input: { projectId: string; agentProfileId?: string | null; prompt?: string; options?: RunOptions } }; result: RunPreview };
 };
+
+export type ProjectDefaults = { model?: string | null; maxTurns?: number | null };
+export const projectDefaultsKey = (projectId: string) => `project.${projectId}.defaults`;
+export const KNOWN_MODELS = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+export type PreviewNote = { field: string; value: string; origin: string };
+export type HookInfo = { event: string; description: string; origin: string };
+export type RunPreview = { options: RunOptions; notes: PreviewNote[]; hooks: HookInfo[]; pluginSkills: string[] };
 
 export type Skill = {
   id: string;
