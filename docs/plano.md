@@ -242,8 +242,12 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 - **04 — Contexto**: pins (arquivo do projeto, página, texto; sempre no brief), `settingSources` por projeto, alertas em 70%/90% com "Compactar agora" (`/compact` numa retomada, experimental), histórico de compactações e instruções carregadas (hook `InstructionsLoaded`), aba Contexto com o que entrou no último run.
 - Fora: git interno da wiki (há versões no banco e os `.md` podem ir ao git do usuário), consolidação de contradições além da marcação textual pelo Haiku, memória entre projetos.
 
-### Fase 5 — Skills, MCPs e harness
-- Registros, health check, editor de skills, editor de hooks declarativos, preview do `options` final.
+### Fase 5 — Skills, MCPs e harness (concluída em 16/10/2026 na branch `fase-5/skills-mcps-harness`)
+- Pranchas no Design antes das telas: `Harness.dc.html` (MCPs e skills) e `HarnessPreview.dc.html` (perfil de execução, hooks ativos e preview do `options`).
+- **01 — MCP servers**: `McpServerConfig` (stdio | sse | http) e `RunOptions.mcpServers` no protocolo; request `mcp.check` (o sidecar abre o servidor com `@modelcontextprotocol/sdk`, faz o handshake e lista as tools, timeout 15 s); migration 0013 (`mcp_server` global/projeto, `agent_profile.mcp_server_ids_json`); saúde da última checagem; export/import do backup sem valores de env/headers; nav Harness com a aba MCPs.
+- **02 — Skills**: `RunOptions.plugins`; migration 0014 (`skill`, `agent_profile.skill_ids_json`); varredura de `.claude/skills` do projeto e `~/.claude/skills` (frontmatter), interruptores, editor e criação de `SKILL.md` confinada ao projeto; plugin local em `<dados>/projects/<id>/harness/plugin-<membro|project>` com as skills ativas que o Claude Code não carrega sozinho; ficha do membro escolhe MCP servers e skills.
+- **03 — Perfil de execução**: defaults do projeto (`project.<id>.defaults`: modelo, turnos) aplicados em runs avulsos e no scheduler; `preview_run_options` monta o `RunOptions` final sem efeitos colaterais, com a origem de cada campo e os hooks declarativos ativos; aba "Perfil de execução".
+- Fora: editor livre de hooks arbitrários do SDK (os hooks continuam declarativos: política, memória, brief), `effort` por run (não exposto pelo protocolo), marketplace/instalação de plugins remotos, tool policies por MCP server.
 
 ### Fase 6 — Isolamento forte (opcional)
 - Runner em container (Apple `container` ou Docker) para tasks não confiáveis.
@@ -258,7 +262,7 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 - **Fase 2**: apagar o banco, abrir o app e concluir o onboarding (as 3 checagens verdes, projeto criado); exportar as configurações, apagar o banco de novo e restaurar o backup recria projetos, time e preferências; montar um time com 3 membros (Planejador → Implementador → Revisor) e ver o organograma com os três ligados ao gestor; abrir a ficha do Implementador e conferir que as responsabilidades do cargo entram no `system/init`; criar workflow de 3 estágios com 2 tasks dependentes; scheduler só inicia a segunda após a primeira ficar `done`; gate humano segura a task em `waiting_approval`; worktree criado em `.octopus/worktrees/<task>`.
 - **Fase 3**: com perfil `estrito`, pedir `curl https://example.com` falha (host fora da allowlist) e `cat ~/.ssh/id_rsa` falha; pedir `rm -rf /tmp/x` fora do projeto é negado pelo motor Rust com motivo visível; alterar manualmente uma linha do audit log quebra a verificação de hash.
 - **Fase 4**: após um run, páginas aparecem em `memory/wiki`; novo run na mesma task recebe o handoff; busca na UI encontra a decisão registrada; medidor de contexto sobe conforme o run avança e registra a compactação. Verificado com o Claude real (`cargo test real_sidecar -- --ignored`): o agente encontra no brief a palavra secreta gravada na memória e a devolve via `task_update`; com `memory.consolidation = haiku`, o run de consolidação grava páginas sem pedir permissão (US$ 0,01).
-- **Fase 5**: adicionar um MCP server inválido mostra erro de health; agente com skill vinculada a vê no `system/init`.
+- **Fase 5**: adicionar um MCP server inválido mostra erro de health (coberto pelo mock e pelo fake sidecar; o teste real com um MCP de verdade fica para quando houver um servidor disponível); agente com skill vinculada a vê no `system/init` (o plugin local entra em `options.plugins`; verificado por teste unitário do plugin montado, não com o Claude real).
 - Testes automatizados: `cargo test` (policy engine, hash chain, scheduler/DAG, FTS), `vitest` no sidecar (parser de mensagens, protocolo), Playwright em 2 fluxos críticos (iniciar run, aprovar permissão).
 
 ## Riscos e mitigações
