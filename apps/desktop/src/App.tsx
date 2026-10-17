@@ -940,6 +940,10 @@ export function App({ transport }: AppProps) {
             await afterConfigChange();
           }}
           onRevealSnapshot={(id) => transport.invoke("config_backup_reveal", { id }).then(() => undefined)}
+          onCheckUpdate={() => transport.invoke("check_update", {})}
+          onInstallUpdate={async () => {
+            await transport.invoke("install_update", {});
+          }}
           onRedoOnboarding={() => setSetting("onboarding.completedAt", null)}
           runtimeLabel={runtime ? `agent-runtime ${runtime.runtimeVersion} · SDK ${runtime.sdkVersion} · protocolo ${runtime.protocolVersion}` : "…"}
         />

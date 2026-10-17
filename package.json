@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "npm run tauri dev -w @octopus/desktop",
     "build": "npm run build --workspaces --if-present",
-    "build:app": "npm run tauri build -w @octopus/desktop",
+    "build:app": "node scripts/build-app.mjs",
     "test": "npm run test --workspaces --if-present",
     "test:rust": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "typecheck": "npm run typecheck --workspaces --if-present",

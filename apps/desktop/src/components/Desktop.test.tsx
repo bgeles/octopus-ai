@@ -42,4 +42,26 @@ describe("Menu bar e notificações", () => {
     await waitFor(() => expect(within(screen.getByTestId("notification-prefs")).getByRole("switch", { name: "Run concluído ou falhou" })).toHaveAttribute("aria-checked", "true"));
     expect((await transport.invoke("get_settings", {}))["notifications.runs"]).toBe(true);
   });
+
+  it("atualizações: sem endereço não procura; com manifesto mostra a versão nova e instala", async () => {
+    const { transport, user } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Configurações" }));
+    const box = await screen.findByTestId("updates");
+    await user.click(within(box).getByRole("button", { name: "Verificar agora" }));
+    await waitFor(() => expect(within(box).getByTestId("update-status")).toHaveTextContent("Versão 0.1.0 · atualizações não configuradas"));
+
+    await user.type(within(box).getByLabelText("Endereço do manifesto de atualização"), "http://releases.empresa.com/latest.json");
+    await user.click(within(box).getByRole("button", { name: "Verificar agora" }));
+    expect(await within(box).findByRole("alert")).toHaveTextContent("Use https://");
+
+    await user.clear(within(box).getByLabelText("Endereço do manifesto de atualização"));
+    await user.type(within(box).getByLabelText("Endereço do manifesto de atualização"), "https://releases.empresa.com/nova/latest.json");
+    await user.click(within(box).getByRole("button", { name: "Verificar agora" }));
+    await waitFor(() => expect(within(box).getByTestId("update-status")).toHaveTextContent("Versão 0.2.0 disponível (instalada: 0.1.0)"));
+    expect((await transport.invoke("get_settings", {}))["updates.endpoint"]).toBe("https://releases.empresa.com/nova/latest.json");
+    await user.click(within(box).getByRole("button", { name: "Instalar e reiniciar" }));
+    await waitFor(async () => expect((await transport.invoke("list_audit_events", { limit: 10 })).some((e) => e.kind === "app.updated")).toBe(true));
+  });
 });
+

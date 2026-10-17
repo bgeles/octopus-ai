@@ -471,7 +471,14 @@ export type Commands = {
   save_skill: { args: { input: SkillInput }; result: Skill };
   /** Preview, sem efeitos colaterais, do RunOptions que um run receberia (segredos redigidos). */
   preview_run_options: { args: { input: { projectId: string; agentProfileId?: string | null; prompt?: string; options?: RunOptions } }; result: RunPreview };
+  /** Consulta o manifesto latest.json em `updates.endpoint` (sem endereço: configured=false). */
+  check_update: { args: Record<string, never>; result: UpdateInfo };
+  /** Baixa, verifica a assinatura, instala e reinicia. */
+  install_update: { args: Record<string, never>; result: null };
 };
+
+export type UpdateInfo = { configured: boolean; currentVersion: string; available: boolean; version: string | null; notes: string | null; date: string | null };
+export const UPDATES_ENDPOINT_SETTING = "updates.endpoint";
 
 export type ProjectDefaults = { model?: string | null; maxTurns?: number | null };
 export const projectDefaultsKey = (projectId: string) => `project.${projectId}.defaults`;

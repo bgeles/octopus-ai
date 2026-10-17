@@ -16,6 +16,7 @@ pub mod secrets;
 pub mod sidecar;
 pub mod store;
 pub mod tray;
+pub mod updates;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -293,6 +294,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Fechar a janela não encerra os runs: o app continua na menu bar.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -406,6 +408,8 @@ pub fn run() {
             commands_harness::read_skill,
             commands_harness::save_skill,
             commands_harness::preview_run_options,
+            updates::check_update,
+            updates::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("erro ao iniciar o Octopus AI")

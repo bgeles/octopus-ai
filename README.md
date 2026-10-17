@@ -70,13 +70,17 @@ Regras: PRs de iteração entram na branch da fase com a suíte de testes verde 
 | Segurança | **Política**: perfil de sandbox do projeto (Estrito, Dev padrão, Somente leitura → `options.sandbox` do SDK), autenticação do projeto (login do Claude Code ou API key guardada no Keychain), regras `PreToolUse` globais e do projeto (deny/ask; as do projeto só apertam) com simulador. **Orçamentos**: aviso e limite mensais por projeto e por membro, turnos por run; limite esgotado bloqueia novos runs e tasks. **Auditoria**: eventos encadeados por SHA-256 (runs, aprovações, hooks, configurações, segredos sem valor), verificação de integridade e exportação JSONL. |
 | Configurações | Checagem do ambiente (Node, runtime, login do Claude Code), autenticação padrão, tema, backup local das configurações (exportar/importar, cópias automáticas, restaurar com prévia), refazer onboarding. |
 
-## Build de teste (.app / .dmg)
+## Build e distribuição (.app / .dmg / atualizações)
 
 ```bash
 npm run build:app
 ```
 
-Gera `apps/desktop/src-tauri/target/release/bundle/macos/Octopus AI.app` e o `.dmg` em `bundle/dmg/`. O `beforeBuildCommand` compila o protocolo, o sidecar e a UI e roda `scripts/bundle-sidecar.mjs`, que copia o sidecar e só as dependências de runtime (incluindo o binário nativo do Claude do Agent SDK) para `src-tauri/sidecar-bundle/`, empacotado como resource (`Contents/Resources/sidecar/`). Em release o app roda esse sidecar com o `node` da máquina: procura no PATH e nos caminhos usuais (Homebrew, instalador oficial, Volta, nvm), ou no que `OCTOPUS_NODE` indicar. Node e o login do Claude Code continuam pré-requisitos; o binário único do sidecar fica para a Fase 7. O build não é assinado: na primeira abertura, use botão direito → Abrir.
+O script `scripts/build-app.mjs` roda `tauri build` e gera `Octopus AI.app` e o `.dmg` em `apps/desktop/src-tauri/target/release/bundle/`. O `beforeBuildCommand` compila protocolo, sidecar e UI e copia o sidecar com as dependências de runtime para `Contents/Resources/sidecar/`. Em release o sidecar roda com o `node` da máquina (PATH, Homebrew, instalador oficial, Volta, nvm ou `OCTOPUS_NODE`). Node e o login do Claude Code continuam pré-requisitos.
+
+- **Atualizações assinadas**: com a chave em `~/.tauri/octopus-updater.key` (fora do repositório; a pública está em `tauri.conf.json`), o build gera `release/` com o `.app.tar.gz`, a assinatura e o `latest.json`. Publique a pasta num host estático e informe a URL do `latest.json` em Configurações → Atualizações. `OCTOPUS_RELEASE_BASE_URL` define a URL base dos pacotes no manifesto. Sem a chave, o build sai sem artefatos de update.
+- **Assinatura de código**: por padrão ad-hoc (uso local; na primeira abertura, botão direito → Abrir). Para distribuir a terceiros, defina `APPLE_SIGNING_IDENTITY="Developer ID Application: …"` e, para notarizar, `APPLE_ID`, `APPLE_PASSWORD` (senha de app) e `APPLE_TEAM_ID` antes do build.
+- **Menu bar**: fechar a janela não encerra o app; os runs continuam e o ícone na menu bar mostra o que está ativo. Saia pelo menu do ícone.
 
 ## Onde ficam os dados
 
