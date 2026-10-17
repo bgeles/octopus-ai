@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { SHORTCUT_HELP } from "../lib/shortcuts";
 import { isTauri } from "../lib/transport";
 import { THEME_LABELS, type ThemePreference } from "../lib/theme";
 import { UPDATES_ENDPOINT_SETTING, type AppSettings, type AuthMode, type BackupSnapshot, type EnvironmentCheck, type ImportMode, type ImportPreview, type UpdateInfo } from "../lib/types";
@@ -170,6 +171,18 @@ export function SettingsView(props: SettingsViewProps) {
             );
           })}
           <span className="text-xs text-slate">As notificações só aparecem com a janela do Octopus fora de foco.</span>
+        </section>
+
+        <section aria-label="Atalhos de teclado" className="flex flex-col gap-2 rounded-xl border hairline bg-surface p-5" data-testid="shortcuts">
+          <h2 className="m-0 font-display text-sm font-semibold">Atalhos de teclado</h2>
+          <dl className="m-0 grid grid-cols-[110px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[13px]">
+            {SHORTCUT_HELP.map((h) => (
+              <div key={h.keys} className="contents">
+                <dt className="font-mono text-xs">{h.keys}</dt>
+                <dd className="m-0 text-slate">{h.description}</dd>
+              </div>
+            ))}
+          </dl>
         </section>
 
         <UpdatesSection settings={settings} onSetSetting={onSetSetting} onCheck={props.onCheckUpdate} onInstall={props.onInstallUpdate} />

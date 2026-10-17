@@ -63,5 +63,21 @@ describe("Menu bar e notificações", () => {
     await user.click(within(box).getByRole("button", { name: "Instalar e reiniciar" }));
     await waitFor(async () => expect((await transport.invoke("list_audit_events", { limit: 10 })).some((e) => e.kind === "app.updated")).toBe(true));
   });
+
+  it("atalhos: ⌘3 abre Aprovações, ⌘N foca o composer e ⌘. interrompe o run", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await user.keyboard("{Meta>}3{/Meta}");
+    expect(await screen.findByRole("heading", { name: "Aprovações" })).toBeInTheDocument();
+    await user.keyboard("{Meta>}9{/Meta}");
+    expect(await screen.findByTestId("shortcuts")).toHaveTextContent("⌘1 … ⌘9");
+    await user.keyboard("{Meta>}n{/Meta}");
+    await waitFor(() => expect(screen.getByLabelText("Instrução para o agente")).toHaveFocus());
+    await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    await screen.findByTestId("approval-card");
+    await user.keyboard("{Meta>}.{/Meta}");
+    await waitFor(async () => expect((await transport.invoke("list_runs", { projectId: "proj_demo" }))[0]?.status).toBe("interrupted"));
+  });
 });
 

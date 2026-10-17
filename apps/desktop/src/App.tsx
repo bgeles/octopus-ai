@@ -17,6 +17,7 @@ import { RunHeader } from "./components/RunHeader";
 import { RunSidebar } from "./components/RunSidebar";
 import { SessionsView } from "./components/SessionsView";
 import { Shell, type View } from "./components/Shell";
+import { shortcutFor } from "./lib/shortcuts";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
@@ -449,6 +450,26 @@ export function App({ transport }: AppProps) {
   }, [view, selectedProject]);
 
   openRunRef.current = openRun;
+
+  // Atalhos de teclado (⌘1…⌘9, ⌘., ⌘N).
+  const shortcutState = useRef({ active: false, interrupt: async () => {} });
+  shortcutState.current = { active, interrupt };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const action = shortcutFor(e);
+      if (!action) return;
+      e.preventDefault();
+      if (action.kind === "view") setView(action.view);
+      else if (action.kind === "interrupt") {
+        if (shortcutState.current.active) void shortcutState.current.interrupt();
+      } else {
+        setView("run");
+        setTimeout(() => document.getElementById("prompt")?.focus(), 0);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   /** Retoma a sessão com `/compact`: o Claude Code compacta o contexto e devolve o resumo (experimental). */
   const compactSession = async (sessionId: string) => {
