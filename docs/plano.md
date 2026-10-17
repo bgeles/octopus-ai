@@ -252,8 +252,12 @@ Aplicação: primeiro passo da Fase 1, antes das pranchas novas: atualizar `@the
 ### Fase 6 — Isolamento forte (opcional)
 - Runner em container (Apple `container` ou Docker) para tasks não confiáveis.
 
-### Fase 7 — Polimento e distribuição
-- Ícone de menu bar com runs ativos, notificações nativas para aprovações, empacotamento e assinatura (`tauri build`), updater.
+### Fase 7 — Polimento e distribuição (concluída em 16/10/2026 na branch `fase-7/polimento-distribuicao`)
+- Prancha no Design antes das telas: `Distribuicao.dc.html` (menu bar, notificações, atualizações e atalhos).
+- **01 — Menu bar e notificações**: ícone (feature `tray-icon`) com runs ativos, aprovações pendentes, tasks aguardando, Abrir, Pausar/Retomar scheduler e Sair, atualizado por evento e por tick; `tauri-plugin-notification` para aprovações, tasks (revisão/bloqueio) e fim de run conforme `notifications.*`, só com a janela fora de foco; fechar a janela esconde e o Dock reabre.
+- **02 — Distribuição e updater**: `scripts/build-app.mjs` (assinatura ad-hoc por padrão, `APPLE_SIGNING_IDENTITY` e variáveis de notarização quando houver Developer ID), `createUpdaterArtifacts` com chave em `~/.tauri/octopus-updater.key` e pública no `tauri.conf.json`, `release/latest.json`; `tauri-plugin-updater` com endereço em `updates.endpoint` (sem endereço o app não procura); seção Atualizações.
+- **03 — Atalhos**: ⌘1…⌘9, ⌘., ⌘N (e ⌘↵ no composer), com ajuda em Configurações.
+- Fora: assinatura com Developer ID e notarização (exigem a conta Apple do usuário; o script já aceita as variáveis), binário único do sidecar (Node continua pré-requisito), servidor de releases, Windows/Linux. A Fase 6 fica opcional.
 
 ## Verificação
 
