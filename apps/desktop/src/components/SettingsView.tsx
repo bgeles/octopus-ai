@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { isTauri } from "../lib/transport";
 import { THEME_LABELS, type ThemePreference } from "../lib/theme";
-import type { AppSettings, AuthMode, BackupSnapshot, EnvironmentCheck, ImportMode, ImportPreview } from "../lib/types";
+import { UPDATES_ENDPOINT_SETTING, type AppSettings, type AuthMode, type BackupSnapshot, type EnvironmentCheck, type ImportMode, type ImportPreview, type UpdateInfo } from "../lib/types";
 import { EnvironmentChecks } from "./EnvironmentChecks";
 import { ImportPreviewPanel } from "./ImportPreviewPanel";
 import { formatRelative } from "./SessionsView";
@@ -23,6 +23,8 @@ type SettingsViewProps = {
   onRestoreSnapshot: (id: string, mode: ImportMode) => Promise<void>;
   onRevealSnapshot: (id: string) => Promise<void>;
   onRedoOnboarding: () => Promise<void>;
+  onCheckUpdate: () => Promise<UpdateInfo>;
+  onInstallUpdate: () => Promise<void>;
   runtimeLabel: string;
 };
 
@@ -170,6 +172,8 @@ export function SettingsView(props: SettingsViewProps) {
           <span className="text-xs text-slate">As notificações só aparecem com a janela do Octopus fora de foco.</span>
         </section>
 
+        <UpdatesSection settings={settings} onSetSetting={onSetSetting} onCheck={props.onCheckUpdate} onInstall={props.onInstallUpdate} />
+
         <section aria-label="Backup de configurações" className="col-span-full flex flex-col gap-4 rounded-xl border hairline bg-surface p-5">
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex flex-col gap-0.5">
@@ -264,3 +268,78 @@ export const NOTIFICATION_PREFS: { key: string; title: string; description: stri
   { key: "notifications.tasks", title: "Task aguardando você", description: "O agente pediu revisão ou ficou bloqueado numa task do board", default: true },
   { key: "notifications.runs", title: "Run concluído ou falhou", description: "Avisa ao fim de cada run", default: false },
 ];
+
+function UpdatesSection({ settings, onSetSetting, onCheck, onInstall }: { settings: AppSettings; onSetSetting: (key: string, value: unknown) => Promise<void>; onCheck: () => Promise<UpdateInfo>; onInstall: () => Promise<void> }) {
+  const saved = typeof settings[UPDATES_ENDPOINT_SETTING] === "string" ? (settings[UPDATES_ENDPOINT_SETTING] as string) : "";
+  const [endpoint, setEndpoint] = useState(saved);
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"check" | "install" | null>(null);
+  useEffect(() => setEndpoint(saved), [saved]);
+  const check = async () => {
+    setError(null);
+    setBusy("check");
+    try {
+      const value = endpoint.trim();
+      if (value !== saved) {
+        if (value && !/^https:\/\//.test(value) && !/^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(value)) throw new Error("Use https:// (http só em localhost)");
+        await onSetSetting(UPDATES_ENDPOINT_SETTING, value || null);
+      }
+      setInfo(await onCheck());
+    } catch (e) {
+      setInfo(null);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <section aria-label="Atualizações" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="updates">
+      <h2 className="m-0 font-display text-sm font-semibold">Atualizações</h2>
+      <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+        Endereço do manifesto de atualização (latest.json)
+        <input aria-label="Endereço do manifesto de atualização" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://releases.empresa.com/octopus/latest.json" className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 font-mono text-xs text-ink" />
+      </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" disabled={busy !== null} onClick={() => void check()} className="rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold text-paper disabled:opacity-50">
+          {busy === "check" ? "Verificando…" : "Verificar agora"}
+        </button>
+        <span className="text-xs text-slate" data-testid="update-status">
+          {info === null
+            ? "Sem endereço configurado, o app nunca procura atualizações."
+            : !info.configured
+              ? `Versão ${info.currentVersion} · atualizações não configuradas`
+              : info.available
+                ? `Versão ${info.version} disponível (instalada: ${info.currentVersion})${info.notes ? ` · ${info.notes}` : ""}`
+                : `Você está na versão mais recente (${info.currentVersion}).`}
+        </span>
+        {info?.available && (
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={async () => {
+              setBusy("install");
+              setError(null);
+              try {
+                await onInstall();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setBusy(null);
+              }
+            }}
+            className="ml-auto rounded-full bg-brand px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-brand-hover disabled:opacity-50"
+          >
+            {busy === "install" ? "Instalando…" : "Instalar e reiniciar"}
+          </button>
+        )}
+      </div>
+      {error && (
+        <span role="alert" className="text-xs text-brand-hover">
+          {error}
+        </span>
+      )}
+      <span className="text-xs text-slate">Os pacotes são verificados com a chave pública embutida no app antes de instalar.</span>
+    </section>
+  );
+}

@@ -27,3 +27,4 @@ playwright-report/
 
 # Claude Code (permissões locais desta máquina)
 .claude/settings.local.json
+release/
