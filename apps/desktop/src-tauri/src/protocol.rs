@@ -222,6 +222,9 @@ pub struct RunOptions {
     pub mcp_servers: Option<std::collections::BTreeMap<String, McpServerConfig>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<Vec<SdkPlugin>>,
+    /// Hooks livres do usuário (Harness → Hooks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_hooks: Option<Vec<CustomHook>>,
 }
 
 /// Plugin local do Claude Code (`options.plugins` do SDK).
@@ -299,6 +302,102 @@ impl McpServerConfig {
             },
         }
     }
+}
+
+/// Eventos do SDK em que um hook livre pode rodar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CustomHookEvent {
+    PreToolUse,
+    PostToolUse,
+    UserPromptSubmit,
+    Stop,
+    SubagentStop,
+    SessionStart,
+    SessionEnd,
+    Notification,
+    PreCompact,
+}
+
+impl CustomHookEvent {
+    pub const ALL: [CustomHookEvent; 9] = [
+        CustomHookEvent::PreToolUse,
+        CustomHookEvent::PostToolUse,
+        CustomHookEvent::UserPromptSubmit,
+        CustomHookEvent::Stop,
+        CustomHookEvent::SubagentStop,
+        CustomHookEvent::SessionStart,
+        CustomHookEvent::SessionEnd,
+        CustomHookEvent::Notification,
+        CustomHookEvent::PreCompact,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CustomHookEvent::PreToolUse => "PreToolUse",
+            CustomHookEvent::PostToolUse => "PostToolUse",
+            CustomHookEvent::UserPromptSubmit => "UserPromptSubmit",
+            CustomHookEvent::Stop => "Stop",
+            CustomHookEvent::SubagentStop => "SubagentStop",
+            CustomHookEvent::SessionStart => "SessionStart",
+            CustomHookEvent::SessionEnd => "SessionEnd",
+            CustomHookEvent::Notification => "Notification",
+            CustomHookEvent::PreCompact => "PreCompact",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.as_str() == value)
+    }
+
+    /// Eventos com nome de ferramenta, em que o `matcher` vale.
+    pub fn is_tool_event(&self) -> bool {
+        matches!(
+            self,
+            CustomHookEvent::PreToolUse | CustomHookEvent::PostToolUse
+        )
+    }
+}
+
+/// Hook livre enviado ao sidecar (`RunOptions.customHooks`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomHook {
+    pub id: String,
+    pub name: String,
+    pub event: CustomHookEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    pub command: String,
+    pub timeout_sec: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookOutcome {
+    Ok,
+    Blocked,
+    Error,
+    Timeout,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksTestParams {
+    pub hook: CustomHook,
+    pub cwd: String,
+    pub input: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookRunResult {
+    pub outcome: HookOutcome,
+    pub exit_code: Option<i64>,
+    pub duration_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub message: Option<String>,
+    pub output: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -696,6 +795,21 @@ pub enum RunEvent {
         #[serde(default)]
         agent_id: Option<String>,
     },
+    /// Um hook livre rodou.
+    #[serde(rename_all = "camelCase")]
+    HookRan {
+        hook_id: String,
+        name: String,
+        event: CustomHookEvent,
+        #[serde(default)]
+        tool_name: Option<String>,
+        outcome: HookOutcome,
+        #[serde(default)]
+        exit_code: Option<i64>,
+        duration_ms: u64,
+        #[serde(default)]
+        message: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     Compaction {
         phase: CompactionPhase,
@@ -733,6 +847,7 @@ impl RunEvent {
             RunEvent::TaskUpdate { .. } => "task_update",
             RunEvent::Observation { .. } => "observation",
             RunEvent::Compaction { .. } => "compaction",
+            RunEvent::HookRan { .. } => "hook_ran",
             RunEvent::BriefInjected { .. } => "brief_injected",
             RunEvent::InstructionsLoaded { .. } => "instructions_loaded",
         }

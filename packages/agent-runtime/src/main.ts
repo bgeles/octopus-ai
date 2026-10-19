@@ -14,6 +14,7 @@ import { RunManager, type QueryFn } from "./runner.js";
 import { toSessionSummary } from "./sessions.js";
 import { checkMcpServer, defaultMcpDeps } from "./mcpCheck.js";
 import { createOctopusToolsFactory } from "./octopusTools.js";
+import { runCustomHook } from "./customHooks.js";
 
 const require = createRequire(import.meta.url);
 const runtimeVersion: string = require("../package.json").version;
@@ -92,6 +93,11 @@ server.register("memory.result", async ({ runId, callId, result }) => ({
 server.register("mcp.check", async ({ name, config }) => {
   log("info", `testando MCP server ${name} (${config.type})`);
   return checkMcpServer(config, await defaultMcpDeps());
+});
+
+server.register("hooks.test", async ({ hook, cwd, input }) => {
+  log("info", `testando hook livre ${hook.name} (${hook.event})`);
+  return runCustomHook(hook, input, cwd);
 });
 
 server.register("sessions.list", async ({ cwd }) => {

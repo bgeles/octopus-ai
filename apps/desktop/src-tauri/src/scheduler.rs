@@ -152,6 +152,9 @@ pub async fn tick(
                     options.mcp_servers =
                         store.mcp_servers_for_run(&project.id, agent_id.as_deref())?;
                 }
+                if options.custom_hooks.is_none() {
+                    options.custom_hooks = store.custom_hooks_for_run(&project.id)?;
+                }
                 if options.plugins.is_none() {
                     options.plugins = store
                         .materialize_plugin(

@@ -480,6 +480,11 @@ pub fn run() {
             commands_harness::read_skill,
             commands_harness::save_skill,
             commands_harness::preview_run_options,
+            commands_harness::list_custom_hooks,
+            commands_harness::save_custom_hook,
+            commands_harness::set_custom_hook_enabled,
+            commands_harness::delete_custom_hook,
+            commands_harness::test_custom_hook,
             updates::check_update,
             updates::install_update,
         ])

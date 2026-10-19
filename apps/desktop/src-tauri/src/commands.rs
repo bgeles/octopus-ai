@@ -185,6 +185,9 @@ pub async fn start_run(state: State<'_, AppState>, input: StartRunInput) -> CmdR
                 .mcp_servers_for_run(&project.id, input.agent_profile_id.as_deref())
                 .map_err(err)?;
         }
+        if options.custom_hooks.is_none() {
+            options.custom_hooks = state.store.custom_hooks_for_run(&project.id).map_err(err)?;
+        }
         if options.plugins.is_none() {
             options.plugins = state
                 .store

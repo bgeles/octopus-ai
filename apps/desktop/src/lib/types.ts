@@ -2,9 +2,9 @@
  * Tipos da ponte UI <-> core Rust. Espelham `src-tauri/src/store/models.rs` e os comandos em `commands.rs`.
  * Eventos de run vêm de `@octopus/protocol`.
  */
-import type { AgentDefinition, EffortLevel, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
+import type { AgentDefinition, CustomHookEvent, EffortLevel, HelloResult, HookOutcome, HookRunResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 
-export type { AgentDefinition, EffortLevel, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
+export type { AgentDefinition, CustomHookEvent, EffortLevel, HelloResult, HookOutcome, HookRunResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -470,6 +470,11 @@ export type Commands = {
   delete_mcp_server: { args: { serverId: string }; result: boolean };
   /** Abre o servidor pelo sidecar, lista as tools e guarda a saúde. */
   check_mcp_server: { args: { serverId: string }; result: McpServer };
+  list_custom_hooks: { args: { projectId?: string | null }; result: CustomHookRecord[] };
+  save_custom_hook: { args: { input: CustomHookInput }; result: CustomHookRecord };
+  set_custom_hook_enabled: { args: { hookId: string; enabled: boolean }; result: CustomHookRecord };
+  delete_custom_hook: { args: { hookId: string }; result: boolean };
+  test_custom_hook: { args: { input: { projectId: string; hook: CustomHookInput; toolName?: string | null; toolInput?: unknown } }; result: HookRunResult };
   list_skills: { args: { projectId: string }; result: Skill[] };
   /** Varre .claude/skills do projeto e ~/.claude/skills. */
   scan_skills: { args: { projectId: string }; result: Skill[] };
@@ -524,6 +529,23 @@ export type McpServer = {
   updatedAt: string;
 };
 export type McpServerInput = { id?: string | null; projectId?: string | null; name: string; config: McpServerConfig; enabled?: boolean };
+
+/** Hook livre (Harness → Hooks): comando de shell do usuário num evento do agente. */
+export type CustomHookRecord = {
+  id: string;
+  /** null = todos os projetos. */
+  projectId: string | null;
+  name: string;
+  event: CustomHookEvent;
+  matcher: string | null;
+  command: string;
+  timeoutSec: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CustomHookInput = { id?: string | null; projectId?: string | null; name: string; event: CustomHookEvent; matcher?: string | null; command: string; timeoutSec?: number; enabled?: boolean };
 
 /** Pin de contexto: arquivo do projeto, página da memória ou texto, sempre injetado no brief. */
 export type ContextPinKind = "file" | "page" | "text";

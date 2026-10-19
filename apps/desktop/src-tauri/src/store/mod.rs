@@ -8,6 +8,7 @@ pub mod attention;
 pub mod audit;
 pub mod config;
 pub mod harness;
+pub mod hooks;
 pub mod memory;
 pub mod models;
 pub mod orchestration;
@@ -72,6 +73,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0015_budget_live.sql"),
     ),
     ("0016_effort", include_str!("migrations/0016_effort.sql")),
+    (
+        "0017_custom_hooks",
+        include_str!("migrations/0017_custom_hooks.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -620,6 +625,25 @@ impl Store {
             RunEvent::TaskUpdate { status, note, .. } => {
                 Self::apply_task_update(&tx, run_id, *status, note.as_deref())?;
             }
+            // Hook livre que bloqueou algo: fica na auditoria (os que só rodaram ficam no run).
+            RunEvent::HookRan {
+                hook_id,
+                name,
+                event: hook_event,
+                tool_name,
+                outcome: crate::protocol::HookOutcome::Blocked,
+                message,
+                ..
+            } => {
+                let project_id = run_project_id(&tx, run_id)?;
+                Self::audit_in(
+                    &tx,
+                    "hook",
+                    "hook.blocked",
+                    project_id.as_deref(),
+                    serde_json::json!({"runId": run_id, "hookId": hook_id, "name": name, "event": hook_event.as_str(), "tool": tool_name, "message": message}),
+                )?;
+            }
             _ => {}
         }
         // Fim do run: consolidação bruta das observações no log de tarefas.
@@ -778,11 +802,12 @@ mod tests {
                 "0014_skills".to_string(),
                 "0015_budget_live".to_string(),
                 "0016_effort".to_string(),
+                "0017_custom_hooks".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 16);
+        assert_eq!(s.applied_migrations().unwrap().len(), 17);
     }
 
     #[test]

@@ -2,8 +2,9 @@
  * Gerencia runs do Agent SDK: inicia, interrompe, encaminha permissões e emite eventos.
  * O acesso ao SDK é injetado (QueryFn) para permitir testes sem rede nem binário do Claude.
  */
-import type { HookDecision, MemoryCallResult, MemoryOp, PermissionDecision, RunEvent, RunHookNotification, RunMemoryCallNotification, RunStartParams } from "@octopus/protocol";
+import type { CustomHook, HookDecision, MemoryCallResult, MemoryOp, PermissionDecision, RunEvent, RunHookNotification, RunMemoryCallNotification, RunStartParams } from "@octopus/protocol";
 import { JsonRpcErrorCode } from "@octopus/protocol";
+import { TOOL_EVENTS, defaultHookSpawn, runCustomHook, type HookSpawn } from "./customHooks.js";
 import { mapSdkMessage, type SdkMessageLike } from "./events.js";
 import { MEMORY_HOOK_EVENTS, eventFromMemoryHook, type MemoryHookInputLike } from "./memoryHooks.js";
 import { MEMORY_TOOLS, type OctopusToolsFactory } from "./octopusTools.js";
@@ -108,6 +109,7 @@ export class RunManager {
     private readonly emitHook: HookSink | null = null,
     private readonly hookTimeoutMs: number = HOOK_TIMEOUT_MS,
     private readonly emitMemoryCall: MemoryCallSink | null = null,
+    private readonly hookSpawn: HookSpawn = defaultHookSpawn,
   ) {}
 
   get activeRunIds(): string[] {
@@ -251,6 +253,21 @@ export class RunManager {
       ];
       options.hooks = hooks;
     }
+    // Hooks livres do usuário: um matcher por hook, ao lado dos declarativos do Octopus.
+    if (o.customHooks && o.customHooks.length > 0) {
+      const hooks = options.hooks ?? {};
+      for (const hook of o.customHooks) {
+        hooks[hook.event] = [
+          ...(hooks[hook.event] ?? []),
+          {
+            ...(hook.matcher && TOOL_EVENTS.has(hook.event) ? { matcher: hook.matcher } : {}),
+            timeout: hook.timeoutSec + 5,
+            hooks: [async (input) => this.customHook(run, hook, input, params.cwd)],
+          },
+        ];
+      }
+      options.hooks = hooks;
+    }
     const wantsMemoryTools = Boolean(o.memory?.tools) && this.emitMemoryCall !== null;
     if ((o.taskContext || wantsMemoryTools) && this.octopusTools) {
       const ctx = o.taskContext;
@@ -310,6 +327,24 @@ export class RunManager {
       });
       this.emitMemoryCall!({ runId: run.runId, callId, op, args });
     });
+  }
+
+  /** Hook livre: roda o comando, conta o que aconteceu (`hook_ran`) e devolve a saída já filtrada. */
+  private async customHook(run: ActiveRun, hook: CustomHook, input: PreToolUseInputLike & MemoryHookInputLike, cwd: string): Promise<unknown> {
+    const result = await runCustomHook(hook, input, cwd, this.hookSpawn, { OCTOPUS_RUN_ID: run.runId });
+    this.emit(run.runId, {
+      type: "hook_ran",
+      hookId: hook.id,
+      name: hook.name,
+      event: hook.event,
+      toolName: typeof input.tool_name === "string" ? input.tool_name : null,
+      outcome: result.outcome,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      message: result.message,
+    });
+    if (result.outcome !== "ok" && result.outcome !== "blocked") this.log("warn", `hook livre ${hook.name} (${hook.event}): ${result.message ?? result.outcome}`);
+    return result.output;
   }
 
   /** Hooks de memória: emitem `observation`/`compaction` e nunca interferem no fluxo do agente. */

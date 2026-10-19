@@ -441,6 +441,36 @@ impl Store {
             });
         }
 
+        // Hooks livres do usuário.
+        let custom = self.custom_hooks_for_run(project_id)?;
+        if let Some(list) = &custom {
+            for h in list {
+                hooks.push(HookInfo {
+                    event: match &h.matcher {
+                        Some(m) => format!("{} · {m}", h.event.as_str()),
+                        None => h.event.as_str().to_string(),
+                    },
+                    description: format!("{}: {}", h.name, h.command),
+                    origin: "Harness · Hooks".into(),
+                });
+            }
+            note(
+                &mut notes,
+                "customHooks",
+                format!(
+                    "{} {}",
+                    list.len(),
+                    if list.len() == 1 {
+                        "hook livre"
+                    } else {
+                        "hooks livres"
+                    }
+                ),
+                "harness",
+            );
+        }
+        options.custom_hooks = custom;
+
         Ok(RunPreview {
             options,
             notes,

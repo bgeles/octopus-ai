@@ -1,5 +1,6 @@
 import { AlertTriangle, Check, ChevronRight, X } from "lucide-react";
 import { useState } from "react";
+import type { HookOutcome } from "@octopus/protocol";
 import { subagentTree, topLevelItems, type PendingPermission, type SubagentNode, type TranscriptItem } from "../state/runReducer";
 import { ApprovalCard, summarizeInput, type DecideFn, type ReadFileFn } from "./ApprovalCard";
 import { subagentCounters } from "./RunSidebar";
@@ -60,6 +61,7 @@ export function Transcript({ runId, items, pendingPermissions, onDecide, decidin
                   );
                 }
                 if (item.kind === "tool") return <ToolCall key={item.id} item={item} subagent={nodesById.get(item.toolUseId) ?? null} />;
+                if (item.kind === "hook") return <HookRun key={item.id} item={item} />;
                 if (item.kind === "error") {
                   return (
                     <div key={item.id} role="alert" className="flex items-start gap-2 rounded-md border border-brand/40 bg-brand-soft px-3 py-2 text-[13px] text-brand-hover">
@@ -124,6 +126,26 @@ function ToolCall({ item, subagent = null }: { item: Extract<TranscriptItem, { k
 }
 
 type Group = { kind: "user"; id: string; text: string; at: string } | { kind: "assistant"; id: string; at: string; items: TranscriptItem[] };
+
+const HOOK_OUTCOME: Record<HookOutcome, string> = { ok: "ok", blocked: "bloqueou", error: "erro", timeout: "tempo esgotado" };
+
+/** Execução de um hook livre do usuário: linha discreta; bloqueio ou erro ganham destaque. */
+function HookRun({ item }: { item: Extract<TranscriptItem, { kind: "hook" }> }) {
+  const loud = item.outcome !== "ok";
+  return (
+    <div data-testid="hook-run" data-outcome={item.outcome} className={["flex flex-col gap-0.5 rounded-md px-3 py-2 font-mono text-xs", loud ? "border border-brand bg-surface text-ink" : "bg-paper text-slate"].join(" ")}>
+      <span>
+        hook · {item.name} · {item.event}
+        {item.toolName ? ` (${item.toolName})` : ""} · {item.exitCode ?? "—"} · {HOOK_OUTCOME[item.outcome]} · {formatMs(item.durationMs)}
+      </span>
+      {item.message && <span className={loud ? "text-brand-hover" : ""}>{item.message}</span>}
+    </div>
+  );
+}
+
+function formatMs(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1).replace(".", ",")} s`;
+}
 
 function groupItems(items: TranscriptItem[]): Group[] {
   const groups: Group[] = [];

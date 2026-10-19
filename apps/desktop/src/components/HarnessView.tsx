@@ -3,9 +3,10 @@ import { useCallback, useEffect, useState } from "react";
 import { EFFORT_LABELS, EFFORT_LEVELS } from "../lib/effort";
 import type { Transport } from "../lib/transport";
 import { KNOWN_MODELS, type EffortLevel, projectDefaultsKey, type McpServer, type McpServerConfig, type McpServerInput, type Project, type ProjectDefaults, type RunPreview, type Skill, type TeamMember } from "../lib/types";
+import { HooksTab } from "./HooksTab";
 import { formatRelative } from "./SessionsView";
 
-export type HarnessTab = "mcp" | "skills" | "profile";
+export type HarnessTab = "mcp" | "skills" | "hooks" | "profile";
 
 type HarnessViewProps = {
   project: Project | null;
@@ -13,8 +14,9 @@ type HarnessViewProps = {
   availableTabs?: HarnessTab[];
 };
 
-export function HarnessView({ project, transport, availableTabs = ["mcp", "skills", "profile"] }: HarnessViewProps) {
+export function HarnessView({ project, transport, availableTabs = ["mcp", "skills", "hooks", "profile"] }: HarnessViewProps) {
   const [tab, setTab] = useState<HarnessTab>("mcp");
+  const [hookCount, setHookCount] = useState<number | null>(null);
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const [editing, setEditing] = useState<McpServer | "new" | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
@@ -32,6 +34,10 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
 
   const refresh = useCallback(async () => {
     setServers(await transport.invoke("list_mcp_servers", { projectId }));
+    transport
+      .invoke("list_custom_hooks", { projectId })
+      .then((list) => setHookCount(list.length))
+      .catch(() => {});
     if (projectId) {
       setSkills(await transport.invoke("list_skills", { projectId }));
       const [settings, members] = await Promise.all([transport.invoke("get_settings", {}), transport.invoke("list_team", { projectId }).catch(() => [] as TeamMember[])]);
@@ -78,6 +84,7 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
   const tabs: { id: HarnessTab; label: string }[] = [
     { id: "mcp", label: servers ? `MCPs · ${servers.length}` : "MCPs" },
     { id: "skills", label: skills ? `Skills · ${skills.length}` : "Skills" },
+    { id: "hooks", label: hookCount !== null ? `Hooks · ${hookCount}` : "Hooks" },
     { id: "profile", label: "Perfil de execução" },
   ];
 
@@ -110,6 +117,7 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
         </div>
       )}
 
+      {tab === "hooks" && <HooksTab project={project} transport={transport} onCount={setHookCount} />}
       {tab === "mcp" && (
         <section aria-label="MCP servers" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5">
           <div className="flex flex-wrap items-center gap-3">
