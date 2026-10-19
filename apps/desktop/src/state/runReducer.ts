@@ -166,6 +166,7 @@ function applyEvent(state: RunViewState, event: RunEvent, at: string): RunViewSt
     }
 
     case "usage":
+      if (event.parentToolUseId) return state;
       return { ...state, usage: event.usage, contextWindow: event.contextWindow ?? state.contextWindow };
 
     case "permission_request":

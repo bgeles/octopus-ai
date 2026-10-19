@@ -307,18 +307,20 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const spentThisMonth = (projectId: string, agentId: string | null) => {
     let spent = 0;
     let count = 0;
+    let live = 0;
     for (const r of runs.values()) {
       if (r.projectId !== projectId || r.startedAt < monthStart() || (agentId && r.agentProfileId !== agentId)) continue;
-      spent += r.costUsd ?? 0;
+      spent += r.costUsd ?? r.estCostUsd ?? 0;
+      if (r.costUsd == null && ["queued", "running", "waiting_approval"].includes(r.status)) live += r.estCostUsd ?? 0;
       count++;
     }
-    return { spent, count };
+    return { spent, count, live };
   };
   const budgetLine = (scope: BudgetLine["scope"], scopeId: string, label: string, projectId: string, agentId: string | null): BudgetLine => {
     const policy = budgets.find((b) => b.scope === scope && b.scopeId === scopeId) ?? null;
-    const { spent, count } = spentThisMonth(projectId, agentId);
+    const { spent, count, live } = spentThisMonth(projectId, agentId);
     const level = policy?.hardUsd != null && spent >= policy.hardUsd ? "hard" : policy?.softUsd != null && spent >= policy.softUsd ? "soft" : "ok";
-    return { scope, scopeId, label, spentUsd: spent, softUsd: policy?.softUsd ?? null, hardUsd: policy?.hardUsd ?? null, maxTurns: policy?.maxTurns ?? null, runs: count, level };
+    return { scope, scopeId, label, spentUsd: spent, softUsd: policy?.softUsd ?? null, hardUsd: policy?.hardUsd ?? null, maxTurns: policy?.maxTurns ?? null, runs: count, liveUsd: live, level };
   };
   const budgetStatus = (projectId: string) => {
     const project = projects.find((p) => p.id === projectId);
@@ -674,6 +676,41 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
     }
   };
+  const usageMessagesByRun = new Map<string, Set<string>>();
+  /** Como `enforce_budget` no core: limite estourado com runs ativos → para todos os do escopo. Devolve se parou `run`. */
+  const enforceBudgetMock = (run: Run): boolean => {
+    const status = budgetStatus(run.projectId);
+    const lines = [status.project, ...(run.agentProfileId ? status.agents.filter((a) => a.scopeId === run.agentProfileId) : [])];
+    const over = lines.find((l) => l.hardUsd != null && l.spentUsd >= l.hardUsd);
+    if (!over) return false;
+    const reason = `Orçamento mensal esgotado para ${over.label} durante o run: US$ ${over.spentUsd.toFixed(2)} de US$ ${over.hardUsd!.toFixed(2)} (inclui estimativa dos runs em andamento).`;
+    const stopped: string[] = [];
+    for (const r of runs.values()) {
+      if (r.projectId !== run.projectId || r.stopCause || !["queued", "running", "waiting_approval"].includes(r.status)) continue;
+      if (over.scope === "agent" && r.agentProfileId !== over.scopeId) continue;
+      for (const t of pendingTimers.get(r.id) ?? []) clearTimeout(t);
+      pendingTimers.delete(r.id);
+      pausedAt.delete(r.id);
+      r.status = "interrupted";
+      r.stopCause = "budget";
+      r.errorMessage = reason;
+      r.endedAt = new Date().toISOString();
+      closePendingApprovals(r.id);
+      const task = tasks.find((t) => t.lockRunId === r.id);
+      if (task) {
+        task.status = "blocked";
+        task.lockRunId = null;
+        task.lastNote = reason;
+        pushTaskEvent(task.id, "blocked", task.stageId, task.stageId, r.id, "orçamento", reason);
+        emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+      }
+      audit("orçamento", "budget.hard_stop", r.projectId, { runId: r.id, taskId: task?.id ?? null, estCostUsd: r.estCostUsd ?? 0, reason });
+      emitEvent(r.id, { type: "error", message: "Run interrompido: orçamento esgotado", fatal: true });
+      stopped.push(r.id);
+    }
+    if (stopped.length) emit("budget:stopped", { runIds: stopped, reason });
+    return stopped.includes(run.id);
+  };
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
   const scriptByRun = new Map<string, RunEventNotification[]>();
   const scriptFor = (runId: string) => scriptByRun.get(runId) ?? script;
@@ -726,10 +763,19 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         sessions.unshift({ sessionId: ev.sessionId, cwd: project?.path ?? "/", title: run.prompt, tags: [], createdAt: notification.at, lastUsedAt: notification.at });
       }
     } else if (ev.type === "usage") {
-      run.inputTokens = ev.usage.inputTokens;
-      run.outputTokens = ev.usage.outputTokens;
-      run.cacheReadTokens = ev.usage.cacheReadTokens;
+      if (!ev.parentToolUseId) {
+        run.inputTokens = ev.usage.inputTokens;
+        run.outputTokens = ev.usage.outputTokens;
+        run.cacheReadTokens = ev.usage.cacheReadTokens;
+      }
+      const seen = usageMessagesByRun.get(runId) ?? new Set<string>();
+      usageMessagesByRun.set(runId, seen);
+      if (!ev.messageId || !seen.has(ev.messageId)) {
+        if (ev.messageId) seen.add(ev.messageId);
+        run.estCostUsd = (run.estCostUsd ?? 0) + estimateUsdMock(run.model, ev.usage);
+      }
     } else if (ev.type === "result") {
+      if (run.status === "interrupted") return;
       run.status = ev.isError ? "failed" : "completed";
       run.costUsd = ev.costUsd;
       run.numTurns = ev.numTurns;
@@ -787,6 +833,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
     }
     emit("run:event", notification);
+    if (ev.type === "usage") {
+      emit("run:cost", { runId, estCostUsd: run.estCostUsd ?? 0 });
+      if (enforceBudgetMock(run)) return;
+    }
     if (ev.type === "permission_request") {
       // Pausa até decide_permission.
       pausedAt.set(runId, index + 1);
@@ -1642,4 +1692,30 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return unlisten;
     },
   };
+}
+
+/** Espelho de `store/pricing.rs` (US$ por milhão de tokens) para o custo estimado ao vivo no mock. */
+const PRICES_MOCK: Array<[string, number, number, number]> = [
+  ["fable-5-1", 10, 50, 0.25],
+  ["fable", 10, 50, 1],
+  ["opus-5-5", 4, 20, 0.2],
+  ["opus-5", 5, 25, 0.5],
+  ["opus-4-8", 5, 25, 0.5],
+  ["opus-4-7", 5, 25, 0.5],
+  ["opus-4-6", 5, 25, 0.5],
+  ["opus-4-5", 5, 25, 0.5],
+  ["opus-4", 15, 75, 1.5],
+  ["opus", 4, 20, 0.2],
+  ["sonnet-5", 2, 10, 0.2],
+  ["sonnet-4", 3, 15, 0.3],
+  ["sonnet", 2, 10, 0.2],
+  ["haiku-5", 0.1, 0.5, 0.01],
+  ["haiku-4", 1, 5, 0.1],
+  ["haiku", 0.1, 0.5, 0.01],
+];
+
+export function estimateUsdMock(model: string | null | undefined, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }): number {
+  const m = (model ?? "").toLowerCase();
+  const [, input, output, read] = PRICES_MOCK.find(([key]) => m.includes(key)) ?? ["", 5, 25, 0.5];
+  return (usage.inputTokens * input + usage.outputTokens * output + usage.cacheReadTokens * read + usage.cacheCreationTokens * input * 1.25) / 1_000_000;
 }

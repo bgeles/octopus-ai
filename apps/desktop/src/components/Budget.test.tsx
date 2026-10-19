@@ -61,12 +61,17 @@ describe("Segurança · sandbox e orçamentos", () => {
     await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
     await waitFor(() => expect(screen.getByTestId("budget-chip")).toHaveAttribute("data-level", "soft"));
 
-    // Segundo run estoura o hard; o terceiro é recusado.
+    // O segundo run estoura o hard no meio (0,04 fechado + ≈0,03 estimado ≥ 0,05): o Octopus o interrompe.
     await user.type(screen.getByLabelText("Instrução para o agente"), "segundo");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     await user.click(within(await screen.findByTestId("approval-card")).getByRole("button", { name: "Permitir uma vez" }));
-    await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Interrompido · orçamento"), { timeout: 3000 });
+    expect(await screen.findByTestId("budget-stop-banner")).toHaveTextContent("Orçamento mensal esgotado para chat-core durante o run");
     await waitFor(() => expect(screen.getByTestId("budget-chip")).toHaveAttribute("data-level", "hard"));
+    const stopped = (await transport.invoke("list_runs", { projectId: "proj_demo" }))[0]!;
+    expect(stopped).toMatchObject({ status: "interrupted", stopCause: "budget", costUsd: null });
+    expect(stopped.estCostUsd).toBeCloseTo(0.0292, 4);
+    // O terceiro é recusado na largada.
     await user.type(screen.getByLabelText("Instrução para o agente"), "terceiro");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     expect(await screen.findByRole("status")).toHaveTextContent(/Orçamento mensal esgotado para chat-core/);

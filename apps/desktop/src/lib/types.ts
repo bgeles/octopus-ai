@@ -44,6 +44,10 @@ export type Run = {
   taskId: string | null;
   /** `agent` (pedido do usuário ou do scheduler) ou `consolidation` (memória com Haiku). */
   kind: RunKind;
+  /** Custo estimado pelos tokens de cada resposta (vale enquanto `costUsd` não chega). */
+  estCostUsd?: number;
+  /** `budget` quando o Octopus interrompeu o run por orçamento esgotado. */
+  stopCause?: "budget" | null;
 };
 
 export type RunKind = "agent" | "consolidation";
@@ -140,7 +144,7 @@ export type SandboxProfile = { id: string; name: string; description: string; bu
 export type BudgetScope = "project" | "agent";
 export type BudgetPolicy = { id: string; scope: BudgetScope; scopeId: string; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; createdAt: string; updatedAt: string };
 export type BudgetInput = { softUsd?: number | null; hardUsd?: number | null; maxTurns?: number | null };
-export type BudgetLine = { scope: BudgetScope; scopeId: string; label: string; spentUsd: number; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; runs: number; level: "ok" | "soft" | "hard" };
+export type BudgetLine = { scope: BudgetScope; scopeId: string; label: string; spentUsd: number; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; runs: number; liveUsd?: number; level: "ok" | "soft" | "hard" };
 export type BudgetStatus = { month: string; project: BudgetLine; agents: BudgetLine[] };
 
 export type RuleKind = "command" | "write" | "tool" | "mcp";
@@ -601,6 +605,12 @@ export type Events = {
   "app:navigate": string;
   /** Menu bar pediu para abrir um run ativo. */
   "app:open-run": string;
+  /** O Octopus interrompeu runs porque o orçamento mensal estourou no meio deles. */
+  "budget:stopped": BudgetStopped;
+  /** Custo estimado de um run ativo mudou. */
+  "run:cost": { runId: string; estCostUsd: number };
 };
+
+export type BudgetStopped = { runIds: string[]; reason: string };
 
 export type EventName = keyof Events;

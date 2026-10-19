@@ -830,6 +830,40 @@ impl Store {
     }
 
     /// Fim do run de uma task: avança, conclui, bloqueia ou falha conforme o resultado e o último `task_update`.
+    /// O run foi parado pelo core (orçamento): a task que ele executava vai para Bloqueada
+    /// com o motivo e solta o lock. Devolve o id da task, se havia uma.
+    pub(crate) fn block_task_of_run(
+        tx: &Transaction<'_>,
+        run_id: &str,
+        note: &str,
+    ) -> Result<Option<String>> {
+        let task: Option<(String, String)> = tx
+            .query_row(
+                "SELECT id, stage_id FROM task WHERE lock_run_id = ?1",
+                params![run_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((task_id, stage_id)) = task else {
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE task SET status = 'blocked', lock_run_id = NULL, last_note = ?2, updated_at = ?3 WHERE id = ?1",
+            params![task_id, note, now()],
+        )?;
+        insert_event(
+            tx,
+            &task_id,
+            "blocked",
+            Some(&stage_id),
+            Some(&stage_id),
+            Some(run_id),
+            "orçamento",
+            Some(note),
+        )?;
+        Ok(Some(task_id))
+    }
+
     pub(crate) fn finish_task_run(
         tx: &Transaction<'_>,
         run_id: &str,

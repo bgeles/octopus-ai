@@ -222,6 +222,8 @@ export function summarize(e: AuditEvent): string {
       return `run ${String(p.runId ?? "").slice(-6)} falhou · ${str("message") ?? ""}`;
     case "run.interrupted":
       return `interrompeu o run ${String(p.runId ?? "").slice(-6)}`;
+    case "budget.hard_stop":
+      return `parou o run ${String(p.runId ?? "").slice(-6)} por orçamento${typeof p.estCostUsd === "number" ? ` · ≈ US$ ${(p.estCostUsd as number).toFixed(2).replace(".", ",")}` : ""}${p.taskId ? " · task bloqueada" : ""}`;
     case "approval.allow":
       return `permitiu ${str("tool") ?? "ferramenta"}${str("message") ? ` · motivo: ${str("message")}` : ""}`;
     case "approval.deny":

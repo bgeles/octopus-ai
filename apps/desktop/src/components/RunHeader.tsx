@@ -18,9 +18,11 @@ type RunHeaderProps = {
   sandboxName?: string | null;
   /** Orçamento do mês (aviso soft/hard). */
   budget?: BudgetStatus | null;
+  /** Custo estimado do run ativo (tokens × tabela de preços), antes do custo final do SDK. */
+  liveCostUsd?: number | null;
 };
 
-export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue, totals = null, sandboxName = null, budget = null }: RunHeaderProps) {
+export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue, totals = null, sandboxName = null, budget = null, liveCostUsd = null }: RunHeaderProps) {
   const status = statusOf(run, state, active);
   const sessionId = state.sessionId ?? run?.claudeSessionId ?? null;
   const canContinue = Boolean(run && !active && sessionId && onContinue);
@@ -46,6 +48,11 @@ export function RunHeader({ project, run, state, active, onInterrupt, interrupti
           </span>
         )}
         {state.model && <span className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">{state.model}</span>}
+        {active && liveCostUsd != null && liveCostUsd > 0 && (
+          <span data-testid="run-live-cost" title="Estimativa pelos tokens de cada resposta; o custo final vem do SDK quando o run fecha" className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">
+            ≈ {formatUsd(liveCostUsd)}
+          </span>
+        )}
         {totals && totals.runs > 0 && (
           <span data-testid="project-cost" title="Custo acumulado de todos os runs deste projeto" className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">
             {`Projeto ${formatUsd(totals.costUsd)} em ${totals.runs} ${totals.runs === 1 ? "run" : "runs"}`}
@@ -80,6 +87,7 @@ function statusOf(run: Run | null, state: RunViewState, active: boolean): { labe
   if (state.pendingPermissions.length > 0) return { label: "Aguardando aprovação", className: "bg-warning-soft text-warning-ink", dot: "bg-warning" };
   if (active) return { label: "Executando", className: "bg-brand-soft text-brand-hover", dot: "bg-brand" };
   if (state.result?.isError || run.status === "failed") return { label: "Falhou", className: "bg-brand-soft text-brand-hover" };
+  if (run.status === "interrupted" && run.stopCause === "budget") return { label: "Interrompido · orçamento", className: "bg-ink text-paper" };
   if (run.status === "interrupted") return { label: "Interrompido", className: "bg-warning-soft text-warning-ink" };
   return { label: "Concluído", className: "bg-success-soft text-success-ink", dot: "bg-success" };
 }

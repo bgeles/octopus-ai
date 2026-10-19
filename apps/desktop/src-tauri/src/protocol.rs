@@ -605,6 +605,12 @@ pub enum RunEvent {
         usage: Usage,
         #[serde(default)]
         context_window: Option<u64>,
+        /// Id da mensagem do modelo: o SDK repete o uso em cada bloco da mesma mensagem.
+        #[serde(default)]
+        message_id: Option<String>,
+        /// Presente nas respostas de subagentes (contam no custo, não no contexto).
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     PermissionRequest {
