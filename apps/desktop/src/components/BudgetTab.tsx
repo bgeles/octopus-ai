@@ -81,10 +81,15 @@ function BudgetCard({ line, onSave }: { line: BudgetLine; onSave: BudgetTabProps
       <div className="h-1.5 overflow-hidden rounded-full border hairline bg-paper" role="progressbar" aria-label={`Gasto de ${line.label}`} aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
         <div className={["h-full", line.level === "hard" ? "bg-brand" : line.level === "soft" ? "bg-warning" : "bg-ink"].join(" ")} style={{ width: `${pct}%` }} />
       </div>
+      {(line.liveUsd ?? 0) > 0 && (
+        <span className="text-xs text-brand-hover" data-testid="budget-live">
+          inclui ≈ {formatUsd(line.liveUsd ?? 0)} estimado de runs em andamento
+        </span>
+      )}
       <span className="text-xs text-slate">
         {line.runs} {line.runs === 1 ? "run" : "runs"} no mês
         {line.maxTurns ? ` · máx. ${line.maxTurns} turnos por run` : ""}
-        {line.level === "hard" ? " · esgotado: novos runs bloqueados" : line.level === "soft" ? " · passou do aviso" : ""}
+        {line.level === "hard" ? " · esgotado: runs ativos interrompidos e novos bloqueados" : line.level === "soft" ? " · passou do aviso" : ""}
       </span>
       {!editing ? (
         <button type="button" onClick={() => setEditing(true)} className="self-start rounded-sm border hairline-strong bg-surface px-2.5 py-1 text-xs font-medium hover:border-ink">

@@ -1,5 +1,6 @@
 //! Perfis de sandbox (traduzidos para `options.sandbox` do SDK) e orçamentos mensais
-//! (soft avisa; hard impede novos runs e limita o run em andamento via `maxBudgetUsd`).
+//! (soft avisa; hard impede novos runs, limita cada run via `maxBudgetUsd` e, quando o gasto
+//! do mês somado à estimativa dos runs em andamento passa do limite, interrompe os runs ativos).
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Utc};
@@ -70,9 +71,33 @@ pub struct BudgetLine {
     pub hard_usd: Option<f64>,
     pub max_turns: Option<u32>,
     pub runs: u64,
+    /// Parte de `spent_usd` que é estimativa de runs ainda em andamento.
+    #[serde(default)]
+    pub live_usd: f64,
     /// `ok`, `soft` (passou do aviso) ou `hard` (esgotado).
     pub level: String,
 }
+
+/// Orçamento estourado com runs em andamento: quem parar e por quê.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetOverrun {
+    pub label: String,
+    pub spent_usd: f64,
+    pub hard_usd: f64,
+    /// Runs ativos no escopo estourado (projeto inteiro ou só o membro).
+    pub run_ids: Vec<String>,
+}
+
+impl BudgetOverrun {
+    pub fn reason(&self) -> String {
+        format!(
+            "Orçamento mensal esgotado para {} durante o run: US$ {:.2} de US$ {:.2} (inclui estimativa dos runs em andamento).",
+            self.label, self.spent_usd, self.hard_usd
+        )
+    }
+}
+
+const ACTIVE: &str = "('queued', 'running', 'waiting_approval')";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -237,14 +262,20 @@ impl Store {
         self.get_budget_policy(scope, scope_id)
     }
 
-    fn month_spent(&self, project_id: &str, agent_id: Option<&str>) -> Result<(f64, u64)> {
+    /// Gasto do mês: custo final do SDK quando existe, senão a estimativa pelos tokens
+    /// (runs em andamento e runs interrompidos antes do resultado). Devolve também a parte ao vivo.
+    fn month_spent(&self, project_id: &str, agent_id: Option<&str>) -> Result<(f64, u64, f64)> {
         let conn = self.conn.lock().expect("store mutex");
-        let (spent, runs): (f64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(cost_usd), 0), COUNT(*) FROM run WHERE project_id = ?1 AND started_at >= ?2 AND (?3 IS NULL OR agent_profile_id = ?3)",
+        let (spent, runs, live): (f64, i64, f64) = conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(COALESCE(cost_usd, est_cost_usd)), 0), COUNT(*),
+                    COALESCE(SUM(CASE WHEN cost_usd IS NULL AND status IN {ACTIVE} THEN est_cost_usd ELSE 0 END), 0)
+                 FROM run WHERE project_id = ?1 AND started_at >= ?2 AND (?3 IS NULL OR agent_profile_id = ?3)"
+            ),
             params![project_id, month_start(), agent_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        Ok((spent, runs as u64))
+        Ok((spent, runs as u64, live))
     }
 
     pub fn budget_status(&self, project_id: &str) -> Result<BudgetStatus> {
@@ -252,7 +283,7 @@ impl Store {
             .get_project(project_id)?
             .with_context(|| format!("Projeto {project_id} não encontrado"))?;
         let policy = self.get_budget_policy(BudgetScope::Project, project_id)?;
-        let (spent, runs) = self.month_spent(project_id, None)?;
+        let (spent, runs, live) = self.month_spent(project_id, None)?;
         let project_line = BudgetLine {
             scope: BudgetScope::Project,
             scope_id: project_id.to_string(),
@@ -262,6 +293,7 @@ impl Store {
             hard_usd: policy.as_ref().and_then(|p| p.hard_usd),
             max_turns: policy.as_ref().and_then(|p| p.max_turns),
             runs,
+            live_usd: live,
             level: level(
                 spent,
                 policy.as_ref().and_then(|p| p.soft_usd),
@@ -272,7 +304,7 @@ impl Store {
         let mut agents = Vec::new();
         for member in self.list_team(project_id)? {
             let policy = self.get_budget_policy(BudgetScope::Agent, &member.profile.id)?;
-            let (spent, runs) = self.month_spent(project_id, Some(&member.profile.id))?;
+            let (spent, runs, live) = self.month_spent(project_id, Some(&member.profile.id))?;
             agents.push(BudgetLine {
                 scope: BudgetScope::Agent,
                 scope_id: member.profile.id.clone(),
@@ -282,6 +314,7 @@ impl Store {
                 hard_usd: policy.as_ref().and_then(|p| p.hard_usd),
                 max_turns: policy.as_ref().and_then(|p| p.max_turns),
                 runs,
+                live_usd: live,
                 level: level(
                     spent,
                     policy.as_ref().and_then(|p| p.soft_usd),
@@ -341,6 +374,93 @@ impl Store {
             );
         }
         Ok(options)
+    }
+}
+
+impl Store {
+    /// Depois de um evento com custo do run: o projeto ou o membro dele passou do limite?
+    /// Devolve os runs ativos do escopo estourado (o próprio run incluído, se ainda ativo).
+    pub fn budget_overrun(&self, run_id: &str) -> Result<Option<BudgetOverrun>> {
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(None);
+        };
+        let status = self.budget_status(&run.project_id)?;
+        let mut lines = vec![&status.project];
+        if let Some(agent) = run.agent_profile_id.as_deref() {
+            lines.extend(status.agents.iter().filter(|a| a.scope_id == agent));
+        }
+        for line in lines {
+            let Some(hard) = line.hard_usd else { continue };
+            if line.spent_usd < hard {
+                continue;
+            }
+            let agent = match line.scope {
+                BudgetScope::Agent => Some(line.scope_id.as_str()),
+                BudgetScope::Project => None,
+            };
+            let run_ids = self.active_runs_in_scope(&run.project_id, agent)?;
+            if run_ids.is_empty() {
+                continue;
+            }
+            return Ok(Some(BudgetOverrun {
+                label: line.label.clone(),
+                spent_usd: line.spent_usd,
+                hard_usd: hard,
+                run_ids,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn active_runs_in_scope(
+        &self,
+        project_id: &str,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store mutex");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id FROM run WHERE project_id = ?1 AND status IN {ACTIVE} AND stop_cause IS NULL
+                AND (?2 IS NULL OR agent_profile_id = ?2) ORDER BY started_at"
+        ))?;
+        let ids = stmt
+            .query_map(params![project_id, agent_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
+    /// Marca o run como interrompido por orçamento (antes de pedir ao sidecar que pare, para
+    /// que o erro de interrupção que chega depois não o transforme em falha), fecha aprovações
+    /// pendentes, bloqueia a task que ele executava e registra na auditoria.
+    /// Devolve `false` se o run já tinha terminado ou já tinha sido parado.
+    pub fn stop_run_for_budget(&self, run_id: &str, reason: &str) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex");
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            &format!(
+                "UPDATE run SET status = 'interrupted', stop_cause = 'budget', error_message = ?2, ended_at = ?3
+                 WHERE id = ?1 AND status IN {ACTIVE} AND stop_cause IS NULL"
+            ),
+            params![run_id, reason, now()],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        super::close_pending_approvals(&tx, run_id)?;
+        let task_id = Self::block_task_of_run(&tx, run_id, reason)?;
+        let (project_id, est): (String, f64) = tx.query_row(
+            "SELECT project_id, est_cost_usd FROM run WHERE id = ?1",
+            params![run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Self::audit_in(
+            &tx,
+            "orçamento",
+            "budget.hard_stop",
+            Some(&project_id),
+            serde_json::json!({"runId": run_id, "taskId": task_id, "estCostUsd": est, "reason": reason}),
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 }
 
@@ -461,6 +581,170 @@ mod tests {
         assert_eq!(
             json["credentials"]["envVars"][0]["injectHosts"][0],
             "api.anthropic.com"
+        );
+    }
+
+    fn usage(input: u64, output: u64, message: Option<&str>, parent: Option<&str>) -> RunEvent {
+        RunEvent::Usage {
+            usage: Usage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+            context_window: None,
+            message_id: message.map(str::to_string),
+            parent_tool_use_id: parent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn live_estimate_counts_each_message_once_including_subagents() {
+        let s = Store::open_in_memory().unwrap();
+        let p = s.create_project("p", "/tmp/p").unwrap();
+        let options = RunOptions {
+            model: Some("claude-sonnet-5-5".into()),
+            ..Default::default()
+        };
+        let run = s.create_run(&p.id, "x", &options).unwrap();
+        s.set_run_status(&run.id, crate::store::models::RunStatus::Running)
+            .unwrap();
+        // 100k de entrada + 10k de saída no Sonnet 5.5 = 0,2 + 0,1 = 0,30.
+        s.record_run_event(&run.id, 1, "t", &usage(100_000, 10_000, Some("m1"), None))
+            .unwrap();
+        // Mesmo id repetido (outro bloco da mesma mensagem): não soma de novo.
+        s.record_run_event(&run.id, 2, "t", &usage(100_000, 10_000, Some("m1"), None))
+            .unwrap();
+        // Subagente: soma no custo, mas não mexe no medidor de contexto.
+        s.record_run_event(
+            &run.id,
+            3,
+            "t",
+            &usage(100_000, 10_000, Some("m2"), Some("toolu_x")),
+        )
+        .unwrap();
+        let r = s.get_run(&run.id).unwrap().unwrap();
+        assert!((r.est_cost_usd - 0.6).abs() < 1e-9, "{}", r.est_cost_usd);
+        assert_eq!(r.input_tokens, 100_000);
+        let status = s.budget_status(&p.id).unwrap();
+        assert!((status.project.spent_usd - 0.6).abs() < 1e-9);
+        assert!((status.project.live_usd - 0.6).abs() < 1e-9);
+        // O custo final do SDK substitui a estimativa e sai do "ao vivo".
+        s.record_run_event(&run.id, 4, "t", &finished(0.55))
+            .unwrap();
+        let status = s.budget_status(&p.id).unwrap();
+        assert!((status.project.spent_usd - 0.55).abs() < 1e-9);
+        assert_eq!(status.project.live_usd, 0.0);
+    }
+
+    #[test]
+    fn overrun_mid_run_stops_active_runs_and_blocks_the_task() {
+        use crate::store::models::RunStatus;
+        use crate::store::orchestration::{TaskInput, TaskStatus};
+        let s = Store::open_in_memory().unwrap();
+        let p = s.create_project("p", "/tmp/p").unwrap();
+        let other = s.create_project("q", "/tmp/q").unwrap();
+        s.set_budget_policy(
+            BudgetScope::Project,
+            &p.id,
+            &BudgetInput {
+                hard_usd: Some(1.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let options = RunOptions {
+            model: Some("claude-opus-5-5".into()),
+            ..Default::default()
+        };
+        let wf = s
+            .create_workflow_from_template(&p.id, "research-synthesis", false)
+            .unwrap();
+        let task = s
+            .create_task(
+                &p.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Migração".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let a = s.create_run(&p.id, "a", &options).unwrap();
+        let b = s.create_run(&p.id, "b", &options).unwrap();
+        let elsewhere = s.create_run(&other.id, "c", &options).unwrap();
+        for r in [&a, &b, &elsewhere] {
+            s.set_run_status(&r.id, RunStatus::Running).unwrap();
+        }
+        assert!(s.claim_task(&task.id, &a.id, None).unwrap());
+
+        // 100k de saída no Opus 5.5 = US$ 2,00 > limite de 1,00... mas só depois do segundo run somar.
+        s.record_run_event(&a.id, 1, "t", &usage(0, 30_000, Some("a1"), None))
+            .unwrap();
+        assert!(s.budget_overrun(&a.id).unwrap().is_none(), "0,60 < 1,00");
+        s.record_run_event(&b.id, 1, "t", &usage(0, 25_000, Some("b1"), None))
+            .unwrap();
+        let overrun = s.budget_overrun(&b.id).unwrap().expect("1,10 >= 1,00");
+        assert_eq!(
+            overrun.run_ids,
+            vec![a.id.clone(), b.id.clone()],
+            "só o projeto estourado"
+        );
+        assert!((overrun.spent_usd - 1.1).abs() < 1e-9);
+        assert!(overrun.reason().contains("US$ 1.10 de US$ 1.00"));
+
+        assert!(s.stop_run_for_budget(&a.id, &overrun.reason()).unwrap());
+        assert!(
+            !s.stop_run_for_budget(&a.id, &overrun.reason()).unwrap(),
+            "idempotente"
+        );
+        assert!(s.stop_run_for_budget(&b.id, &overrun.reason()).unwrap());
+
+        let t = s.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Blocked);
+        assert!(t.lock_run_id.is_none());
+        assert!(t.last_note.unwrap().contains("Orçamento mensal esgotado"));
+
+        // O erro de interrupção e um result tardio do SDK não apagam o motivo.
+        s.record_run_event(
+            &a.id,
+            2,
+            "t",
+            &RunEvent::Error {
+                message: "Run interrompido: aborted".into(),
+                fatal: true,
+            },
+        )
+        .unwrap();
+        s.record_run_event(&b.id, 2, "t", &finished(0.4)).unwrap();
+        let ra = s.get_run(&a.id).unwrap().unwrap();
+        assert_eq!(ra.status, RunStatus::Interrupted);
+        assert_eq!(ra.stop_cause.as_deref(), Some("budget"));
+        assert!(ra.error_message.unwrap().contains("Orçamento"));
+        assert_eq!(
+            s.get_run(&b.id).unwrap().unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert_eq!(
+            s.get_task(&task.id).unwrap().unwrap().status,
+            TaskStatus::Blocked,
+            "o erro tardio não refaz a task"
+        );
+        // Nada mais ativo: sem novo estouro; e o outro projeto seguiu rodando.
+        assert!(s.budget_overrun(&a.id).unwrap().is_none());
+        assert_eq!(
+            s.get_run(&elsewhere.id).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        let events = s
+            .list_audit_events(Some(&p.id), Some("budget."), 50)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.kind == "budget.hard_stop")
+                .count(),
+            2
         );
     }
 

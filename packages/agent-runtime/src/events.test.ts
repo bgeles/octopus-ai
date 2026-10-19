@@ -49,16 +49,27 @@ describe("mapSdkMessage", () => {
       type: "usage",
       usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheCreationTokens: 0 },
       contextWindow: 1000000,
+      messageId: "msg_1",
+      parentToolUseId: null,
     });
   });
 
-  it("mensagens de subagente carregam parent_tool_use_id e não emitem usage", () => {
+  it("mensagens de subagente carregam parent_tool_use_id e emitem usage só para o custo", () => {
     const events = mapSdkMessage({
       type: "assistant",
       parent_tool_use_id: "toolu_parent",
-      message: { content: [{ type: "text", text: "sub" }], usage: { input_tokens: 1, output_tokens: 1 } },
+      message: { id: "msg_sub", content: [{ type: "text", text: "sub" }], usage: { input_tokens: 1, output_tokens: 1 } },
     });
-    expect(events).toEqual([{ type: "assistant_text", messageId: null, text: "sub", parentToolUseId: "toolu_parent" }]);
+    expect(events).toEqual([
+      { type: "assistant_text", messageId: "msg_sub", text: "sub", parentToolUseId: "toolu_parent" },
+      {
+        type: "usage",
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        contextWindow: null,
+        messageId: "msg_sub",
+        parentToolUseId: "toolu_parent",
+      },
+    ]);
   });
 
   it("user com tool_result vira tool_result com conteúdo achatado", () => {

@@ -14,6 +14,7 @@ import { OnboardingView, type OnboardingResult } from "./components/OnboardingVi
 import { SettingsView } from "./components/SettingsView";
 import { Composer } from "./components/Composer";
 import { RunHeader } from "./components/RunHeader";
+import { BudgetStopBanner } from "./components/BudgetStopBanner";
 import { RunSidebar } from "./components/RunSidebar";
 import { SessionsView } from "./components/SessionsView";
 import { Shell, type View } from "./components/Shell";
@@ -323,6 +324,36 @@ export function App({ transport }: AppProps) {
   useEffect(() => {
     transport.listen("runtime:exited", (code) => setToast(`O runtime do agente encerrou (código ${code ?? "desconhecido"}). Reinicie o app.`)).catch(() => {});
   }, [transport]);
+
+  // Custo estimado ao vivo do run aberto e runs parados por orçamento.
+  const [liveCost, setLiveCost] = useState<{ runId: string; usd: number } | null>(null);
+  useEffect(() => {
+    const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    const keep = (fn: () => void) => (disposed ? fn() : unlisteners.push(fn));
+    transport
+      .listen("run:cost", ({ runId, estCostUsd }) => {
+        if (runId === currentRunIdRef.current) setLiveCost({ runId, usd: estCostUsd });
+      })
+      .then(keep)
+      .catch(() => {});
+    transport
+      .listen("budget:stopped", ({ reason }) => {
+        setToast(reason);
+        const projectId = selectedProjectRef.current?.id;
+        if (projectId) {
+          void refreshRuns(projectId);
+          void refreshBoard(projectId);
+          void refreshApprovals(projectId);
+        }
+      })
+      .then(keep)
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      for (const fn of unlisteners) fn();
+    };
+  }, [transport, refreshRuns, refreshBoard, refreshApprovals]);
 
   const active = isRunActive(runState);
   useEffect(() => {
@@ -734,6 +765,7 @@ export function App({ transport }: AppProps) {
             totals={totals}
             sandboxName={sandboxProfiles.find((p) => p.id === (selectedProject?.sandboxProfileId ?? "sandbox_dev"))?.name ?? null}
             budget={budget}
+            liveCostUsd={liveCost && liveCost.runId === currentRun?.id ? liveCost.usd : null}
             onContinue={() => {
               const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
               if (sessionId) beginResume({ sessionId, title: currentRun?.prompt ?? null }, false);
@@ -741,6 +773,15 @@ export function App({ transport }: AppProps) {
           />
           <div className="flex min-h-0 flex-1">
             <section aria-label="Transcript do run" className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+              {currentRun?.stopCause === "budget" && (
+                <BudgetStopBanner
+                  run={currentRun}
+                  onRaiseLimit={() => {
+                    setSecurityTab("budgets");
+                    setView("security");
+                  }}
+                />
+              )}
               <Transcript runId={currentRun?.id ?? null} items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(runId, id, d, note) => void decide(runId, id, d, note)} deciding={deciding} readFile={readProjectFile} />
             </section>
             <RunSidebar

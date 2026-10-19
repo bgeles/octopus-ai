@@ -332,10 +332,17 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     isError: z.boolean().default(false),
     parentToolUseId,
   }),
+  /**
+   * Uso de tokens de uma resposta do modelo. O SDK repete o mesmo uso em cada bloco da mesma
+   * mensagem: `messageId` permite contar uma vez só. Respostas de subagentes vêm com `parentToolUseId`
+   * (entram na estimativa de custo, mas não no medidor de contexto do agente principal).
+   */
   z.object({
     type: z.literal("usage"),
     usage: UsageSchema,
     contextWindow: z.number().int().positive().nullable().default(null),
+    messageId: z.string().nullable().default(null),
+    parentToolUseId,
   }),
   z.object({
     type: z.literal("permission_request"),
