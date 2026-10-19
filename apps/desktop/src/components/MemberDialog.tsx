@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { McpServer, PermissionMode, Role, Skill, TeamMember, TeamMemberInput } from "../lib/types";
+import { EFFORT_LABELS, EFFORT_LEVELS } from "../lib/effort";
+import type { EffortLevel, McpServer, PermissionMode, Role, Skill, TeamMember, TeamMemberInput } from "../lib/types";
 
 type MemberDialogProps = {
   open: boolean;
@@ -31,6 +32,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
   const [instructions, setInstructions] = useState("");
   const [permissionMode, setPermissionMode] = useState<"" | PermissionMode>("");
   const [maxBudget, setMaxBudget] = useState("");
+  const [effort, setEffort] = useState<"" | EffortLevel>("");
   /** `null` = todos os ativos; lista = subconjunto escolhido. */
   const [mcpSel, setMcpSel] = useState<string[] | null>(null);
   const [skillSel, setSkillSel] = useState<string[] | null>(null);
@@ -55,6 +57,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
     setInstructions(member?.profile.instructionsMd ?? "");
     setPermissionMode(member?.profile.permissionMode ?? "");
     setMaxBudget(member?.profile.maxBudgetUsd != null ? String(member.profile.maxBudgetUsd) : "");
+    setEffort(member?.profile.effort ?? "");
   }, [open, member, roles]);
 
   const role = roles.find((r) => r.id === roleId) ?? null;
@@ -77,7 +80,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
     }
     setSaving(true);
     try {
-      await onSave({ name: name.trim(), roleId, reportsToAgentId: reportsTo || null, instructionsMd: instructions.trim() || null, permissionMode: permissionMode || null, maxBudgetUsd: budget, mcpServerIds: mcpSel, skillIds: skillSel });
+      await onSave({ name: name.trim(), roleId, reportsToAgentId: reportsTo || null, instructionsMd: instructions.trim() || null, permissionMode: permissionMode || null, maxBudgetUsd: budget, effort: effort || null, mcpServerIds: mcpSel, skillIds: skillSel });
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -160,6 +163,17 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
               {(Object.keys(PERMISSION_LABELS) as PermissionMode[]).map((mode) => (
                 <option key={mode} value={mode}>
                   {PERMISSION_LABELS[mode]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[13px] font-medium text-slate">
+            Esforço
+            <select aria-label="Esforço do membro" value={effort} onChange={(e) => setEffort(e.target.value as "" | EffortLevel)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
+              <option value="">Padrão do projeto</option>
+              {EFFORT_LEVELS.map((level) => (
+                <option key={level} value={level}>
+                  {EFFORT_LABELS[level]}
                 </option>
               ))}
             </select>

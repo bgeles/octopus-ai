@@ -1,7 +1,8 @@
 import { Plus, RefreshCw, Server, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { EFFORT_LABELS, EFFORT_LEVELS } from "../lib/effort";
 import type { Transport } from "../lib/transport";
-import { KNOWN_MODELS, projectDefaultsKey, type McpServer, type McpServerConfig, type McpServerInput, type Project, type ProjectDefaults, type RunPreview, type Skill, type TeamMember } from "../lib/types";
+import { KNOWN_MODELS, type EffortLevel, projectDefaultsKey, type McpServer, type McpServerConfig, type McpServerInput, type Project, type ProjectDefaults, type RunPreview, type Skill, type TeamMember } from "../lib/types";
 import { formatRelative } from "./SessionsView";
 
 export type HarnessTab = "mcp" | "skills" | "profile";
@@ -49,6 +50,7 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
     const clean: ProjectDefaults = {};
     if (next.model) clean.model = next.model;
     if (next.maxTurns) clean.maxTurns = next.maxTurns;
+    if (next.effort) clean.effort = next.effort;
     await transport.invoke("set_setting", { key: projectDefaultsKey(projectId), value: Object.keys(clean).length ? clean : null });
     setDefaults(clean);
     setPreview(null);
@@ -375,7 +377,7 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
             <section aria-label="Defaults do projeto" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="project-defaults">
               <div className="flex flex-col gap-0.5">
                 <h2 className="m-0 font-display text-sm font-semibold">Defaults do projeto</h2>
-                <span className="text-xs text-slate">valem para runs avulsos e para membros sem valor próprio (modelo) e para as tasks do board (turnos)</span>
+                <span className="text-xs text-slate">valem para runs avulsos e para membros sem valor próprio (modelo, esforço) e para as tasks do board (turnos)</span>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <label className="flex flex-col gap-1 text-xs font-medium text-slate">
@@ -390,6 +392,26 @@ export function HarnessView({ project, transport, availableTabs = ["mcp", "skill
                 <label className="flex flex-col gap-1 text-xs font-medium text-slate">
                   Máx. turnos por run do board
                   <input aria-label="Máximo de turnos do projeto" inputMode="numeric" value={defaults?.maxTurns ?? ""} placeholder="40" onChange={(e) => setDefaults({ ...(defaults ?? {}), maxTurns: e.target.value ? Number(e.target.value) : null })} onBlur={() => void run(() => saveDefaults(defaults ?? {}))} className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 font-mono text-xs text-ink" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate">
+                  Esforço padrão
+                  <select
+                    aria-label="Esforço padrão do projeto"
+                    value={defaults?.effort ?? ""}
+                    onChange={(e) => {
+                      const next = { ...(defaults ?? {}), effort: (e.target.value || null) as EffortLevel | null };
+                      setDefaults(next);
+                      void run(() => saveDefaults(next));
+                    }}
+                    className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-xs text-ink"
+                  >
+                    <option value="">Padrão do modelo</option>
+                    {EFFORT_LEVELS.map((level) => (
+                      <option key={level} value={level}>
+                        {EFFORT_LABELS[level]}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               </div>
               <span className="text-xs text-slate">Permissões, sandbox e orçamento ficam em Segurança; fontes de instruções em Memória → Contexto.</span>

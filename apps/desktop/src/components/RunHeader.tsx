@@ -1,4 +1,5 @@
 import { History, Lock, Square } from "lucide-react";
+import { EFFORT_LABELS } from "../lib/effort";
 import type { BudgetStatus, Project, ProjectTotals, Run } from "../lib/types";
 import type { RunViewState } from "../state/runReducer";
 import { formatUsd } from "./RunSidebar";
@@ -48,6 +49,11 @@ export function RunHeader({ project, run, state, active, onInterrupt, interrupti
           </span>
         )}
         {state.model && <span className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">{state.model}</span>}
+        {run?.options.effort && (
+          <span data-testid="run-effort" className="rounded-full border hairline-strong px-2.5 py-1.5 text-xs text-ink">
+            esforço {EFFORT_LABELS[run.options.effort].toLowerCase()}
+          </span>
+        )}
         {active && liveCostUsd != null && liveCostUsd > 0 && (
           <span data-testid="run-live-cost" title="Estimativa pelos tokens de cada resposta; o custo final vem do SDK quando o run fecha" className="rounded-full border hairline-strong px-2.5 py-1.5 font-mono text-xs text-ink">
             ≈ {formatUsd(liveCostUsd)}

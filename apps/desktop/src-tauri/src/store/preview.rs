@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::Store;
-use crate::protocol::{MemoryOptions, RunOptions};
+use crate::protocol::{EffortLevel, MemoryOptions, RunOptions};
 use crate::secrets::{project_api_key_name, SecretStore, API_KEY_ENV};
 use crate::store::models::AuthMode;
 
@@ -22,6 +22,8 @@ pub struct ProjectDefaults {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,6 +81,9 @@ impl Store {
         }
         if options.max_turns.is_none() {
             options.max_turns = defaults.max_turns;
+        }
+        if options.effort.is_none() {
+            options.effort = defaults.effort;
         }
         Ok(defaults)
     }
@@ -155,6 +160,18 @@ impl Store {
                     },
                 );
             }
+            if let Some(e) = options.effort {
+                note(
+                    &mut notes,
+                    "effort",
+                    e.as_str(),
+                    if requested.effort.is_some() {
+                        "pedido"
+                    } else {
+                        "membro"
+                    },
+                );
+            }
             if let Some(b) = options.max_budget_usd {
                 note(
                     &mut notes,
@@ -201,10 +218,13 @@ impl Store {
             if let Some(t) = options.max_turns {
                 note(&mut notes, "maxTurns", t.to_string(), "pedido");
             }
+            if let Some(e) = options.effort {
+                note(&mut notes, "effort", e.as_str(), "pedido");
+            }
         }
 
         // 2. Defaults do projeto.
-        let before = (options.model.clone(), options.max_turns);
+        let before = (options.model.clone(), options.max_turns, options.effort);
         let defaults = self.apply_project_defaults(project_id, &mut options)?;
         if before.0.is_none() {
             if let Some(m) = &options.model {
@@ -216,8 +236,16 @@ impl Store {
                 note(&mut notes, "maxTurns", t.to_string(), "projeto");
             }
         }
+        if before.2.is_none() {
+            if let Some(e) = options.effort {
+                note(&mut notes, "effort", e.as_str(), "projeto");
+            }
+        }
         if options.model.is_none() {
             note(&mut notes, "model", "padrão do Claude Code", "padrão");
+        }
+        if options.effort.is_none() {
+            note(&mut notes, "effort", "padrão do modelo", "padrão");
         }
         let _ = defaults;
 
@@ -571,5 +599,84 @@ mod tests {
         assert_eq!(d.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(o.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(o.max_turns, Some(5));
+    }
+
+    #[test]
+    fn effort_comes_from_request_then_member_then_project_then_model() {
+        use crate::protocol::EffortLevel;
+        use crate::store::team::TeamMemberInput;
+        let store = Store::open_in_memory().unwrap();
+        let secrets = crate::secrets::MemorySecrets::default();
+        let project = store.create_project("p", "/tmp/p").unwrap();
+        let ana = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Ana".into(),
+                    role_id: "role_implementador".into(),
+                    effort: Some(EffortLevel::High),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let bia = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Bia".into(),
+                    role_id: "role_implementador".into(),
+                    reports_to_agent_id: Some(ana.profile.id.clone()),
+                    effort: Some(EffortLevel::Low),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            bia.profile.effort,
+            Some(EffortLevel::Low),
+            "gravado e relido"
+        );
+        let preview = |agent: Option<&str>, requested: RunOptions| {
+            store
+                .preview_run_options(&secrets, &project.id, agent, "oi", &requested)
+                .unwrap()
+        };
+        // Nada definido: padrão do modelo, e o campo não vai para o SDK.
+        let plain = preview(None, RunOptions::default());
+        assert_eq!(plain.options.effort, None);
+        assert_eq!(origin_of(&plain, "effort"), vec!["padrão"]);
+        // Default do projeto.
+        store
+            .set_setting(
+                &defaults_key(&project.id),
+                &serde_json::json!({"effort": "medium"}),
+            )
+            .unwrap();
+        let p = preview(None, RunOptions::default());
+        assert_eq!(p.options.effort, Some(EffortLevel::Medium));
+        assert_eq!(origin_of(&p, "effort"), vec!["projeto"]);
+        // O membro vence o projeto; o delegado leva o próprio esforço.
+        let m = preview(Some(&ana.profile.id), RunOptions::default());
+        assert_eq!(m.options.effort, Some(EffortLevel::High));
+        assert_eq!(origin_of(&m, "effort"), vec!["membro"]);
+        assert_eq!(
+            m.options.agents.as_ref().unwrap()["bia"].effort,
+            Some(EffortLevel::Low)
+        );
+        // O pedido (composer) vence tudo.
+        let r = preview(
+            Some(&ana.profile.id),
+            RunOptions {
+                effort: Some(EffortLevel::Max),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.options.effort, Some(EffortLevel::Max));
+        assert_eq!(origin_of(&r, "effort"), vec!["pedido"]);
+        assert_eq!(
+            serde_json::to_value(&r.options).unwrap()["effort"],
+            "max",
+            "vai como string para o SDK"
+        );
     }
 }

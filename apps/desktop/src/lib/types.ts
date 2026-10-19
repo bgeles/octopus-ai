@@ -2,9 +2,9 @@
  * Tipos da ponte UI <-> core Rust. Espelham `src-tauri/src/store/models.rs` e os comandos em `commands.rs`.
  * Eventos de run vêm de `@octopus/protocol`.
  */
-import type { AgentDefinition, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
+import type { AgentDefinition, EffortLevel, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 
-export type { AgentDefinition, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
+export type { AgentDefinition, EffortLevel, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -228,6 +228,8 @@ export type AgentProfile = {
   allowedTools: string[] | null;
   maxTurns: number | null;
   maxBudgetUsd: number | null;
+  /** Esforço padrão do membro (null = do projeto, senão do modelo). */
+  effort?: EffortLevel | null;
   createdAt: string;
   /** MCP servers escolhidos (null = todos os ativos do escopo). */
   mcpServerIds?: string[] | null;
@@ -256,6 +258,7 @@ export type TeamMemberInput = {
   allowedTools?: string[] | null;
   maxTurns?: number | null;
   maxBudgetUsd?: number | null;
+  effort?: EffortLevel | null;
   mcpServerIds?: string[] | null;
   skillIds?: string[] | null;
 };
@@ -484,7 +487,7 @@ export type Commands = {
 export type UpdateInfo = { configured: boolean; currentVersion: string; available: boolean; version: string | null; notes: string | null; date: string | null };
 export const UPDATES_ENDPOINT_SETTING = "updates.endpoint";
 
-export type ProjectDefaults = { model?: string | null; maxTurns?: number | null };
+export type ProjectDefaults = { model?: string | null; maxTurns?: number | null; effort?: EffortLevel | null };
 export const projectDefaultsKey = (projectId: string) => `project.${projectId}.defaults`;
 export const KNOWN_MODELS = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 export type PreviewNote = { field: string; value: string; origin: string };

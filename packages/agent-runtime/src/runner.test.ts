@@ -56,6 +56,7 @@ describe("RunManager", () => {
       ...baseParams,
       options: {
         model: "claude-opus-5-5",
+        effort: "xhigh",
         permissionMode: "acceptEdits",
         maxTurns: 7,
         maxBudgetUsd: 2.5,
@@ -68,13 +69,14 @@ describe("RunManager", () => {
         plugins: [{ type: "local", path: "/tmp/plugin", skipMcpDiscovery: true }],
         settingSources: ["project"],
         env: { ANTHROPIC_API_KEY: "sk-test" },
-        agents: { teo: { description: "Testador", prompt: "Você é Téo.", tools: ["Read"] } },
+        agents: { teo: { description: "Testador", prompt: "Você é Téo.", tools: ["Read"], effort: "low" } },
       },
     });
     await manager.drain();
     expect(seen).toMatchObject({
       cwd: "/tmp/proj",
       model: "claude-opus-5-5",
+      effort: "xhigh",
       permissionMode: "acceptEdits",
       maxTurns: 7,
       maxBudgetUsd: 2.5,
@@ -87,7 +89,7 @@ describe("RunManager", () => {
       plugins: [{ type: "local", path: "/tmp/plugin", skipMcpDiscovery: true }],
       settingSources: ["project"],
       includePartialMessages: true,
-      agents: { teo: { description: "Testador", prompt: "Você é Téo.", tools: ["Read"] } },
+      agents: { teo: { description: "Testador", prompt: "Você é Téo.", tools: ["Read"], effort: "low" } },
     });
     expect(seen?.env?.ANTHROPIC_API_KEY).toBe("sk-test");
     expect(typeof seen?.canUseTool).toBe("function");

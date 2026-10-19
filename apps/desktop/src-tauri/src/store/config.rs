@@ -219,7 +219,7 @@ impl Store {
 
     fn all_agent_profiles(&self) -> Result<Vec<AgentProfile>> {
         let conn = self.conn.lock().expect("store mutex");
-        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json FROM agent_profile ORDER BY created_at")?;
+        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort FROM agent_profile ORDER BY created_at")?;
         let rows = stmt
             .query_map([], AgentProfile::from_row_pub)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -429,14 +429,14 @@ impl Store {
                     .map(serde_json::to_string)
                     .transpose()?;
                 let sql = if replace {
-                    "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, effort)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                      ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, role_id = excluded.role_id, name = excluded.name, avatar_seed = excluded.avatar_seed,
                         instructions_md = excluded.instructions_md, model = excluded.model, permission_mode = excluded.permission_mode, allowed_tools_json = excluded.allowed_tools_json,
-                        max_turns = excluded.max_turns, max_budget_usd = excluded.max_budget_usd"
+                        max_turns = excluded.max_turns, max_budget_usd = excluded.max_budget_usd, effort = excluded.effort"
                 } else {
-                    "INSERT OR IGNORE INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                    "INSERT OR IGNORE INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, effort)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
                 };
                 tx.execute(
                     sql,
@@ -452,7 +452,8 @@ impl Store {
                         tools,
                         profile.max_turns.map(|n| n as i64),
                         profile.max_budget_usd,
-                        profile.created_at
+                        profile.created_at,
+                        profile.effort.map(|e| e.as_str())
                     ],
                 )?;
             }

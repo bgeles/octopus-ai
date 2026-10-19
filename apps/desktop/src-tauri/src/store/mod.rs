@@ -71,6 +71,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0015_budget_live",
         include_str!("migrations/0015_budget_live.sql"),
     ),
+    ("0016_effort", include_str!("migrations/0016_effort.sql")),
 ];
 
 pub struct Store {
@@ -776,11 +777,12 @@ mod tests {
                 "0013_mcp_servers".to_string(),
                 "0014_skills".to_string(),
                 "0015_budget_live".to_string(),
+                "0016_effort".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 15);
+        assert_eq!(s.applied_migrations().unwrap().len(), 16);
     }
 
     #[test]
