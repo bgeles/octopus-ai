@@ -25,6 +25,10 @@ export const PermissionModeSchema = z.enum([
 ]);
 export type PermissionMode = z.infer<typeof PermissionModeSchema>;
 
+/** Esforço de raciocínio do modelo (`options.effort` do SDK); ausente = padrão do modelo. */
+export const EffortLevelSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
+
 export const SettingSourceSchema = z.enum(["user", "project", "local"]);
 export type SettingSource = z.infer<typeof SettingSourceSchema>;
 
@@ -46,6 +50,7 @@ export const AgentDefinitionSchema = z.object({
   prompt: z.string(),
   tools: z.array(z.string()).optional(),
   model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
 });
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 
@@ -112,6 +117,7 @@ export type MemoryOptions = z.infer<typeof MemoryOptionsSchema>;
 
 export const RunOptionsSchema = z.object({
   model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
   permissionMode: PermissionModeSchema.optional(),
   maxTurns: z.number().int().positive().optional(),
   maxBudgetUsd: z.number().positive().optional(),

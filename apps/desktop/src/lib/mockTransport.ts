@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, Role, Run, RunOptions, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -218,6 +218,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       allowedTools: input.allowedTools ?? null,
       maxTurns: input.maxTurns ?? null,
       maxBudgetUsd: input.maxBudgetUsd ?? null,
+      effort: input.effort ?? null,
       createdAt: existing?.profile.createdAt ?? new Date().toISOString(),
       mcpServerIds: input.mcpServerIds ?? null,
       skillIds: input.skillIds ?? null,
@@ -910,6 +911,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
             permissionMode: requested.permissionMode ?? member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined,
             allowedTools: requested.allowedTools ?? member.profile.allowedTools ?? member.role.defaultTools ?? undefined,
             maxBudgetUsd: requested.maxBudgetUsd ?? member.profile.maxBudgetUsd ?? undefined,
+            effort: requested.effort ?? member.profile.effort ?? undefined,
             agents: Object.fromEntries(
               members
                 .filter((m) => m.reportsToAgentId === member.profile.id)
@@ -919,9 +921,11 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         : requested;
       if (options.agents && Object.keys(options.agents).length === 0) delete options.agents;
       {
-        const defaults = (settings[`project.${project.id}.defaults`] as { model?: string | null; maxTurns?: number | null } | undefined) ?? {};
+        const defaults = (settings[`project.${project.id}.defaults`] as ProjectDefaults | undefined) ?? {};
         if (!options.model && defaults.model) options.model = defaults.model;
         if (!options.maxTurns && defaults.maxTurns) options.maxTurns = defaults.maxTurns;
+        if (!options.effort && defaults.effort) options.effort = defaults.effort;
+        if (!options.effort) delete options.effort;
       }
       {
         const chosen = member?.profile.mcpServerIds ?? null;
@@ -1533,6 +1537,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         options.allowedTools = requested.allowedTools ?? member.profile.allowedTools ?? member.role.defaultTools ?? undefined;
         options.maxTurns = requested.maxTurns ?? member.profile.maxTurns ?? undefined;
         options.maxBudgetUsd = requested.maxBudgetUsd ?? member.profile.maxBudgetUsd ?? undefined;
+        options.effort = requested.effort ?? member.profile.effort ?? undefined;
+        if (options.effort) note("effort", options.effort, requested.effort ? "pedido" : "membro");
         if (options.model) note("model", options.model, requested.model ? "pedido" : member.profile.model ? "membro" : "cargo");
         if (options.permissionMode) note("permissionMode", options.permissionMode, requested.permissionMode ? "pedido" : member.profile.permissionMode ? "membro" : "cargo");
         if (options.allowedTools) note("allowedTools", options.allowedTools.join(", "), requested.allowedTools ? "pedido" : member.profile.allowedTools ? "membro" : "cargo");
@@ -1543,8 +1549,17 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         if (options.model) note("model", options.model, "pedido");
         if (options.permissionMode) note("permissionMode", options.permissionMode, "pedido");
         if (options.maxTurns) note("maxTurns", String(options.maxTurns), "pedido");
+        if (options.effort) note("effort", options.effort, "pedido");
       }
-      const defaults = (settings[`project.${project.id}.defaults`] as { model?: string | null; maxTurns?: number | null } | undefined) ?? {};
+      const defaults = (settings[`project.${project.id}.defaults`] as ProjectDefaults | undefined) ?? {};
+      if (!options.effort && defaults.effort) {
+        options.effort = defaults.effort;
+        note("effort", defaults.effort, "projeto");
+      }
+      if (!options.effort) {
+        delete options.effort;
+        note("effort", "padrão do modelo", "padrão");
+      }
       if (!options.model && defaults.model) {
         options.model = defaults.model;
         note("model", defaults.model, "projeto");

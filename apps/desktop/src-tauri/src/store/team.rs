@@ -8,7 +8,7 @@ use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use super::{new_id, now, Store};
-use crate::protocol::{AgentDefinition, PermissionMode, RunOptions};
+use crate::protocol::{AgentDefinition, EffortLevel, PermissionMode, RunOptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -119,10 +119,13 @@ pub struct AgentProfile {
     /// Skills escolhidas para este membro (`None` = todas as ativas).
     #[serde(default)]
     pub skill_ids: Option<Vec<String>>,
+    /// Esforço padrão do membro (`None` = do projeto, senão do modelo).
+    #[serde(default)]
+    pub effort: Option<EffortLevel>,
 }
 
 impl AgentProfile {
-    const SELECT: &'static str = "SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json FROM agent_profile";
+    const SELECT: &'static str = "SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort FROM agent_profile";
 
     pub(crate) fn from_row_pub(row: &Row<'_>) -> rusqlite::Result<Self> {
         Self::from_row(row)
@@ -146,6 +149,10 @@ impl AgentProfile {
             created_at: row.get(11)?,
             mcp_server_ids: parse_json_list(row.get::<_, Option<String>>(12)?),
             skill_ids: parse_json_list(row.get::<_, Option<String>>(13)?),
+            effort: row
+                .get::<_, Option<String>>(14)?
+                .as_deref()
+                .and_then(EffortLevel::parse),
         })
     }
 }
@@ -189,6 +196,8 @@ pub struct TeamMemberInput {
     /// Skills do membro (`None` = todas as ativas).
     #[serde(default)]
     pub skill_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub effort: Option<EffortLevel>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -444,8 +453,8 @@ impl Store {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     profile_id,
                     project_id,
@@ -460,7 +469,8 @@ impl Store {
                     input.max_budget_usd,
                     ts,
                     to_json_list(&input.mcp_server_ids),
-                    to_json_list(&input.skill_ids)
+                    to_json_list(&input.skill_ids),
+                    input.effort.map(|e| e.as_str())
                 ],
             )?;
             let position: i64 = tx.query_row(
@@ -506,7 +516,7 @@ impl Store {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
             tx.execute(
-                "UPDATE agent_profile SET role_id = ?2, name = ?3, avatar_seed = ?4, instructions_md = ?5, model = ?6, permission_mode = ?7, allowed_tools_json = ?8, max_turns = ?9, max_budget_usd = ?10, mcp_server_ids_json = ?11, skill_ids_json = ?12 WHERE id = ?1",
+                "UPDATE agent_profile SET role_id = ?2, name = ?3, avatar_seed = ?4, instructions_md = ?5, model = ?6, permission_mode = ?7, allowed_tools_json = ?8, max_turns = ?9, max_budget_usd = ?10, mcp_server_ids_json = ?11, skill_ids_json = ?12, effort = ?13 WHERE id = ?1",
                 params![
                     agent_profile_id,
                     input.role_id,
@@ -519,7 +529,8 @@ impl Store {
                     input.max_turns.map(|n| n as i64),
                     input.max_budget_usd,
                     to_json_list(&input.mcp_server_ids),
-                    to_json_list(&input.skill_ids)
+                    to_json_list(&input.skill_ids),
+                    input.effort.map(|e| e.as_str())
                 ],
             )?;
             tx.execute(
@@ -606,6 +617,9 @@ impl Store {
         if options.max_budget_usd.is_none() {
             options.max_budget_usd = member.profile.max_budget_usd;
         }
+        if options.effort.is_none() {
+            options.effort = member.profile.effort;
+        }
         let delegates: BTreeMap<String, AgentDefinition> = team
             .iter()
             .filter(|m| m.reports_to_agent_id.as_deref() == Some(agent_profile_id))
@@ -625,6 +639,7 @@ impl Store {
                             .model
                             .clone()
                             .or_else(|| m.role.default_model.clone()),
+                        effort: m.profile.effort,
                     },
                 )
             })

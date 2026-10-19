@@ -23,6 +23,7 @@ export type CanUseToolLike = (
 export type QueryOptionsLike = {
   cwd: string;
   model?: string;
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   permissionMode?: string;
   maxTurns?: number;
   maxBudgetUsd?: number;
@@ -34,7 +35,7 @@ export type QueryOptionsLike = {
   settingSources?: Array<"user" | "project" | "local">;
   env?: Record<string, string | undefined>;
   includePartialMessages?: boolean;
-  agents?: Record<string, { description: string; prompt: string; tools?: string[]; model?: string }>;
+  agents?: Record<string, { description: string; prompt: string; tools?: string[]; model?: string; effort?: "low" | "medium" | "high" | "xhigh" | "max" }>;
   /** MCP servers in-process (instâncias do SDK); o runner só repassa. */
   mcpServers?: Record<string, unknown>;
   /** Hooks do SDK (PreToolUse etc.), estruturalmente iguais ao `HookCallbackMatcher`. */
@@ -202,6 +203,7 @@ export class RunManager {
       canUseTool: (toolName, input, { signal }) => this.requestPermission(run, toolName, input, signal),
     };
     if (o.model) options.model = o.model;
+    if (o.effort) options.effort = o.effort;
     if (o.permissionMode) options.permissionMode = o.permissionMode;
     if (o.maxTurns) options.maxTurns = o.maxTurns;
     if (o.maxBudgetUsd) options.maxBudgetUsd = o.maxBudgetUsd;
