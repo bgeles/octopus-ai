@@ -95,6 +95,48 @@ describe("RunManager", () => {
     expect(typeof seen?.canUseTool).toBe("function");
   });
 
+  it("registra hooks livres com matcher, emite hook_ran e devolve a saída filtrada", async () => {
+    const { events, emit } = collector();
+    let seen: QueryOptionsLike | undefined;
+    const spawned: Array<{ command: string; cwd: string; stdin: string; env: Record<string, string> }> = [];
+    const spawnFake = async (command: string, o: { cwd: string; env: Record<string, string>; stdin: string; timeoutMs: number }) => {
+      spawned.push({ command, cwd: o.cwd, stdin: o.stdin, env: o.env });
+      return { exitCode: 2, stdout: "", stderr: "proibido", timedOut: false, durationMs: 3 };
+    };
+    const manager = new RunManager(fakeQuery([{ type: "result", subtype: "success", session_id: "s" }], (o) => (seen = o)), emit, () => {}, null, null, undefined, null, spawnFake);
+    manager.start({
+      ...baseParams,
+      options: {
+        customHooks: [
+          { id: "hook_a", name: "Guarda Bash", event: "PreToolUse", matcher: "Bash", command: "guard.sh", timeoutSec: 10 },
+          { id: "hook_b", name: "Fim", event: "Stop", matcher: "ignorado", command: "fim.sh", timeoutSec: 30 },
+        ],
+      },
+    });
+    await manager.drain();
+    const pre = seen?.hooks?.PreToolUse ?? [];
+    expect(pre).toHaveLength(1);
+    expect(pre[0]).toMatchObject({ matcher: "Bash", timeout: 15 });
+    expect(seen?.hooks?.Stop?.[0]?.matcher).toBeUndefined();
+
+    const output = await pre[0]!.hooks[0]!({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } } as never, "toolu_1", { signal: new AbortController().signal });
+    expect(output).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "proibido" } });
+    expect(spawned[0]).toMatchObject({ command: "guard.sh", cwd: "/tmp/proj" });
+    expect(JSON.parse(spawned[0]!.stdin)).toMatchObject({ tool_name: "Bash" });
+    expect(spawned[0]!.env.OCTOPUS_RUN_ID).toBe("r1");
+    expect(events.find((e) => e.event.type === "hook_ran")?.event).toEqual({
+      type: "hook_ran",
+      hookId: "hook_a",
+      name: "Guarda Bash",
+      event: "PreToolUse",
+      toolName: "Bash",
+      outcome: "blocked",
+      exitCode: 2,
+      durationMs: 3,
+      message: "proibido",
+    });
+  });
+
   it("com taskContext, monta o MCP octopus, libera a tool e emite task_update", async () => {
     const { events, emit } = collector();
     let seen: QueryOptionsLike | undefined;

@@ -40,6 +40,9 @@ pub struct ConfigExport {
     /// MCP servers (globais e dos projetos) sem valores de env/headers.
     #[serde(default)]
     pub mcp_servers: Vec<super::harness::McpServer>,
+    /// Hooks livres (Harness → Hooks), globais e dos projetos.
+    #[serde(default)]
+    pub custom_hooks: Vec<super::hooks::CustomHookRecord>,
 }
 
 /// Linha crua de `team_member` (o export não resolve perfil/cargo, só ids).
@@ -81,6 +84,8 @@ pub struct ImportPreview {
     pub team_members: usize,
     #[serde(default)]
     pub mcp_servers: usize,
+    #[serde(default)]
+    pub custom_hooks: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -96,6 +101,8 @@ pub struct ImportResult {
     pub team_members_applied: usize,
     #[serde(default)]
     pub mcp_servers_applied: usize,
+    #[serde(default)]
+    pub custom_hooks_applied: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +200,7 @@ impl Store {
                 .iter()
                 .map(|s| s.redacted())
                 .collect(),
+            custom_hooks: self.list_all_custom_hooks()?,
         })
     }
 
@@ -253,6 +261,7 @@ impl Store {
             roles: export.roles.len(),
             team_members: export.team_members.len(),
             mcp_servers: export.mcp_servers.len(),
+            custom_hooks: export.custom_hooks.len(),
             ..Default::default()
         };
         for incoming in &export.projects {
@@ -537,6 +546,42 @@ impl Store {
                     params![server.id, server.project_id, server.name, server.transport, serde_json::to_string(&config)?, server.enabled as i64, server.created_at, now()],
                 )?;
                 result.mcp_servers_applied += 1;
+            }
+            for hook in &export.custom_hooks {
+                if let Some(pid) = &hook.project_id {
+                    let exists: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM project WHERE id = ?1",
+                        params![pid],
+                        |r| r.get(0),
+                    )?;
+                    if exists == 0 {
+                        continue;
+                    }
+                }
+                let sql = if replace {
+                    "INSERT INTO custom_hook (id, project_id, name, event, matcher, command, timeout_sec, enabled, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, name = excluded.name, event = excluded.event, matcher = excluded.matcher,
+                        command = excluded.command, timeout_sec = excluded.timeout_sec, enabled = excluded.enabled, updated_at = excluded.updated_at"
+                } else {
+                    "INSERT OR IGNORE INTO custom_hook (id, project_id, name, event, matcher, command, timeout_sec, enabled, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                };
+                result.custom_hooks_applied += tx.execute(
+                    sql,
+                    params![
+                        hook.id,
+                        hook.project_id,
+                        hook.name,
+                        hook.event.as_str(),
+                        hook.matcher,
+                        hook.command,
+                        hook.timeout_sec as i64,
+                        hook.enabled as i64,
+                        hook.created_at,
+                        now()
+                    ],
+                )?;
             }
             tx.commit()?;
         }
@@ -891,6 +936,7 @@ mod tests {
             agent_profiles: vec![],
             team_members: vec![],
             mcp_servers: vec![],
+            custom_hooks: vec![],
         };
         assert!(s.import_config(&export, ImportMode::Merge).is_err());
     }

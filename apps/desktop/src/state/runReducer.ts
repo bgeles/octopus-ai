@@ -1,7 +1,7 @@
 /**
  * Reduz eventos de run em um estado de transcript para a UI. Função pura, sem React.
  */
-import type { RunEvent, RunEventNotification, Usage } from "@octopus/protocol";
+import type { HookOutcome, RunEvent, RunEventNotification, Usage } from "@octopus/protocol";
 
 export type TranscriptItem =
   | { kind: "user"; id: string; text: string; at: string }
@@ -17,7 +17,8 @@ export type TranscriptItem =
       parentToolUseId: string | null;
       at: string;
     }
-  | { kind: "error"; id: string; message: string; fatal: boolean; at: string };
+  | { kind: "error"; id: string; message: string; fatal: boolean; at: string }
+  | { kind: "hook"; id: string; hookId: string; name: string; event: string; toolName: string | null; outcome: HookOutcome; exitCode: number | null; durationMs: number; message: string | null; at: string };
 
 export type PendingPermission = {
   requestId: string;
@@ -219,6 +220,15 @@ function applyEvent(state: RunViewState, event: RunEvent, at: string): RunViewSt
     case "observation":
       // Vão para a memória/contexto no core; o transcript não muda (a compactação ganha vista na Fase 4, iteração 04).
       return state;
+
+    case "hook_ran":
+      return {
+        ...state,
+        items: [
+          ...state.items,
+          { kind: "hook", id: `hook_${state.items.length}_${event.hookId}`, hookId: event.hookId, name: event.name, event: event.event, toolName: event.toolName, outcome: event.outcome, exitCode: event.exitCode, durationMs: event.durationMs, message: event.message, at },
+        ],
+      };
   }
 }
 
