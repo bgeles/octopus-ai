@@ -149,7 +149,7 @@ export function HooksTab({ project, transport, onCount }: HooksTabProps) {
               Nome
               <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Ex.: Formatar Java depois de editar" className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px] text-ink" />
             </label>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_96px] gap-3">
               <label className="flex flex-col gap-1 text-xs font-medium text-slate">
                 Evento
                 <select value={draft.event} onChange={(e) => setDraft({ ...draft, event: e.target.value as CustomHookEvent })} className="rounded-sm border hairline-strong bg-surface px-2.5 py-1.5 text-[13px] text-ink">
@@ -203,7 +203,7 @@ export function HooksTab({ project, transport, onCount }: HooksTabProps) {
               </div>
             </div>
             {test && (
-              <div data-testid="hook-test" data-outcome={test.outcome} className="flex flex-col gap-1 rounded-lg bg-[#151517] p-3 font-mono text-[11px] leading-relaxed text-[#ECECEA]">
+              <div data-testid="hook-test" data-outcome={test.outcome} className={["flex flex-col gap-1 rounded-lg border bg-paper p-3 font-mono text-[11px] leading-relaxed text-ink", test.outcome === "ok" ? "hairline" : "border-brand"].join(" ")}>
                 <span>
                   saída {test.exitCode ?? "—"} em {test.durationMs} ms → {test.outcome === "blocked" ? (draft.event === "PreToolUse" ? "nega" : "bloqueia") : test.outcome === "ok" ? "segue" : test.outcome === "timeout" ? "tempo esgotado" : "erro"}
                   {test.message ? `: ${test.message}` : ""}

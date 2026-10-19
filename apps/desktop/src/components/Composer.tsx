@@ -50,6 +50,7 @@ export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, 
     if (!text || disabled || busy) return;
     onSubmit(text, { permissionMode, maxTurns, effort });
     setPrompt("");
+    setEffort(null);
   };
 
   return (

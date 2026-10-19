@@ -20,6 +20,8 @@ describe("Esforço por run", () => {
     expect(await screen.findByTestId("run-effort")).toHaveTextContent("esforço máximo");
     const [run] = await transport.invoke("list_runs", { projectId: "proj_demo" });
     expect(run?.options.effort).toBe("max");
+    // A escolha vale só para aquele run: o seletor volta ao padrão.
+    expect(screen.getByTestId("effort-select")).toHaveValue("");
   });
 
   it("rodando como membro, vale o esforço da ficha quando o composer fica no padrão", async () => {
