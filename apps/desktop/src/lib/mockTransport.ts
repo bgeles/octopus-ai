@@ -9,7 +9,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, Role, Run, RunOptions, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -218,6 +218,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       allowedTools: input.allowedTools ?? null,
       maxTurns: input.maxTurns ?? null,
       maxBudgetUsd: input.maxBudgetUsd ?? null,
+      effort: input.effort ?? null,
       createdAt: existing?.profile.createdAt ?? new Date().toISOString(),
       mcpServerIds: input.mcpServerIds ?? null,
       skillIds: input.skillIds ?? null,
@@ -307,18 +308,20 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const spentThisMonth = (projectId: string, agentId: string | null) => {
     let spent = 0;
     let count = 0;
+    let live = 0;
     for (const r of runs.values()) {
       if (r.projectId !== projectId || r.startedAt < monthStart() || (agentId && r.agentProfileId !== agentId)) continue;
-      spent += r.costUsd ?? 0;
+      spent += r.costUsd ?? r.estCostUsd ?? 0;
+      if (r.costUsd == null && ["queued", "running", "waiting_approval"].includes(r.status)) live += r.estCostUsd ?? 0;
       count++;
     }
-    return { spent, count };
+    return { spent, count, live };
   };
   const budgetLine = (scope: BudgetLine["scope"], scopeId: string, label: string, projectId: string, agentId: string | null): BudgetLine => {
     const policy = budgets.find((b) => b.scope === scope && b.scopeId === scopeId) ?? null;
-    const { spent, count } = spentThisMonth(projectId, agentId);
+    const { spent, count, live } = spentThisMonth(projectId, agentId);
     const level = policy?.hardUsd != null && spent >= policy.hardUsd ? "hard" : policy?.softUsd != null && spent >= policy.softUsd ? "soft" : "ok";
-    return { scope, scopeId, label, spentUsd: spent, softUsd: policy?.softUsd ?? null, hardUsd: policy?.hardUsd ?? null, maxTurns: policy?.maxTurns ?? null, runs: count, level };
+    return { scope, scopeId, label, spentUsd: spent, softUsd: policy?.softUsd ?? null, hardUsd: policy?.hardUsd ?? null, maxTurns: policy?.maxTurns ?? null, runs: count, liveUsd: live, level };
   };
   const budgetStatus = (projectId: string) => {
     const project = projects.find((p) => p.id === projectId);
@@ -674,6 +677,54 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
     }
   };
+  const usageMessagesByRun = new Map<string, Set<string>>();
+  const customHooks: CustomHookRecord[] = [];
+  let hookCounter = 0;
+  const hooksForProject = (projectId: string | null) => customHooks.filter((h) => h.projectId === null || h.projectId === projectId);
+  /** Depois de cada ferramenta do roteiro: os PostToolUse que casam rodam (simulados) e aparecem no run. */
+  const runPostToolHooksMock = (run: Run, toolName: string) => {
+    for (const hook of run.options.customHooks ?? []) {
+      if (hook.event !== "PostToolUse") continue;
+      if (hook.matcher && !new RegExp(hook.matcher).test(toolName)) continue;
+      const result = simulateHookMock(hook);
+      emitEvent(run.id, { type: "hook_ran", hookId: hook.id, name: hook.name, event: hook.event, toolName, outcome: result.outcome, exitCode: result.exitCode, durationMs: result.durationMs, message: result.message });
+      if (result.outcome === "blocked") audit("hook", "hook.blocked", run.projectId, { runId: run.id, hookId: hook.id, name: hook.name, event: hook.event, tool: toolName, message: result.message });
+    }
+  };
+  /** Como `enforce_budget` no core: limite estourado com runs ativos → para todos os do escopo. Devolve se parou `run`. */
+  const enforceBudgetMock = (run: Run): boolean => {
+    const status = budgetStatus(run.projectId);
+    const lines = [status.project, ...(run.agentProfileId ? status.agents.filter((a) => a.scopeId === run.agentProfileId) : [])];
+    const over = lines.find((l) => l.hardUsd != null && l.spentUsd >= l.hardUsd);
+    if (!over) return false;
+    const reason = `Orçamento mensal esgotado para ${over.label} durante o run: US$ ${over.spentUsd.toFixed(2)} de US$ ${over.hardUsd!.toFixed(2)} (inclui estimativa dos runs em andamento).`;
+    const stopped: string[] = [];
+    for (const r of runs.values()) {
+      if (r.projectId !== run.projectId || r.stopCause || !["queued", "running", "waiting_approval"].includes(r.status)) continue;
+      if (over.scope === "agent" && r.agentProfileId !== over.scopeId) continue;
+      for (const t of pendingTimers.get(r.id) ?? []) clearTimeout(t);
+      pendingTimers.delete(r.id);
+      pausedAt.delete(r.id);
+      r.status = "interrupted";
+      r.stopCause = "budget";
+      r.errorMessage = reason;
+      r.endedAt = new Date().toISOString();
+      closePendingApprovals(r.id);
+      const task = tasks.find((t) => t.lockRunId === r.id);
+      if (task) {
+        task.status = "blocked";
+        task.lockRunId = null;
+        task.lastNote = reason;
+        pushTaskEvent(task.id, "blocked", task.stageId, task.stageId, r.id, "orçamento", reason);
+        emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+      }
+      audit("orçamento", "budget.hard_stop", r.projectId, { runId: r.id, taskId: task?.id ?? null, estCostUsd: r.estCostUsd ?? 0, reason });
+      emitEvent(r.id, { type: "error", message: "Run interrompido: orçamento esgotado", fatal: true });
+      stopped.push(r.id);
+    }
+    if (stopped.length) emit("budget:stopped", { runIds: stopped, reason });
+    return stopped.includes(run.id);
+  };
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
   const scriptByRun = new Map<string, RunEventNotification[]>();
   const scriptFor = (runId: string) => scriptByRun.get(runId) ?? script;
@@ -726,10 +777,19 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         sessions.unshift({ sessionId: ev.sessionId, cwd: project?.path ?? "/", title: run.prompt, tags: [], createdAt: notification.at, lastUsedAt: notification.at });
       }
     } else if (ev.type === "usage") {
-      run.inputTokens = ev.usage.inputTokens;
-      run.outputTokens = ev.usage.outputTokens;
-      run.cacheReadTokens = ev.usage.cacheReadTokens;
+      if (!ev.parentToolUseId) {
+        run.inputTokens = ev.usage.inputTokens;
+        run.outputTokens = ev.usage.outputTokens;
+        run.cacheReadTokens = ev.usage.cacheReadTokens;
+      }
+      const seen = usageMessagesByRun.get(runId) ?? new Set<string>();
+      usageMessagesByRun.set(runId, seen);
+      if (!ev.messageId || !seen.has(ev.messageId)) {
+        if (ev.messageId) seen.add(ev.messageId);
+        run.estCostUsd = (run.estCostUsd ?? 0) + estimateUsdMock(run.model, ev.usage);
+      }
     } else if (ev.type === "result") {
+      if (run.status === "interrupted") return;
       run.status = ev.isError ? "failed" : "completed";
       run.costUsd = ev.costUsd;
       run.numTurns = ev.numTurns;
@@ -787,6 +847,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
     }
     emit("run:event", notification);
+    if (ev.type === "tool_result") {
+      const toolUse = events.get(runId)?.findLast((e) => e.event.type === "tool_use" && e.event.toolUseId === ev.toolUseId);
+      if (toolUse?.event.type === "tool_use") runPostToolHooksMock(run, toolUse.event.name);
+    }
+    if (ev.type === "usage") {
+      emit("run:cost", { runId, estCostUsd: run.estCostUsd ?? 0 });
+      if (enforceBudgetMock(run)) return;
+    }
     if (ev.type === "permission_request") {
       // Pausa até decide_permission.
       pausedAt.set(runId, index + 1);
@@ -860,6 +928,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
             permissionMode: requested.permissionMode ?? member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined,
             allowedTools: requested.allowedTools ?? member.profile.allowedTools ?? member.role.defaultTools ?? undefined,
             maxBudgetUsd: requested.maxBudgetUsd ?? member.profile.maxBudgetUsd ?? undefined,
+            effort: requested.effort ?? member.profile.effort ?? undefined,
             agents: Object.fromEntries(
               members
                 .filter((m) => m.reportsToAgentId === member.profile.id)
@@ -869,9 +938,11 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         : requested;
       if (options.agents && Object.keys(options.agents).length === 0) delete options.agents;
       {
-        const defaults = (settings[`project.${project.id}.defaults`] as { model?: string | null; maxTurns?: number | null } | undefined) ?? {};
+        const defaults = (settings[`project.${project.id}.defaults`] as ProjectDefaults | undefined) ?? {};
         if (!options.model && defaults.model) options.model = defaults.model;
         if (!options.maxTurns && defaults.maxTurns) options.maxTurns = defaults.maxTurns;
+        if (!options.effort && defaults.effort) options.effort = defaults.effort;
+        if (!options.effort) delete options.effort;
       }
       {
         const chosen = member?.profile.mcpServerIds ?? null;
@@ -887,6 +958,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const profile = sandboxProfiles.find((sp) => sp.id === (project.sandboxProfileId ?? "sandbox_dev"));
       if (profile) options.sandbox = profile.settings;
       options.policyHooks = true;
+      {
+        const active = hooksForProject(project.id).filter((h) => h.enabled);
+        if (active.length) options.customHooks = active.map((h) => ({ id: h.id, name: h.name, event: h.event, ...(h.matcher ? { matcher: h.matcher } : {}), command: h.command, timeoutSec: h.timeoutSec }));
+      }
       const run: Run = {
         id: `run_mock_${++runCounter}`,
         projectId: project.id,
@@ -955,6 +1030,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         emitEvent(input.runId, { type: "tool_result", toolUseId, content: `Negado: ${decision.message}`, isError: true, parentToolUseId: null });
       } else {
         emitEvent(input.runId, { type: "tool_result", toolUseId, content: toolName === "Bash" ? "Tests run: 12, Failures: 0" : "OK", isError: false, parentToolUseId: null });
+        runPostToolHooksMock(run, toolName);
       }
       schedule(input.runId, resume);
       return true;
@@ -1385,6 +1461,36 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       audit("você", "context.pin.removed", projectId, { pinId });
       return true;
     },
+    list_custom_hooks: async ({ projectId }) => hooksForProject(projectId ?? null).sort((a, b) => Number(a.projectId !== null) - Number(b.projectId !== null)).map((h) => ({ ...h })),
+    save_custom_hook: async ({ input }) => {
+      const draft = validateHookMock(input);
+      const at = new Date().toISOString();
+      const index = input.id ? customHooks.findIndex((h) => h.id === input.id) : -1;
+      if (input.id && index < 0) throw new Error(`Hook ${input.id} não encontrado`);
+      const record: CustomHookRecord = { id: input.id ?? `hook_${++hookCounter}`, projectId: input.projectId ?? null, name: draft.name, event: input.event, matcher: draft.matcher ?? null, command: draft.command, timeoutSec: draft.timeoutSec, enabled: input.enabled ?? true, createdAt: index >= 0 ? customHooks[index]!.createdAt : at, updatedAt: at };
+      if (index >= 0) customHooks.splice(index, 1, record);
+      else customHooks.push(record);
+      audit("você", index >= 0 ? "harness.hook.updated" : "harness.hook.created", record.projectId, { hookId: record.id, name: record.name, event: record.event, matcher: record.matcher, command: record.command });
+      return { ...record };
+    },
+    set_custom_hook_enabled: async ({ hookId, enabled }) => {
+      const hook = customHooks.find((h) => h.id === hookId);
+      if (!hook) throw new Error(`Hook ${hookId} não encontrado`);
+      hook.enabled = enabled;
+      audit("você", "harness.hook.enabled", hook.projectId, { hookId, name: hook.name, enabled });
+      return { ...hook };
+    },
+    delete_custom_hook: async ({ hookId }) => {
+      const index = customHooks.findIndex((h) => h.id === hookId);
+      if (index < 0) return false;
+      const [hook] = customHooks.splice(index, 1);
+      audit("você", "harness.hook.deleted", hook!.projectId, { hookId, name: hook!.name });
+      return true;
+    },
+    test_custom_hook: async ({ input }) => {
+      const draft = validateHookMock(input.hook);
+      return simulateHookMock({ event: input.hook.event, ...draft });
+    },
     list_mcp_servers: async ({ projectId }) => mcpServers.filter((s) => s.projectId === null || (projectId && s.projectId === projectId)).sort((a, b) => Number(a.projectId !== null) - Number(b.projectId !== null) || a.name.localeCompare(b.name)).map((s) => ({ ...s })),
     save_mcp_server: async ({ input }) => {
       const name = input.name.trim();
@@ -1483,6 +1589,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         options.allowedTools = requested.allowedTools ?? member.profile.allowedTools ?? member.role.defaultTools ?? undefined;
         options.maxTurns = requested.maxTurns ?? member.profile.maxTurns ?? undefined;
         options.maxBudgetUsd = requested.maxBudgetUsd ?? member.profile.maxBudgetUsd ?? undefined;
+        options.effort = requested.effort ?? member.profile.effort ?? undefined;
+        if (options.effort) note("effort", options.effort, requested.effort ? "pedido" : "membro");
         if (options.model) note("model", options.model, requested.model ? "pedido" : member.profile.model ? "membro" : "cargo");
         if (options.permissionMode) note("permissionMode", options.permissionMode, requested.permissionMode ? "pedido" : member.profile.permissionMode ? "membro" : "cargo");
         if (options.allowedTools) note("allowedTools", options.allowedTools.join(", "), requested.allowedTools ? "pedido" : member.profile.allowedTools ? "membro" : "cargo");
@@ -1493,8 +1601,17 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         if (options.model) note("model", options.model, "pedido");
         if (options.permissionMode) note("permissionMode", options.permissionMode, "pedido");
         if (options.maxTurns) note("maxTurns", String(options.maxTurns), "pedido");
+        if (options.effort) note("effort", options.effort, "pedido");
       }
-      const defaults = (settings[`project.${project.id}.defaults`] as { model?: string | null; maxTurns?: number | null } | undefined) ?? {};
+      const defaults = (settings[`project.${project.id}.defaults`] as ProjectDefaults | undefined) ?? {};
+      if (!options.effort && defaults.effort) {
+        options.effort = defaults.effort;
+        note("effort", defaults.effort, "projeto");
+      }
+      if (!options.effort) {
+        delete options.effort;
+        note("effort", "padrão do modelo", "padrão");
+      }
       if (!options.model && defaults.model) {
         options.model = defaults.model;
         note("model", defaults.model, "projeto");
@@ -1541,6 +1658,12 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         { event: "InstructionsLoaded", description: "Lista CLAUDE.md e rules carregados", origin: "Memória · Contexto" },
         { event: "SessionEnd", description: "Fecha o run; consolidação da memória em seguida", origin: "Memória" },
       );
+      const custom = hooksForProject(project.id).filter((h) => h.enabled);
+      for (const h of custom) hooks.push({ event: h.matcher ? `${h.event} · ${h.matcher}` : h.event, description: `${h.name}: ${h.command}`, origin: "Harness · Hooks" });
+      if (custom.length) {
+        options.customHooks = custom.map((h) => ({ id: h.id, name: h.name, event: h.event, ...(h.matcher ? { matcher: h.matcher } : {}), command: h.command, timeoutSec: h.timeoutSec }));
+        note("customHooks", `${custom.length} ${custom.length === 1 ? "hook livre" : "hooks livres"}`, "harness");
+      }
       return { options, notes, hooks, pluginSkills };
     },
     check_update: async () => {
@@ -1642,4 +1765,70 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return unlisten;
     },
   };
+}
+
+/** Espelho de `store/pricing.rs` (US$ por milhão de tokens) para o custo estimado ao vivo no mock. */
+const PRICES_MOCK: Array<[string, number, number, number]> = [
+  ["fable-5-1", 10, 50, 0.25],
+  ["fable", 10, 50, 1],
+  ["opus-5-5", 4, 20, 0.2],
+  ["opus-5", 5, 25, 0.5],
+  ["opus-4-8", 5, 25, 0.5],
+  ["opus-4-7", 5, 25, 0.5],
+  ["opus-4-6", 5, 25, 0.5],
+  ["opus-4-5", 5, 25, 0.5],
+  ["opus-4", 15, 75, 1.5],
+  ["opus", 4, 20, 0.2],
+  ["sonnet-5", 2, 10, 0.2],
+  ["sonnet-4", 3, 15, 0.3],
+  ["sonnet", 2, 10, 0.2],
+  ["haiku-5", 0.1, 0.5, 0.01],
+  ["haiku-4", 1, 5, 0.1],
+  ["haiku", 0.1, 0.5, 0.01],
+];
+
+export function estimateUsdMock(model: string | null | undefined, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }): number {
+  const m = (model ?? "").toLowerCase();
+  const [, input, output, read] = PRICES_MOCK.find(([key]) => m.includes(key)) ?? ["", 5, 25, 0.5];
+  return (usage.inputTokens * input + usage.outputTokens * output + usage.cacheReadTokens * read + usage.cacheCreationTokens * input * 1.25) / 1_000_000;
+}
+
+/** Mesmas regras de `store/hooks.rs::validate`. */
+function validateHookMock(input: CustomHookInput): { name: string; matcher?: string; command: string; timeoutSec: number } {
+  const name = input.name.trim();
+  if (!name || name.length > 80) throw new Error("Dê um nome ao hook (até 80 caracteres)");
+  const command = input.command.trim();
+  if (!command) throw new Error("O comando não pode ser vazio");
+  const timeoutSec = input.timeoutSec ?? 30;
+  if (timeoutSec < 1 || timeoutSec > 600) throw new Error("O tempo limite vai de 1 a 600 segundos");
+  const matcher = input.matcher?.trim();
+  const isTool = input.event === "PreToolUse" || input.event === "PostToolUse";
+  if (matcher && matcher !== "*") {
+    if (!isTool) throw new Error(`Filtro de ferramentas só vale para PreToolUse e PostToolUse; deixe em branco em ${input.event}`);
+    try {
+      new RegExp(matcher);
+    } catch {
+      throw new Error(`Regex inválida no filtro: ${matcher}`);
+    }
+    return { name, matcher, command, timeoutSec };
+  }
+  return { name, command, timeoutSec };
+}
+
+/** O mock não roda shell: lê `exit N`, `echo ... >&2` e `sleep N` do comando para imitar o resultado. */
+export function simulateHookMock(hook: { name: string; event: string; command: string; timeoutSec: number }): HookRunResult {
+  const sleep = /sleep\s+(\d+)/.exec(hook.command);
+  if (sleep && Number(sleep[1]) >= hook.timeoutSec) {
+    return { outcome: "timeout", exitCode: null, durationMs: hook.timeoutSec * 1000, stdout: "", stderr: "", message: `Tempo limite de ${hook.timeoutSec} s esgotado; o run seguiu`, output: {} };
+  }
+  const exit = /exit\s+(\d+)/.exec(hook.command);
+  const code = exit ? Number(exit[1]) : 0;
+  const stderr = /echo\s+["']([^"']+)["']\s*>&2/.exec(hook.command)?.[1] ?? "";
+  if (code === 2) {
+    const message = stderr || `Bloqueado pelo hook “${hook.name}”`;
+    const output = hook.event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: message } } : { decision: "block", reason: message };
+    return { outcome: "blocked", exitCode: 2, durationMs: 41, stdout: "", stderr, message, output };
+  }
+  if (code !== 0) return { outcome: "error", exitCode: code, durationMs: 12, stdout: "", stderr, message: `Saída ${code}${stderr ? `: ${stderr}` : ""}`, output: {} };
+  return { outcome: "ok", exitCode: 0, durationMs: 18, stdout: "", stderr: "", message: null, output: {} };
 }

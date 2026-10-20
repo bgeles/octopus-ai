@@ -214,6 +214,10 @@ impl Sidecar {
         self.request("memory.result", params).await
     }
 
+    pub async fn hooks_test(&self, params: HooksTestParams) -> Result<HookRunResult> {
+        self.request("hooks.test", params).await
+    }
+
     pub async fn mcp_check(&self, params: McpCheckParams) -> Result<McpCheckResult> {
         self.request("mcp.check", params).await
     }

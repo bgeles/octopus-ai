@@ -222,6 +222,18 @@ export function summarize(e: AuditEvent): string {
       return `run ${String(p.runId ?? "").slice(-6)} falhou · ${str("message") ?? ""}`;
     case "run.interrupted":
       return `interrompeu o run ${String(p.runId ?? "").slice(-6)}`;
+    case "harness.hook.created":
+      return `criou o hook ${str("name") ?? ""} (${str("event") ?? ""})`;
+    case "harness.hook.updated":
+      return `alterou o hook ${str("name") ?? ""} (${str("event") ?? ""})`;
+    case "harness.hook.enabled":
+      return `${p.enabled ? "ativou" : "desativou"} o hook ${str("name") ?? ""}`;
+    case "harness.hook.deleted":
+      return `removeu o hook ${str("name") ?? ""}`;
+    case "hook.blocked":
+      return `hook ${str("name") ?? ""} bloqueou ${str("tool") ?? str("event") ?? ""}${str("message") ? ` · ${str("message")}` : ""}`;
+    case "budget.hard_stop":
+      return `parou o run ${String(p.runId ?? "").slice(-6)} por orçamento${typeof p.estCostUsd === "number" ? ` · ≈ US$ ${(p.estCostUsd as number).toFixed(2).replace(".", ",")}` : ""}${p.taskId ? " · task bloqueada" : ""}`;
     case "approval.allow":
       return `permitiu ${str("tool") ?? "ferramenta"}${str("message") ? ` · motivo: ${str("message")}` : ""}`;
     case "approval.deny":

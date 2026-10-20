@@ -126,6 +126,12 @@ pub struct Run {
     /// `agent` (pedido do usuário ou do scheduler) ou `consolidation` (memória com Haiku).
     #[serde(default = "default_run_kind")]
     pub kind: String,
+    /// Custo estimado pelos tokens de cada resposta (vale enquanto `cost_usd` não chega).
+    #[serde(default)]
+    pub est_cost_usd: f64,
+    /// `budget` quando o Octopus interrompeu o run por orçamento esgotado.
+    #[serde(default)]
+    pub stop_cause: Option<String>,
 }
 
 fn default_run_kind() -> String {
@@ -134,7 +140,7 @@ fn default_run_kind() -> String {
 
 impl Run {
     pub const SELECT: &'static str = "SELECT id, project_id, prompt, options_json, status, claude_session_id, model, started_at, ended_at,
-        cost_usd, input_tokens, output_tokens, cache_read_tokens, num_turns, stop_reason, result_text, error_message, agent_profile_id, task_id, kind FROM run";
+        cost_usd, input_tokens, output_tokens, cache_read_tokens, num_turns, stop_reason, result_text, error_message, agent_profile_id, task_id, kind, est_cost_usd, stop_cause FROM run";
 
     pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let options_json: String = row.get(3)?;
@@ -162,6 +168,8 @@ impl Run {
             agent_profile_id: row.get(17)?,
             task_id: row.get(18)?,
             kind: row.get(19)?,
+            est_cost_usd: row.get(20)?,
+            stop_cause: row.get(21)?,
         })
     }
 }

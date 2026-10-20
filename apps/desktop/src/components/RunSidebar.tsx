@@ -82,7 +82,7 @@ export function RunSidebar({ state, run, elapsedMs, onCompact = null }: RunSideb
       <section className="flex flex-col gap-2.5 border-t hairline pt-4">
         <h2 className="m-0 font-display text-sm font-semibold">Custo</h2>
         <div className="grid grid-cols-2 gap-3">
-          <Stat label="Este run" value={cost === null ? "—" : formatUsd(cost)} />
+          <Stat label="Este run" value={cost !== null ? formatUsd(cost) : run?.estCostUsd ? `≈ ${formatUsd(run.estCostUsd)}` : "—"} />
           <Stat label="Orçamento" value={budget === null ? "sem limite" : formatUsd(budget)} />
         </div>
         <div className="flex justify-between text-xs text-slate">

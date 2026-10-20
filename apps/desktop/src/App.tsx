@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PermissionMode } from "@octopus/protocol";
+import type { EffortLevel, PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
 import { BoardView } from "./components/BoardView";
@@ -14,6 +14,7 @@ import { OnboardingView, type OnboardingResult } from "./components/OnboardingVi
 import { SettingsView } from "./components/SettingsView";
 import { Composer } from "./components/Composer";
 import { RunHeader } from "./components/RunHeader";
+import { BudgetStopBanner } from "./components/BudgetStopBanner";
 import { RunSidebar } from "./components/RunSidebar";
 import { SessionsView } from "./components/SessionsView";
 import { Shell, type View } from "./components/Shell";
@@ -21,7 +22,8 @@ import { shortcutFor } from "./lib/shortcuts";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, McpServer, PolicyRule, SandboxProfile, Skill, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, McpServer, PolicyRule, SandboxProfile, Skill, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import { projectDefaultsKey } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
 type AppProps = { transport: Transport };
@@ -324,6 +326,36 @@ export function App({ transport }: AppProps) {
     transport.listen("runtime:exited", (code) => setToast(`O runtime do agente encerrou (código ${code ?? "desconhecido"}). Reinicie o app.`)).catch(() => {});
   }, [transport]);
 
+  // Custo estimado ao vivo do run aberto e runs parados por orçamento.
+  const [liveCost, setLiveCost] = useState<{ runId: string; usd: number } | null>(null);
+  useEffect(() => {
+    const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    const keep = (fn: () => void) => (disposed ? fn() : unlisteners.push(fn));
+    transport
+      .listen("run:cost", ({ runId, estCostUsd }) => {
+        if (runId === currentRunIdRef.current) setLiveCost({ runId, usd: estCostUsd });
+      })
+      .then(keep)
+      .catch(() => {});
+    transport
+      .listen("budget:stopped", ({ reason }) => {
+        setToast(reason);
+        const projectId = selectedProjectRef.current?.id;
+        if (projectId) {
+          void refreshRuns(projectId);
+          void refreshBoard(projectId);
+          void refreshApprovals(projectId);
+        }
+      })
+      .then(keep)
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      for (const fn of unlisteners) fn();
+    };
+  }, [transport, refreshRuns, refreshBoard, refreshApprovals]);
+
   const active = isRunActive(runState);
   useEffect(() => {
     if (!active) return;
@@ -338,7 +370,7 @@ export function App({ transport }: AppProps) {
     return Math.max(0, end - start);
   }, [currentRun, runState.result, active, now]);
 
-  const startRun = async (prompt: string, options: { permissionMode: PermissionMode; maxTurns: number }) => {
+  const startRun = async (prompt: string, options: { permissionMode: PermissionMode; maxTurns: number; effort?: EffortLevel | null }) => {
     if (!selectedProject) return;
     setStarting(true);
     setToast(null);
@@ -351,6 +383,7 @@ export function App({ transport }: AppProps) {
           options: {
             permissionMode: options.permissionMode,
             maxTurns: options.maxTurns,
+            ...(options.effort ? { effort: options.effort } : {}),
             includePartialMessages: true,
             ...(resumeTarget ? { resumeSessionId: resumeTarget.sessionId, ...(resumeTarget.fork ? { forkSession: true } : {}) } : {}),
           },
@@ -607,6 +640,15 @@ export function App({ transport }: AppProps) {
   const openMember = team?.find((m) => m.profile.id === openMemberId) ?? null;
   const monthlyTeamCost = teamTotals.reduce((sum, t) => sum + t.costUsd, 0);
 
+  // Defaults do projeto (esforço) podem ter mudado no Harness: relê as preferências ao voltar ao run.
+  useEffect(() => {
+    if (view !== "run") return;
+    transport
+      .invoke("get_settings", {})
+      .then(setSettings)
+      .catch(() => {});
+  }, [view, transport]);
+
   const schedulerPaused = settings?.["scheduler.paused"] === true;
   const selectedWorkflow = workflows?.find((w) => w.id === selectedWorkflowId) ?? workflows?.[0] ?? null;
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
@@ -734,6 +776,7 @@ export function App({ transport }: AppProps) {
             totals={totals}
             sandboxName={sandboxProfiles.find((p) => p.id === (selectedProject?.sandboxProfileId ?? "sandbox_dev"))?.name ?? null}
             budget={budget}
+            liveCostUsd={liveCost && liveCost.runId === currentRun?.id ? liveCost.usd : null}
             onContinue={() => {
               const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
               if (sessionId) beginResume({ sessionId, title: currentRun?.prompt ?? null }, false);
@@ -741,6 +784,15 @@ export function App({ transport }: AppProps) {
           />
           <div className="flex min-h-0 flex-1">
             <section aria-label="Transcript do run" className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+              {currentRun?.stopCause === "budget" && (
+                <BudgetStopBanner
+                  run={currentRun}
+                  onRaiseLimit={() => {
+                    setSecurityTab("budgets");
+                    setView("security");
+                  }}
+                />
+              )}
               <Transcript runId={currentRun?.id ?? null} items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(runId, id, d, note) => void decide(runId, id, d, note)} deciding={deciding} readFile={readProjectFile} />
             </section>
             <RunSidebar
@@ -766,6 +818,7 @@ export function App({ transport }: AppProps) {
             runAs={runAs}
             onRunAsChange={setRunAs}
             onSubmit={(prompt, options) => void startRun(prompt, options)}
+            defaultEffort={runAs?.profile.effort ?? (selectedProject ? ((settings?.[projectDefaultsKey(selectedProject.id)] as ProjectDefaults | undefined)?.effort ?? null) : null)}
           />
         </>
       )}

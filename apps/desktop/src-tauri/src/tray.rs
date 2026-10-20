@@ -177,6 +177,19 @@ pub fn refresh(app: &AppHandle, store: &Store) {
 }
 
 /// Mostra a notificação do evento, se as preferências pedirem e a janela não estiver em foco.
+/// Runs interrompidos por orçamento: avisa sempre (mesmo com a janela em foco a UI mostra o banner).
+pub fn notify_budget_stop(app: &AppHandle, reason: &str) {
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("Run interrompido por orçamento")
+        .body(reason)
+        .show()
+    {
+        warn!("notificação falhou: {e}");
+    }
+}
+
 pub fn notify(app: &AppHandle, store: &Store, run_id: &str, event: &crate::protocol::RunEvent) {
     let focused = app
         .get_webview_window("main")

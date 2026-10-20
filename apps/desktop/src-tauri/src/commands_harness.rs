@@ -4,7 +4,9 @@ use tauri::State;
 
 use crate::commands::AppState;
 use crate::commands_security::audit;
+use crate::protocol::{HookRunResult, HooksTestParams};
 use crate::store::harness::{McpServer, McpServerInput};
+use crate::store::hooks::{CustomHookInput, CustomHookRecord};
 use crate::store::preview::RunPreview;
 use crate::store::skills::{Skill, SkillInput};
 
@@ -209,5 +211,124 @@ pub fn preview_run_options(
             &input.prompt,
             &input.options,
         )
+        .map_err(err)
+}
+
+// ---------------------------------------------------------------------- hooks livres
+
+#[tauri::command]
+pub fn list_custom_hooks(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> CmdResult<Vec<CustomHookRecord>> {
+    state
+        .store
+        .list_custom_hooks(project_id.as_deref())
+        .map_err(err)
+}
+
+fn hook_payload(h: &CustomHookRecord) -> serde_json::Value {
+    serde_json::json!({"hookId": h.id, "name": h.name, "event": h.event.as_str(), "matcher": h.matcher, "command": h.command, "timeoutSec": h.timeout_sec, "enabled": h.enabled})
+}
+
+#[tauri::command]
+pub fn save_custom_hook(
+    state: State<'_, AppState>,
+    input: CustomHookInput,
+) -> CmdResult<CustomHookRecord> {
+    let creating = input.id.is_none();
+    let hook = state.store.save_custom_hook(&input).map_err(err)?;
+    audit(
+        &state,
+        "você",
+        if creating {
+            "harness.hook.created"
+        } else {
+            "harness.hook.updated"
+        },
+        hook.project_id.as_deref(),
+        hook_payload(&hook),
+    );
+    crate::commands_config::auto_backup(&state);
+    Ok(hook)
+}
+
+#[tauri::command]
+pub fn set_custom_hook_enabled(
+    state: State<'_, AppState>,
+    hook_id: String,
+    enabled: bool,
+) -> CmdResult<CustomHookRecord> {
+    let hook = state
+        .store
+        .set_custom_hook_enabled(&hook_id, enabled)
+        .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "harness.hook.enabled",
+        hook.project_id.as_deref(),
+        serde_json::json!({"hookId": hook.id, "name": hook.name, "enabled": enabled}),
+    );
+    crate::commands_config::auto_backup(&state);
+    Ok(hook)
+}
+
+#[tauri::command]
+pub fn delete_custom_hook(state: State<'_, AppState>, hook_id: String) -> CmdResult<bool> {
+    let hook = state.store.get_custom_hook(&hook_id).map_err(err)?;
+    let removed = state.store.delete_custom_hook(&hook_id).map_err(err)?;
+    if removed {
+        audit(
+            &state,
+            "você",
+            "harness.hook.deleted",
+            hook.as_ref().and_then(|h| h.project_id.as_deref()),
+            serde_json::json!({"hookId": hook_id, "name": hook.as_ref().map(|h| h.name.clone())}),
+        );
+        crate::commands_config::auto_backup(&state);
+    }
+    Ok(removed)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCustomHookInput {
+    pub project_id: String,
+    pub hook: CustomHookInput,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_input: Option<serde_json::Value>,
+}
+
+/// Roda o hook (salvo ou ainda no formulário) com uma entrada de exemplo, pelo sidecar.
+#[tauri::command]
+pub async fn test_custom_hook(
+    state: State<'_, AppState>,
+    input: TestCustomHookInput,
+) -> CmdResult<HookRunResult> {
+    let project = state
+        .store
+        .get_project(&input.project_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Projeto {} não encontrado", input.project_id))?;
+    let mut hook = crate::store::hooks::draft_hook(&input.hook).map_err(err)?;
+    // O pedido ao sidecar espera até 60 s.
+    hook.timeout_sec = hook.timeout_sec.min(50);
+    let sample = crate::store::hooks::sample_input(
+        hook.event,
+        &project.path,
+        input.tool_name.as_deref(),
+        input.tool_input.as_ref(),
+    );
+    state
+        .sidecar
+        .hooks_test(HooksTestParams {
+            hook,
+            cwd: project.path.clone(),
+            input: sample,
+        })
+        .await
         .map_err(err)
 }

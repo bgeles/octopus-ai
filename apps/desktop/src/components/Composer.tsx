@@ -1,6 +1,7 @@
 import { GitFork, History } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { PermissionMode } from "@octopus/protocol";
+import type { EffortLevel, PermissionMode } from "@octopus/protocol";
+import { EFFORT_LABELS, EFFORT_LEVELS } from "../lib/effort";
 import type { ResumeTarget, TeamMember } from "../lib/types";
 import { Avatar } from "./Avatar";
 
@@ -13,7 +14,9 @@ type ComposerProps = {
   team?: TeamMember[];
   runAs?: TeamMember | null;
   onRunAsChange?: (member: TeamMember | null) => void;
-  onSubmit: (prompt: string, options: { permissionMode: PermissionMode; maxTurns: number }) => void;
+  onSubmit: (prompt: string, options: { permissionMode: PermissionMode; maxTurns: number; effort: EffortLevel | null }) => void;
+  /** Esforço que vale sem escolha no composer (do membro ou do projeto), para o rótulo "Padrão". */
+  defaultEffort?: EffortLevel | null;
 };
 
 const PERMISSION_LABELS: Record<PermissionMode, string> = {
@@ -24,10 +27,12 @@ const PERMISSION_LABELS: Record<PermissionMode, string> = {
   auto: "Classificador automático",
 };
 
-export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, team = [], runAs = null, onRunAsChange, onSubmit }: ComposerProps) {
+export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, team = [], runAs = null, onRunAsChange, onSubmit, defaultEffort = null }: ComposerProps) {
   const [prompt, setPrompt] = useState("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
   const [maxTurns, setMaxTurns] = useState(40);
+  /** `null` = padrão (membro → projeto → modelo); vale só para o próximo run. */
+  const [effort, setEffort] = useState<EffortLevel | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Ao escolher retomar/bifurcar, o foco vai direto para a instrução.
@@ -43,8 +48,9 @@ export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, 
   const submit = () => {
     const text = prompt.trim();
     if (!text || disabled || busy) return;
-    onSubmit(text, { permissionMode, maxTurns });
+    onSubmit(text, { permissionMode, maxTurns, effort });
     setPrompt("");
+    setEffort(null);
   };
 
   return (
@@ -129,6 +135,17 @@ export function Composer({ disabled, busy, resumeTarget = null, onCancelResume, 
             {(Object.keys(PERMISSION_LABELS) as PermissionMode[]).map((mode) => (
               <option key={mode} value={mode}>
                 {PERMISSION_LABELS[mode]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5">
+          Esforço
+          <select aria-label="Esforço" value={effort ?? ""} onChange={(e) => setEffort((e.target.value || null) as EffortLevel | null)} disabled={disabled} className="rounded-sm border hairline-strong bg-surface px-2 py-1 text-xs text-ink" data-testid="effort-select">
+            <option value="">{defaultEffort ? `Padrão (${EFFORT_LABELS[defaultEffort].toLowerCase()}${runAs?.profile.effort ? `, de ${runAs.profile.name}` : ", do projeto"})` : "Padrão do modelo"}</option>
+            {EFFORT_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {EFFORT_LABELS[level]}
               </option>
             ))}
           </select>

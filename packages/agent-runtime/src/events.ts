@@ -93,8 +93,14 @@ function mapAssistant(message: SdkMessageLike): RunEvent[] {
   }
 
   const usage = toUsage(message.message?.usage);
-  if (usage && parentToolUseId === null) {
-    events.push({ type: "usage", usage, contextWindow: contextWindowOf(message) });
+  if (usage) {
+    events.push({
+      type: "usage",
+      usage,
+      contextWindow: parentToolUseId === null ? contextWindowOf(message) : null,
+      messageId: message.message?.id ?? null,
+      parentToolUseId,
+    });
   }
   return events;
 }

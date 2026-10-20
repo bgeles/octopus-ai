@@ -35,6 +35,17 @@ pub const RUN_EVENT: &str = "run:event";
 pub const RUNTIME_LOG: &str = "runtime:log";
 /// Emitido quando o sidecar morre; payload é o código de saída (ou null).
 pub const RUNTIME_EXITED: &str = "runtime:exited";
+/// Emitido quando o Octopus interrompe runs por orçamento esgotado; payload `BudgetStopped`.
+pub const BUDGET_STOPPED: &str = "budget:stopped";
+/// Custo estimado de um run ativo mudou; payload `{runId, estCostUsd}`.
+pub const RUN_COST: &str = "run:cost";
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetStopped {
+    pub run_ids: Vec<String>,
+    pub reason: String,
+}
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
@@ -104,6 +115,27 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         ) || ev.event.is_terminal()
                         {
                             tray::refresh(&app, &store);
+                        }
+                        if let protocol::RunEvent::Usage { .. } = ev.event {
+                            if let Ok(Some(run)) = store.get_run(&ev.run_id) {
+                                let _ = app.emit(
+                                    RUN_COST,
+                                    serde_json::json!({"runId": run.id, "estCostUsd": run.est_cost_usd}),
+                                );
+                            }
+                        }
+                        // O custo andou (estimativa por resposta ou custo final): confere o orçamento.
+                        if matches!(
+                            ev.event,
+                            protocol::RunEvent::Usage { .. } | protocol::RunEvent::Result { .. }
+                        ) {
+                            if let Some(stopped) =
+                                enforce_budget(&store, &sidecar, &ev.run_id).await
+                            {
+                                let _ = app.emit(BUDGET_STOPPED, &stopped);
+                                tray::notify_budget_stop(&app, &stopped.reason);
+                                tray::refresh(&app, &store);
+                            }
                         }
                         if ev.event.is_terminal() {
                             maybe_consolidate(&store, &sidecar, &ev.run_id).await;
@@ -237,6 +269,46 @@ pub async fn maybe_consolidate(store: &Store, sidecar: &sidecar::Sidecar, run_id
             let _ = store.mark_run_failed(&crun.id, &format!("{e:#}"));
             warn!("run de consolidação {} não iniciou: {e}", crun.id);
         }
+    }
+}
+
+/// Se o projeto ou o membro do run passou do limite mensal (fechado + estimativa ao vivo),
+/// interrompe os runs ativos daquele escopo. Cada run é marcado antes de pedir a parada ao
+/// sidecar, para que o erro de interrupção que chega depois não vire "falhou".
+pub async fn enforce_budget(
+    store: &Store,
+    sidecar: &sidecar::Sidecar,
+    run_id: &str,
+) -> Option<BudgetStopped> {
+    let overrun = match store.budget_overrun(run_id) {
+        Ok(Some(o)) => o,
+        Ok(None) => return None,
+        Err(e) => {
+            warn!("checagem de orçamento do run {run_id} falhou: {e:#}");
+            return None;
+        }
+    };
+    let reason = overrun.reason();
+    let mut stopped = Vec::new();
+    for id in &overrun.run_ids {
+        match store.stop_run_for_budget(id, &reason) {
+            Ok(true) => {
+                if let Err(e) = sidecar.interrupt_run(id).await {
+                    warn!("interromper {id} por orçamento falhou no sidecar: {e:#}");
+                }
+                stopped.push(id.clone());
+            }
+            Ok(false) => {}
+            Err(e) => warn!("não consegui parar {id} por orçamento: {e:#}"),
+        }
+    }
+    if stopped.is_empty() {
+        None
+    } else {
+        Some(BudgetStopped {
+            run_ids: stopped,
+            reason,
+        })
     }
 }
 
@@ -408,6 +480,11 @@ pub fn run() {
             commands_harness::read_skill,
             commands_harness::save_skill,
             commands_harness::preview_run_options,
+            commands_harness::list_custom_hooks,
+            commands_harness::save_custom_hook,
+            commands_harness::set_custom_hook_enabled,
+            commands_harness::delete_custom_hook,
+            commands_harness::test_custom_hook,
             updates::check_update,
             updates::install_update,
         ])

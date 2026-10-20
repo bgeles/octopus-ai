@@ -8,11 +8,13 @@ pub mod attention;
 pub mod audit;
 pub mod config;
 pub mod harness;
+pub mod hooks;
 pub mod memory;
 pub mod models;
 pub mod orchestration;
 pub mod policy;
 pub mod preview;
+pub mod pricing;
 pub mod security;
 pub mod skills;
 pub mod team;
@@ -66,6 +68,15 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0013_mcp_servers.sql"),
     ),
     ("0014_skills", include_str!("migrations/0014_skills.sql")),
+    (
+        "0015_budget_live",
+        include_str!("migrations/0015_budget_live.sql"),
+    ),
+    ("0016_effort", include_str!("migrations/0016_effort.sql")),
+    (
+        "0017_custom_hooks",
+        include_str!("migrations/0017_custom_hooks.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -267,6 +278,8 @@ impl Store {
             agent_profile_id: agent_profile_id.map(str::to_string),
             task_id: task_id.map(str::to_string),
             kind: "agent".into(),
+            est_cost_usd: 0.0,
+            stop_cause: None,
         };
         self.insert_run(&run)?;
         Ok(run)
@@ -409,11 +422,44 @@ impl Store {
                     serde_json::json!({"runId": run_id, "sessionId": session_id, "model": model}),
                 )?;
             }
-            RunEvent::Usage { usage, .. } => {
-                tx.execute(
-                    "UPDATE run SET input_tokens = ?2, output_tokens = ?3, cache_read_tokens = ?4 WHERE id = ?1",
-                    params![run_id, usage.input_tokens as i64, usage.output_tokens as i64, usage.cache_read_tokens as i64],
-                )?;
+            RunEvent::Usage {
+                usage,
+                message_id,
+                parent_tool_use_id,
+                ..
+            } => {
+                // Medidor de contexto: só o agente principal.
+                if parent_tool_use_id.is_none() {
+                    tx.execute(
+                        "UPDATE run SET input_tokens = ?2, output_tokens = ?3, cache_read_tokens = ?4 WHERE id = ?1",
+                        params![run_id, usage.input_tokens as i64, usage.output_tokens as i64, usage.cache_read_tokens as i64],
+                    )?;
+                }
+                // Custo estimado: cada mensagem do modelo conta uma vez, subagentes inclusive.
+                let first_time = match message_id {
+                    Some(mid) => {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO run_usage_message (run_id, message_id) VALUES (?1, ?2)",
+                            params![run_id, mid],
+                        )? > 0
+                    }
+                    None => true,
+                };
+                if first_time {
+                    let model: Option<String> = tx
+                        .query_row(
+                            "SELECT model FROM run WHERE id = ?1",
+                            params![run_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    let cost = pricing::estimate_usd(model.as_deref(), usage);
+                    tx.execute(
+                        "UPDATE run SET est_cost_usd = est_cost_usd + ?2 WHERE id = ?1",
+                        params![run_id, cost],
+                    )?;
+                }
             }
             RunEvent::PermissionRequest {
                 request_id,
@@ -465,7 +511,7 @@ impl Store {
                     serde_json::json!({"runId": run_id, "status": status.as_str(), "costUsd": cost_usd, "numTurns": num_turns}),
                 )?;
                 tx.execute(
-                    "UPDATE run SET status = ?2, claude_session_id = COALESCE(NULLIF(?3, ''), claude_session_id),
+                    "UPDATE run SET status = CASE WHEN status = 'interrupted' THEN 'interrupted' ELSE ?2 END, claude_session_id = COALESCE(NULLIF(?3, ''), claude_session_id),
                         cost_usd = ?4, num_turns = ?5, stop_reason = ?6, result_text = ?7, ended_at = ?8,
                         input_tokens = COALESCE(?9, input_tokens), output_tokens = COALESCE(?10, output_tokens),
                         cache_read_tokens = COALESCE(?11, cache_read_tokens)
@@ -567,13 +613,36 @@ impl Store {
                     project_id.as_deref(),
                     serde_json::json!({"runId": run_id, "message": message}),
                 )?;
+                // Um run que o usuário ou o orçamento interrompeu continua "interrompido",
+                // com o motivo que o Octopus gravou ao parar.
                 tx.execute(
-                    "UPDATE run SET status = 'failed', error_message = ?2, ended_at = ?3 WHERE id = ?1",
+                    "UPDATE run SET status = CASE WHEN status = 'interrupted' THEN 'interrupted' ELSE 'failed' END,
+                        error_message = CASE WHEN stop_cause IS NOT NULL THEN COALESCE(error_message, ?2) ELSE ?2 END,
+                        ended_at = ?3 WHERE id = ?1",
                     params![run_id, message, now()],
                 )?;
             }
             RunEvent::TaskUpdate { status, note, .. } => {
                 Self::apply_task_update(&tx, run_id, *status, note.as_deref())?;
+            }
+            // Hook livre que bloqueou algo: fica na auditoria (os que só rodaram ficam no run).
+            RunEvent::HookRan {
+                hook_id,
+                name,
+                event: hook_event,
+                tool_name,
+                outcome: crate::protocol::HookOutcome::Blocked,
+                message,
+                ..
+            } => {
+                let project_id = run_project_id(&tx, run_id)?;
+                Self::audit_in(
+                    &tx,
+                    "hook",
+                    "hook.blocked",
+                    project_id.as_deref(),
+                    serde_json::json!({"runId": run_id, "hookId": hook_id, "name": name, "event": hook_event.as_str(), "tool": tool_name, "message": message}),
+                )?;
             }
             _ => {}
         }
@@ -731,11 +800,14 @@ mod tests {
                 "0012_context_pin".to_string(),
                 "0013_mcp_servers".to_string(),
                 "0014_skills".to_string(),
+                "0015_budget_live".to_string(),
+                "0016_effort".to_string(),
+                "0017_custom_hooks".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 14);
+        assert_eq!(s.applied_migrations().unwrap().len(), 17);
     }
 
     #[test]
@@ -821,6 +893,8 @@ mod tests {
                     cache_creation_tokens: 0,
                 },
                 context_window: Some(1_000_000),
+                message_id: None,
+                parent_tool_use_id: None,
             },
         )
         .unwrap();

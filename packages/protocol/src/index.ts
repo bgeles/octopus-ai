@@ -25,6 +25,10 @@ export const PermissionModeSchema = z.enum([
 ]);
 export type PermissionMode = z.infer<typeof PermissionModeSchema>;
 
+/** Esforço de raciocínio do modelo (`options.effort` do SDK); ausente = padrão do modelo. */
+export const EffortLevelSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
+
 export const SettingSourceSchema = z.enum(["user", "project", "local"]);
 export type SettingSource = z.infer<typeof SettingSourceSchema>;
 
@@ -46,6 +50,7 @@ export const AgentDefinitionSchema = z.object({
   prompt: z.string(),
   tools: z.array(z.string()).optional(),
   model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
 });
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 
@@ -110,8 +115,44 @@ export const MemoryOptionsSchema = z.object({
 });
 export type MemoryOptions = z.infer<typeof MemoryOptionsSchema>;
 
+/** Eventos do SDK em que um hook livre (comando de shell do usuário) pode rodar. */
+export const CustomHookEventSchema = z.enum([
+  "PreToolUse",
+  "PostToolUse",
+  "UserPromptSubmit",
+  "Stop",
+  "SubagentStop",
+  "SessionStart",
+  "SessionEnd",
+  "Notification",
+  "PreCompact",
+]);
+export type CustomHookEvent = z.infer<typeof CustomHookEventSchema>;
+
+/**
+ * Hook livre: o sidecar roda `command` com `/bin/sh -c` na pasta do projeto, com o JSON do evento
+ * no stdin (como os command hooks do Claude Code). Saída 0 segue (JSON no stdout pode acrescentar
+ * contexto); saída 2 bloqueia com o stderr como motivo; outra saída é erro sem bloquear.
+ * Num PreToolUse ele só nega ou pede aprovação: nunca libera nem reescreve a entrada.
+ */
+export const CustomHookSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  event: CustomHookEventSchema,
+  /** Regex sobre o nome da ferramenta (só eventos de ferramenta); ausente = todas. */
+  matcher: z.string().optional(),
+  command: z.string().min(1),
+  timeoutSec: z.number().int().positive().max(600).default(30),
+});
+export type CustomHook = z.infer<typeof CustomHookSchema>;
+
+/** Como o Octopus interpretou uma execução de hook livre. */
+export const HookOutcomeSchema = z.enum(["ok", "blocked", "error", "timeout"]);
+export type HookOutcome = z.infer<typeof HookOutcomeSchema>;
+
 export const RunOptionsSchema = z.object({
   model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
   permissionMode: PermissionModeSchema.optional(),
   maxTurns: z.number().int().positive().optional(),
   maxBudgetUsd: z.number().positive().optional(),
@@ -139,6 +180,8 @@ export const RunOptionsSchema = z.object({
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
   /** Plugins locais do Claude Code (o Octopus monta um com as skills ativas do membro/projeto). */
   plugins: z.array(z.object({ type: z.literal("local"), path: z.string().min(1), skipMcpDiscovery: z.boolean().optional() })).optional(),
+  /** Hooks livres do usuário (Harness → Hooks), registrados ao lado dos declarativos. */
+  customHooks: z.array(CustomHookSchema).optional(),
 });
 export type SdkPlugin = NonNullable<RunOptions["plugins"]>[number];
 export type RunOptions = z.infer<typeof RunOptionsSchema>;
@@ -262,6 +305,26 @@ export const McpCheckResultSchema = z.object({
 });
 export type McpCheckResult = z.infer<typeof McpCheckResultSchema>;
 
+/** Testa um hook livre com uma entrada de exemplo, pelo mesmo código que roda nos runs. */
+export const HooksTestParamsSchema = z.object({
+  hook: CustomHookSchema,
+  cwd: z.string(),
+  input: z.record(z.string(), z.unknown()),
+});
+export type HooksTestParams = z.infer<typeof HooksTestParamsSchema>;
+export const HookRunResultSchema = z.object({
+  outcome: HookOutcomeSchema,
+  exitCode: z.number().int().nullable(),
+  durationMs: z.number().int().nonnegative(),
+  stdout: z.string(),
+  stderr: z.string(),
+  /** Motivo de bloqueio (stderr na saída 2, ou `reason` do JSON) ou mensagem de erro. */
+  message: z.string().nullable(),
+  /** O que voltaria para o SDK (já filtrado: sem `allow` nem `updatedInput`). */
+  output: z.record(z.string(), z.unknown()),
+});
+export type HookRunResult = z.infer<typeof HookRunResultSchema>;
+
 export const RequestMethodSchema = z.enum([
   "runtime.hello",
   "run.start",
@@ -273,6 +336,7 @@ export const RequestMethodSchema = z.enum([
   "hook.decide",
   "memory.result",
   "mcp.check",
+  "hooks.test",
 ]);
 export type RequestMethod = z.infer<typeof RequestMethodSchema>;
 
@@ -287,6 +351,7 @@ export const REQUEST_SCHEMAS = {
   "hook.decide": { params: HookDecideParamsSchema, result: HookDecideResultSchema },
   "memory.result": { params: MemoryResultParamsSchema, result: MemoryResultResultSchema },
   "mcp.check": { params: McpCheckParamsSchema, result: McpCheckResultSchema },
+  "hooks.test": { params: HooksTestParamsSchema, result: HookRunResultSchema },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -332,10 +397,17 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     isError: z.boolean().default(false),
     parentToolUseId,
   }),
+  /**
+   * Uso de tokens de uma resposta do modelo. O SDK repete o mesmo uso em cada bloco da mesma
+   * mensagem: `messageId` permite contar uma vez só. Respostas de subagentes vêm com `parentToolUseId`
+   * (entram na estimativa de custo, mas não no medidor de contexto do agente principal).
+   */
   z.object({
     type: z.literal("usage"),
     usage: UsageSchema,
     contextWindow: z.number().int().positive().nullable().default(null),
+    messageId: z.string().nullable().default(null),
+    parentToolUseId,
   }),
   z.object({
     type: z.literal("permission_request"),
@@ -390,6 +462,18 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     filePath: z.string(),
     memoryType: z.enum(["User", "Project", "Local", "Managed"]),
     loadReason: z.string(),
+  }),
+  /** Um hook livre rodou (o comando do usuário), com o resultado interpretado. */
+  z.object({
+    type: z.literal("hook_ran"),
+    hookId: z.string(),
+    name: z.string(),
+    event: CustomHookEventSchema,
+    toolName: z.string().nullable().default(null),
+    outcome: HookOutcomeSchema,
+    exitCode: z.number().int().nullable().default(null),
+    durationMs: z.number().int().nonnegative(),
+    message: z.string().nullable().default(null),
   }),
   /** Compactação do contexto pelo Claude Code (PreCompact sem resumo; PostCompact com o resumo gerado). */
   z.object({

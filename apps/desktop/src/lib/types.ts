@@ -2,9 +2,9 @@
  * Tipos da ponte UI <-> core Rust. Espelham `src-tauri/src/store/models.rs` e os comandos em `commands.rs`.
  * Eventos de run vêm de `@octopus/protocol`.
  */
-import type { AgentDefinition, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
+import type { AgentDefinition, CustomHookEvent, EffortLevel, HelloResult, HookOutcome, HookRunResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 
-export type { AgentDefinition, HelloResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
+export type { AgentDefinition, CustomHookEvent, EffortLevel, HelloResult, HookOutcome, HookRunResult, McpCheckResult, McpServerConfig, McpToolInfo, PermissionDecision, PermissionMode, RunEvent, RunEventNotification, RunOptions, SandboxSettings, SessionSummary, TaskContext, TaskStatusUpdate };
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -44,6 +44,10 @@ export type Run = {
   taskId: string | null;
   /** `agent` (pedido do usuário ou do scheduler) ou `consolidation` (memória com Haiku). */
   kind: RunKind;
+  /** Custo estimado pelos tokens de cada resposta (vale enquanto `costUsd` não chega). */
+  estCostUsd?: number;
+  /** `budget` quando o Octopus interrompeu o run por orçamento esgotado. */
+  stopCause?: "budget" | null;
 };
 
 export type RunKind = "agent" | "consolidation";
@@ -140,7 +144,7 @@ export type SandboxProfile = { id: string; name: string; description: string; bu
 export type BudgetScope = "project" | "agent";
 export type BudgetPolicy = { id: string; scope: BudgetScope; scopeId: string; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; createdAt: string; updatedAt: string };
 export type BudgetInput = { softUsd?: number | null; hardUsd?: number | null; maxTurns?: number | null };
-export type BudgetLine = { scope: BudgetScope; scopeId: string; label: string; spentUsd: number; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; runs: number; level: "ok" | "soft" | "hard" };
+export type BudgetLine = { scope: BudgetScope; scopeId: string; label: string; spentUsd: number; softUsd: number | null; hardUsd: number | null; maxTurns: number | null; runs: number; liveUsd?: number; level: "ok" | "soft" | "hard" };
 export type BudgetStatus = { month: string; project: BudgetLine; agents: BudgetLine[] };
 
 export type RuleKind = "command" | "write" | "tool" | "mcp";
@@ -224,6 +228,8 @@ export type AgentProfile = {
   allowedTools: string[] | null;
   maxTurns: number | null;
   maxBudgetUsd: number | null;
+  /** Esforço padrão do membro (null = do projeto, senão do modelo). */
+  effort?: EffortLevel | null;
   createdAt: string;
   /** MCP servers escolhidos (null = todos os ativos do escopo). */
   mcpServerIds?: string[] | null;
@@ -252,6 +258,7 @@ export type TeamMemberInput = {
   allowedTools?: string[] | null;
   maxTurns?: number | null;
   maxBudgetUsd?: number | null;
+  effort?: EffortLevel | null;
   mcpServerIds?: string[] | null;
   skillIds?: string[] | null;
 };
@@ -463,6 +470,11 @@ export type Commands = {
   delete_mcp_server: { args: { serverId: string }; result: boolean };
   /** Abre o servidor pelo sidecar, lista as tools e guarda a saúde. */
   check_mcp_server: { args: { serverId: string }; result: McpServer };
+  list_custom_hooks: { args: { projectId?: string | null }; result: CustomHookRecord[] };
+  save_custom_hook: { args: { input: CustomHookInput }; result: CustomHookRecord };
+  set_custom_hook_enabled: { args: { hookId: string; enabled: boolean }; result: CustomHookRecord };
+  delete_custom_hook: { args: { hookId: string }; result: boolean };
+  test_custom_hook: { args: { input: { projectId: string; hook: CustomHookInput; toolName?: string | null; toolInput?: unknown } }; result: HookRunResult };
   list_skills: { args: { projectId: string }; result: Skill[] };
   /** Varre .claude/skills do projeto e ~/.claude/skills. */
   scan_skills: { args: { projectId: string }; result: Skill[] };
@@ -480,7 +492,7 @@ export type Commands = {
 export type UpdateInfo = { configured: boolean; currentVersion: string; available: boolean; version: string | null; notes: string | null; date: string | null };
 export const UPDATES_ENDPOINT_SETTING = "updates.endpoint";
 
-export type ProjectDefaults = { model?: string | null; maxTurns?: number | null };
+export type ProjectDefaults = { model?: string | null; maxTurns?: number | null; effort?: EffortLevel | null };
 export const projectDefaultsKey = (projectId: string) => `project.${projectId}.defaults`;
 export const KNOWN_MODELS = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 export type PreviewNote = { field: string; value: string; origin: string };
@@ -517,6 +529,23 @@ export type McpServer = {
   updatedAt: string;
 };
 export type McpServerInput = { id?: string | null; projectId?: string | null; name: string; config: McpServerConfig; enabled?: boolean };
+
+/** Hook livre (Harness → Hooks): comando de shell do usuário num evento do agente. */
+export type CustomHookRecord = {
+  id: string;
+  /** null = todos os projetos. */
+  projectId: string | null;
+  name: string;
+  event: CustomHookEvent;
+  matcher: string | null;
+  command: string;
+  timeoutSec: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CustomHookInput = { id?: string | null; projectId?: string | null; name: string; event: CustomHookEvent; matcher?: string | null; command: string; timeoutSec?: number; enabled?: boolean };
 
 /** Pin de contexto: arquivo do projeto, página da memória ou texto, sempre injetado no brief. */
 export type ContextPinKind = "file" | "page" | "text";
@@ -601,6 +630,12 @@ export type Events = {
   "app:navigate": string;
   /** Menu bar pediu para abrir um run ativo. */
   "app:open-run": string;
+  /** O Octopus interrompeu runs porque o orçamento mensal estourou no meio deles. */
+  "budget:stopped": BudgetStopped;
+  /** Custo estimado de um run ativo mudou. */
+  "run:cost": { runId: string; estCostUsd: number };
 };
+
+export type BudgetStopped = { runIds: string[]; reason: string };
 
 export type EventName = keyof Events;
