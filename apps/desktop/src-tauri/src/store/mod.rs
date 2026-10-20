@@ -77,6 +77,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0017_custom_hooks",
         include_str!("migrations/0017_custom_hooks.sql"),
     ),
+    (
+        "0018_usage_cost",
+        include_str!("migrations/0018_usage_cost.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -435,29 +439,42 @@ impl Store {
                         params![run_id, usage.input_tokens as i64, usage.output_tokens as i64, usage.cache_read_tokens as i64],
                     )?;
                 }
-                // Custo estimado: cada mensagem do modelo conta uma vez, subagentes inclusive.
-                let first_time = match message_id {
+                // Custo estimado, subagentes inclusive. A mesma mensagem pode chegar de novo com
+                // mais saída (streaming): soma só o que passou do maior valor já contado.
+                let model: Option<String> = tx
+                    .query_row(
+                        "SELECT model FROM run WHERE id = ?1",
+                        params![run_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let cost = pricing::estimate_usd(model.as_deref(), usage);
+                let delta = match message_id {
                     Some(mid) => {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO run_usage_message (run_id, message_id) VALUES (?1, ?2)",
-                            params![run_id, mid],
-                        )? > 0
+                        let counted: Option<f64> = tx
+                            .query_row(
+                                "SELECT cost_usd FROM run_usage_message WHERE run_id = ?1 AND message_id = ?2",
+                                params![run_id, mid],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        let delta = (cost - counted.unwrap_or(0.0)).max(0.0);
+                        if delta > 0.0 || counted.is_none() {
+                            tx.execute(
+                                "INSERT INTO run_usage_message (run_id, message_id, cost_usd) VALUES (?1, ?2, ?3)
+                                 ON CONFLICT(run_id, message_id) DO UPDATE SET cost_usd = MAX(cost_usd, excluded.cost_usd)",
+                                params![run_id, mid, cost],
+                            )?;
+                        }
+                        delta
                     }
-                    None => true,
+                    None => cost,
                 };
-                if first_time {
-                    let model: Option<String> = tx
-                        .query_row(
-                            "SELECT model FROM run WHERE id = ?1",
-                            params![run_id],
-                            |r| r.get(0),
-                        )
-                        .optional()?
-                        .flatten();
-                    let cost = pricing::estimate_usd(model.as_deref(), usage);
+                if delta > 0.0 {
                     tx.execute(
                         "UPDATE run SET est_cost_usd = est_cost_usd + ?2 WHERE id = ?1",
-                        params![run_id, cost],
+                        params![run_id, delta],
                     )?;
                 }
             }
@@ -803,11 +820,12 @@ mod tests {
                 "0015_budget_live".to_string(),
                 "0016_effort".to_string(),
                 "0017_custom_hooks".to_string(),
+                "0018_usage_cost".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 17);
+        assert_eq!(s.applied_migrations().unwrap().len(), 18);
     }
 
     #[test]

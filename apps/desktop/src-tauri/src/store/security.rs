@@ -91,9 +91,20 @@ pub struct BudgetOverrun {
 impl BudgetOverrun {
     pub fn reason(&self) -> String {
         format!(
-            "Orçamento mensal esgotado para {} durante o run: US$ {:.2} de US$ {:.2} (inclui estimativa dos runs em andamento).",
-            self.label, self.spent_usd, self.hard_usd
+            "Orçamento mensal esgotado para {} durante o run: US$ {} de US$ {} (inclui estimativa dos runs em andamento).",
+            self.label,
+            usd(self.spent_usd),
+            usd(self.hard_usd)
         )
+    }
+}
+
+/// Dois decimais, ou quatro abaixo de 1 centavo (limites de teste não viram "0.00").
+fn usd(v: f64) -> String {
+    if v.abs() < 0.01 && v != 0.0 {
+        format!("{v:.4}")
+    } else {
+        format!("{v:.2}")
     }
 }
 
@@ -615,6 +626,17 @@ mod tests {
         // Mesmo id repetido (outro bloco da mesma mensagem): não soma de novo.
         s.record_run_event(&run.id, 2, "t", &usage(100_000, 10_000, Some("m1"), None))
             .unwrap();
+        // O mesmo id com menos saída também não soma; com mais saída, soma só a diferença.
+        s.record_run_event(&run.id, 21, "t", &usage(100_000, 5_000, Some("m1"), None))
+            .unwrap();
+        s.record_run_event(&run.id, 22, "t", &usage(100_000, 20_000, Some("m1"), None))
+            .unwrap();
+        assert!(
+            (s.get_run(&run.id).unwrap().unwrap().est_cost_usd - 0.4).abs() < 1e-9,
+            "0,2 de entrada + 0,2 de saída"
+        );
+        s.record_run_event(&run.id, 23, "t", &usage(100_000, 10_000, Some("m1"), None))
+            .unwrap();
         // Subagente: soma no custo, mas não mexe no medidor de contexto.
         s.record_run_event(
             &run.id,
@@ -624,11 +646,11 @@ mod tests {
         )
         .unwrap();
         let r = s.get_run(&run.id).unwrap().unwrap();
-        assert!((r.est_cost_usd - 0.6).abs() < 1e-9, "{}", r.est_cost_usd);
+        assert!((r.est_cost_usd - 0.7).abs() < 1e-9, "{}", r.est_cost_usd);
         assert_eq!(r.input_tokens, 100_000);
         let status = s.budget_status(&p.id).unwrap();
-        assert!((status.project.spent_usd - 0.6).abs() < 1e-9);
-        assert!((status.project.live_usd - 0.6).abs() < 1e-9);
+        assert!((status.project.spent_usd - 0.7).abs() < 1e-9);
+        assert!((status.project.live_usd - 0.7).abs() < 1e-9);
         // O custo final do SDK substitui a estimativa e sai do "ao vivo".
         s.record_run_event(&run.id, 4, "t", &finished(0.55))
             .unwrap();
@@ -692,6 +714,8 @@ mod tests {
         );
         assert!((overrun.spent_usd - 1.1).abs() < 1e-9);
         assert!(overrun.reason().contains("US$ 1.10 de US$ 1.00"));
+        assert_eq!(super::usd(0.0008), "0.0008");
+        assert_eq!(super::usd(0.0), "0.00");
 
         assert!(s.stop_run_for_budget(&a.id, &overrun.reason()).unwrap());
         assert!(

@@ -5,7 +5,7 @@
 import type { CustomHook, HookDecision, MemoryCallResult, MemoryOp, PermissionDecision, RunEvent, RunHookNotification, RunMemoryCallNotification, RunStartParams } from "@octopus/protocol";
 import { JsonRpcErrorCode } from "@octopus/protocol";
 import { TOOL_EVENTS, defaultHookSpawn, runCustomHook, type HookSpawn } from "./customHooks.js";
-import { mapSdkMessage, type SdkMessageLike } from "./events.js";
+import { StreamUsageTracker, mapSdkMessage, type SdkMessageLike } from "./events.js";
 import { MEMORY_HOOK_EVENTS, eventFromMemoryHook, type MemoryHookInputLike } from "./memoryHooks.js";
 import { MEMORY_TOOLS, type OctopusToolsFactory } from "./octopusTools.js";
 import { RpcError } from "./rpc.js";
@@ -294,8 +294,9 @@ export class RunManager {
     try {
       const handle = this.queryFn({ prompt, options });
       run.handle = handle;
+      const streamUsage = new StreamUsageTracker();
       for await (const message of handle) {
-        for (const event of mapSdkMessage(message)) {
+        for (const event of [...mapSdkMessage(message), ...streamUsage.observe(message)]) {
           if (event.type === "result") sawResult = true;
           this.emit(run.runId, event);
         }

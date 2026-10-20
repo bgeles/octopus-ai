@@ -1790,7 +1790,7 @@ const PRICES_MOCK: Array<[string, number, number, number]> = [
 export function estimateUsdMock(model: string | null | undefined, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }): number {
   const m = (model ?? "").toLowerCase();
   const [, input, output, read] = PRICES_MOCK.find(([key]) => m.includes(key)) ?? ["", 5, 25, 0.5];
-  return (usage.inputTokens * input + usage.outputTokens * output + usage.cacheReadTokens * read + usage.cacheCreationTokens * input * 1.25) / 1_000_000;
+  return (usage.inputTokens * input + usage.outputTokens * output + usage.cacheReadTokens * read + usage.cacheCreationTokens * input * 2) / 1_000_000;
 }
 
 /** Mesmas regras de `store/hooks.rs::validate`. */

@@ -1,6 +1,6 @@
 import { RunEventSchema } from "@octopus/protocol";
 import { describe, expect, it } from "vitest";
-import { mapSdkMessage, stringifyToolResult } from "./events.js";
+import { StreamUsageTracker, mapSdkMessage, stringifyToolResult } from "./events.js";
 
 describe("mapSdkMessage", () => {
   it("system/init vira session_init", () => {
@@ -158,5 +158,21 @@ describe("stringifyToolResult", () => {
     expect(stringifyToolResult(["a", { type: "text", text: "b" }, { type: "image", data: "zz" }])).toBe('a\nb\n{"type":"image","data":"zz"}');
     expect(stringifyToolResult({ k: 1 })).toBe('{"k":1}');
     expect(stringifyToolResult(undefined)).toBe("");
+  });
+});
+
+describe("StreamUsageTracker", () => {
+  it("emite o uso final da mensagem no message_delta, por fio", () => {
+    const t = new StreamUsageTracker();
+    expect(t.observe({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "msg_a", usage: { input_tokens: 2, output_tokens: 1, cache_read_input_tokens: 900, cache_creation_input_tokens: 50 } } } })).toEqual([]);
+    // Subagente em paralelo não se mistura com o principal.
+    t.observe({ type: "stream_event", parent_tool_use_id: "toolu_x", event: { type: "message_start", message: { id: "msg_b", usage: { input_tokens: 5, output_tokens: 1 } } } });
+    expect(t.observe({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_delta", usage: { output_tokens: 240 } } })).toEqual([
+      { type: "usage", usage: { inputTokens: 2, outputTokens: 240, cacheReadTokens: 900, cacheCreationTokens: 50 }, contextWindow: null, messageId: "msg_a", parentToolUseId: null },
+    ]);
+    expect(t.observe({ type: "stream_event", parent_tool_use_id: "toolu_x", event: { type: "message_delta", usage: { output_tokens: 30 } } })[0]).toMatchObject({ messageId: "msg_b", parentToolUseId: "toolu_x", usage: { outputTokens: 30, inputTokens: 5 } });
+    // Delta sem start conhecido e outros tipos não emitem nada.
+    expect(t.observe({ type: "stream_event", parent_tool_use_id: "toolu_y", event: { type: "message_delta", usage: { output_tokens: 3 } } })).toEqual([]);
+    expect(t.observe({ type: "assistant", message: { id: "msg_a" } })).toEqual([]);
   });
 });

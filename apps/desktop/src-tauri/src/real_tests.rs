@@ -154,11 +154,36 @@ fn describe(e: &RunEvent) -> String {
             ..
         } => format!("hook_ran {name} {outcome:?} {message:?}"),
         RunEvent::Result {
+            usage: Some(u),
+            cost_usd,
+            ..
+        } => format!(
+            "result US$ {cost_usd:?} · total in {} out {} cache_read {} cache_write {}",
+            u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens
+        ),
+        RunEvent::Result {
             cost_usd,
             result_text,
             ..
         } => format!("result US$ {cost_usd:?} {result_text:?}"),
         RunEvent::Error { message, .. } => format!("error {message}"),
+        RunEvent::Usage {
+            usage,
+            message_id,
+            parent_tool_use_id,
+            ..
+        } => format!(
+            "usage {message_id:?}{} in {} out {} cache_read {} cache_write {}",
+            if parent_tool_use_id.is_some() {
+                " (sub)"
+            } else {
+                ""
+            },
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens
+        ),
         other => other.kind().to_string(),
     }
 }
@@ -337,7 +362,13 @@ async fn real_harness_mcp_skill_hook_and_effort() {
     );
     let text = done.result_text.unwrap_or_default().to_lowercase();
     assert!(text.contains("abacaxi"), "a tool MCP não respondeu: {text}");
-    assert!(done.est_cost_usd > 0.0, "a estimativa ao vivo não somou");
+    // A estimativa ao vivo acompanha o custo final do SDK (medido: 0,0028 × 0,00278).
+    let final_cost = done.cost_usd.expect("custo final");
+    assert!(
+        (done.est_cost_usd - final_cost).abs() / final_cost < 0.15,
+        "estimativa {:.5} longe do custo final {final_cost:.5}",
+        done.est_cost_usd
+    );
     sidecar.shutdown().await;
 }
 
