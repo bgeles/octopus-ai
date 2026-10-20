@@ -34,10 +34,11 @@ if (env.OCTOPUS_SIDECAR !== "node") {
     const s = spawnSync(step[0], step[1], { cwd: root, env, stdio: "inherit" });
     if (s.status !== 0) process.exit(s.status ?? 1);
   }
-  overrides.build = { beforeBuildCommand: "npm run sidecar:build && npm run build" };
-  overrides.bundle = { externalBin: ["binaries/agent-runtime", "binaries/claude"], resources: null, macOS: { entitlements: "Entitlements.plist" } };
+  overrides.bundle = { externalBin: ["binaries/agent-runtime", "binaries/claude"], macOS: { entitlements: "Entitlements.plist" } };
   console.log("[build-app] sidecar como binário único (sem Node na máquina)");
 } else {
+  overrides.build = { beforeBuildCommand: "npm run sidecar:build && npm run build && node ../../scripts/bundle-sidecar.mjs" };
+  overrides.bundle = { resources: { "sidecar-bundle/": "sidecar/" } };
   console.log("[build-app] sidecar no modo node (resources + node da máquina)");
 }
 if (existsSync(keyPath)) {
