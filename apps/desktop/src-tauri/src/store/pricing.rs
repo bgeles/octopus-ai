@@ -12,7 +12,8 @@ pub struct Price {
     pub input: f64,
     pub output: f64,
     pub cache_read: f64,
-    /// Escrita de cache com TTL de 5 minutos (o padrão do Claude Code).
+    /// Escrita de cache com TTL de 1 hora (2× a entrada), que é o que o Claude Code usa:
+    /// medido num run real em 20/10/2026 (com 1,25× a estimativa ficava ~⅓ abaixo do custo final).
     pub cache_write: f64,
 }
 
@@ -21,7 +22,7 @@ const fn price(input: f64, output: f64, cache_read: f64) -> Price {
         input,
         output,
         cache_read,
-        cache_write: input * 1.25,
+        cache_write: input * 2.0,
     }
 }
 
@@ -111,11 +112,14 @@ mod tests {
 
     #[test]
     fn estimates_all_token_kinds() {
-        // Sonnet 5.5: 1M de entrada (2) + 100k de saída (1) + 1M lidos do cache (0,2) + 100k escritos (0,25)
+        // Sonnet 5.5: 1M de entrada (2) + 100k de saída (1) + 1M lidos do cache (0,2) + 100k escritos (0,4)
         let cost = estimate_usd(
             Some("claude-sonnet-5-5"),
             &usage(1_000_000, 100_000, 1_000_000, 100_000),
         );
-        assert!((cost - 3.45).abs() < 1e-9, "{cost}");
+        assert!((cost - 3.6).abs() < 1e-9, "{cost}");
+        // Run real (Haiku 5.5) de 20/10/2026: custo final US$ 0,00119.
+        let real = estimate_usd(Some("claude-haiku-5-5"), &usage(2, 17, 25_365, 4_474));
+        assert!((real - 0.00119).abs() < 0.00005, "{real}");
     }
 }

@@ -107,6 +107,13 @@ pub fn check_environment(state: State<'_, AppState>) -> EnvironmentCheck {
 }
 
 fn check_node() -> CheckItem {
+    // App distribuído: o sidecar é um binário único com o Node dentro.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    if let Some(item) = bundled_sidecar_check(exe_dir.as_deref()) {
+        return item;
+    }
     let path = find_node();
     let version = Command::new(&path)
         .arg("--version")
@@ -124,6 +131,15 @@ fn check_node() -> CheckItem {
             detail: "Node.js não encontrado no PATH nem nos caminhos usuais (Homebrew, /usr/local, Volta, nvm). Instale o Node ou aponte OCTOPUS_NODE.".into(),
         },
     }
+}
+
+/// Com `agent-runtime` ao lado do executável o Node da máquina não é usado.
+fn bundled_sidecar_check(exe_dir: Option<&std::path::Path>) -> Option<CheckItem> {
+    let dir = exe_dir?;
+    dir.join("agent-runtime").is_file().then(|| CheckItem {
+        ok: true,
+        detail: "não é necessário: o sidecar vem como binário único no app".into(),
+    })
 }
 
 /// Detecta credenciais do Claude Code sem ler o segredo: só verifica a existência.
@@ -315,4 +331,17 @@ pub fn config_backup_reveal(state: State<'_, AppState>, id: String) -> CmdResult
         .status()
         .map_err(err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bundled_sidecar_makes_node_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::bundled_sidecar_check(Some(dir.path())).is_none());
+        std::fs::write(dir.path().join("agent-runtime"), "bin").unwrap();
+        let item = super::bundled_sidecar_check(Some(dir.path())).unwrap();
+        assert!(item.ok);
+        assert!(item.detail.contains("binário único"));
+    }
 }

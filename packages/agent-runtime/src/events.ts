@@ -15,6 +15,7 @@ export type SdkMessageLike = {
   model?: string;
   tools?: string[];
   mcp_servers?: Array<{ name: string; status: string }>;
+  skills?: string[];
   permissionMode?: string;
   // assistant/user
   message?: {
@@ -23,7 +24,7 @@ export type SdkMessageLike = {
     usage?: SdkUsageLike;
   };
   // stream_event
-  event?: { type?: string; delta?: { type?: string; text?: string } };
+  event?: { type?: string; delta?: { type?: string; text?: string }; message?: { id?: string; usage?: SdkUsageLike }; usage?: SdkUsageLike };
   // result
   is_error?: boolean;
   duration_ms?: number;
@@ -75,6 +76,7 @@ function mapSystem(message: SdkMessageLike): RunEvent[] {
       tools: message.tools ?? [],
       mcpServers: (message.mcp_servers ?? []).map((s) => ({ name: s.name, status: s.status })),
       permissionMode: message.permissionMode ?? null,
+      skills: message.skills ?? [],
     },
   ];
 }
@@ -128,6 +130,39 @@ function mapStreamEvent(message: SdkMessageLike): RunEvent[] {
     return [{ type: "assistant_text_delta", text: delta.text, parentToolUseId: message.parent_tool_use_id ?? null }];
   }
   return [];
+}
+
+/**
+ * Uso final de cada mensagem pelo streaming. O SDK manda a mensagem `assistant` antes de ela
+ * terminar, com a saída ainda parcial; o total de saída só chega no `message_delta`. Guarda o
+ * uso do `message_start` por fio (agente principal ou subagente) e, no `message_delta`, emite um
+ * `usage` com o mesmo `messageId`: o core soma só a diferença para o que já tinha contado.
+ */
+export class StreamUsageTracker {
+  private readonly open = new Map<string, { id: string; usage: SdkUsageLike }>();
+
+  observe(message: SdkMessageLike): RunEvent[] {
+    if (message.type !== "stream_event" || !message.event) return [];
+    const thread = message.parent_tool_use_id ?? "";
+    const ev = message.event;
+    if (ev.type === "message_start" && ev.message?.id) {
+      this.open.set(thread, { id: ev.message.id, usage: { ...(ev.message.usage ?? {}) } });
+      return [];
+    }
+    if (ev.type === "message_delta" && ev.usage) {
+      const current = this.open.get(thread);
+      if (!current) return [];
+      const merged: SdkUsageLike = { ...current.usage };
+      for (const [k, v] of Object.entries(ev.usage) as Array<[keyof SdkUsageLike, number | null | undefined]>) {
+        if (typeof v === "number") merged[k] = v;
+      }
+      current.usage = merged;
+      const usage = toUsage(merged);
+      if (!usage) return [];
+      return [{ type: "usage", usage, contextWindow: null, messageId: current.id, parentToolUseId: message.parent_tool_use_id ?? null }];
+    }
+    return [];
+  }
 }
 
 function mapResult(message: SdkMessageLike): RunEvent {

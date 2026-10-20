@@ -371,6 +371,8 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     tools: z.array(z.string()).default([]),
     mcpServers: z.array(z.object({ name: z.string(), status: z.string() })).default([]),
     permissionMode: z.string().nullable().default(null),
+    /** Skills que o Claude Code carregou (do usuário, do projeto e dos plugins). */
+    skills: z.array(z.string()).default([]),
   }),
   z.object({
     type: z.literal("assistant_text"),

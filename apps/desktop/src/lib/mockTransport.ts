@@ -532,7 +532,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const summary = notes[0] ?? run.resultText ?? run.prompt;
       const at = new Date().toISOString();
       const script: RunEventNotification[] = [
-        { runId: crun.id, seq: 0, at, event: { type: "session_init", sessionId: `sess_${crun.id}`, model: "claude-haiku-5-5", tools: ["mcp__octopus__memory_write", "mcp__octopus__memory_search"], mcpServers: [{ name: "octopus", status: "connected" }], permissionMode: "dontAsk" } },
+        { runId: crun.id, seq: 0, at, event: { type: "session_init", sessionId: `sess_${crun.id}`, model: "claude-haiku-5-5", tools: ["mcp__octopus__memory_write", "mcp__octopus__memory_search"], mcpServers: [{ name: "octopus", status: "connected" }], permissionMode: "dontAsk", skills: [] } },
         { runId: crun.id, seq: 1, at, event: { type: "tool_use", toolUseId: `toolu_${crun.id}`, name: "mcp__octopus__memory_write", input: { kind: "decisions", title: `Aprendizados do run ${run.id.slice(-4)}`, body: summary.slice(0, 600), source: "haiku" }, parentToolUseId: null } },
         { runId: crun.id, seq: 2, at, event: { type: "tool_result", toolUseId: `toolu_${crun.id}`, content: "Página gravada na memória do projeto (decisions).", isError: false, parentToolUseId: null } },
         { runId: crun.id, seq: 3, at, event: { type: "assistant_text", messageId: null, text: "ok", parentToolUseId: null } },
@@ -1790,7 +1790,7 @@ const PRICES_MOCK: Array<[string, number, number, number]> = [
 export function estimateUsdMock(model: string | null | undefined, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }): number {
   const m = (model ?? "").toLowerCase();
   const [, input, output, read] = PRICES_MOCK.find(([key]) => m.includes(key)) ?? ["", 5, 25, 0.5];
-  return (usage.inputTokens * input + usage.outputTokens * output + usage.cacheReadTokens * read + usage.cacheCreationTokens * input * 1.25) / 1_000_000;
+  return (usage.inputTokens * input + usage.outputTokens * output + usage.cacheReadTokens * read + usage.cacheCreationTokens * input * 2) / 1_000_000;
 }
 
 /** Mesmas regras de `store/hooks.rs::validate`. */

@@ -699,6 +699,9 @@ pub enum RunEvent {
         mcp_servers: Vec<McpServerStatus>,
         #[serde(default)]
         permission_mode: Option<String>,
+        /// Skills que o Claude Code carregou.
+        #[serde(default)]
+        skills: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     AssistantText {

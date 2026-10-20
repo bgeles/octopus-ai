@@ -39,6 +39,8 @@ npm run dev
 ```bash
 npm test                 # vitest: protocolo, sidecar e UI
 npm run test:rust        # cargo test: store, protocolo, supervisor (com sidecar falso em Node)
+# Com o Claude de verdade (custa centavos; precisa de `claude auth status` com loggedIn: true):
+# cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib real_ -- --ignored --nocapture --test-threads=1
 npm run test:e2e -w @octopus/desktop   # Playwright contra a UI com mock
 ```
 
@@ -77,7 +79,7 @@ Regras: PRs de iteração entram na branch da fase com a suíte de testes verde 
 npm run build:app
 ```
 
-O script `scripts/build-app.mjs` roda `tauri build` e gera `Octopus AI.app` e o `.dmg` em `apps/desktop/src-tauri/target/release/bundle/`. O `beforeBuildCommand` compila protocolo, sidecar e UI e copia o sidecar com as dependências de runtime para `Contents/Resources/sidecar/`. Em release o sidecar roda com o `node` da máquina (PATH, Homebrew, instalador oficial, Volta, nvm ou `OCTOPUS_NODE`). Node e o login do Claude Code continuam pré-requisitos.
+O script `scripts/build-app.mjs` roda `tauri build` e gera `Octopus AI.app` e o `.dmg` em `apps/desktop/src-tauri/target/release/bundle/`. Antes, `scripts/build-sidecar-binary.mjs` transforma o sidecar num binário único (esbuild + Node SEA + `postject`) e copia o Claude Code nativo do SDK; os dois entram em `Contents/MacOS/` como `externalBin` (`agent-runtime` e `claude`), com entitlements de JIT para o V8 sob hardened runtime. O Node embutido precisa ser autossuficiente: o do Homebrew liga com bibliotecas de `/opt/homebrew` e é recusado pelo script; baixe o oficial de nodejs.org (confira o `SHASUMS256.txt`) e rode `OCTOPUS_SEA_NODE=<pasta>/bin/node npm run build:app`. Resultado em 20/10/2026: `.app` de 368 MB e `.dmg` de 146 MB (o `claude` nativo é 239 MB disso). Quem instala o app não precisa de Node; o login do Claude Code (ou uma API key) continua pré-requisito. `OCTOPUS_SIDECAR=node npm run build:app` volta ao modo antigo: o sidecar com as dependências em `Contents/Resources/sidecar/`, rodando com o `node` da máquina (PATH, Homebrew, instalador oficial, Volta, nvm ou `OCTOPUS_NODE`).
 
 - **Atualizações assinadas**: com a chave em `~/.tauri/octopus-updater.key` (fora do repositório; a pública está em `tauri.conf.json`), o build gera `release/` com o `.app.tar.gz`, a assinatura e o `latest.json`. Publique a pasta num host estático e informe a URL do `latest.json` em Configurações → Atualizações. `OCTOPUS_RELEASE_BASE_URL` define a URL base dos pacotes no manifesto. Sem a chave, o build sai sem artefatos de update.
 - **Assinatura de código**: por padrão ad-hoc (uso local; na primeira abertura, botão direito → Abrir). Para distribuir a terceiros, defina `APPLE_SIGNING_IDENTITY="Developer ID Application: …"` e, para notarizar, `APPLE_ID`, `APPLE_PASSWORD` (senha de app) e `APPLE_TEAM_ID` antes do build.
@@ -92,6 +94,9 @@ O script `scripts/build-app.mjs` roda `tauri build` e gera `Octopus AI.app` e o 
 | Variável | Efeito |
 |---|---|
 | `OCTOPUS_SIDECAR_PROGRAM` / `OCTOPUS_SIDECAR_ARGS` | Força o comando do sidecar (ex.: `node` + caminho do `main.js`). |
+| `OCTOPUS_CLAUDE_PATH` | Força o Claude Code nativo que o sidecar executa (no binário único ele usa o `claude` ao lado). |
+| `OCTOPUS_SIDECAR=node` | No `npm run build:app`, empacota o sidecar no modo antigo (resources + node da máquina). |
+| `OCTOPUS_SEA_NODE` | No `npm run build:app`, o Node oficial (estático) que vai dentro do binário único. |
 | `RUST_LOG` | Filtro de logs do core (padrão `info,octopus_desktop_lib=debug`). |
 | `OCTOPUS_SECRETS=memory` | Guarda as API keys em memória em vez do Keychain (testes/CI). |
 | `ANTHROPIC_API_KEY` | Não precisa estar no ambiente: para projetos em modo `api_key`, o core lê a chave do Keychain (serviço `ai.octopus.desktop`) e a injeta só na chamada ao sidecar. |

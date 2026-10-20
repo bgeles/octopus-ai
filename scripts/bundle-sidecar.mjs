@@ -4,7 +4,8 @@
  * de runtime de que ele precisa, para o Tauri empacotar como resource (`sidecar/` dentro do .app).
  *
  * Em release o app roda `node <Resources>/sidecar/agent-runtime/dist/main.js`. O Node continua
- * sendo um pré-requisito da máquina (como o login do Claude Code); o binário único fica para a Fase 7.
+ * sendo um pré-requisito da máquina neste modo, usado só com `OCTOPUS_SIDECAR=node` (o padrão é o
+ * binário único de `scripts/build-sidecar-binary.mjs`).
  */
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

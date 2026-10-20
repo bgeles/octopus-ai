@@ -14,6 +14,8 @@ use crate::protocol::{MemoryCallResult, MemoryOp, ObservationKind};
 
 /// Tamanho máximo do brief injetado no contexto do agente.
 pub const MAX_BRIEF_CHARS: usize = 3_000;
+/// Quanto do resultado de um run entra no log de tarefas (uso real: 600 cortava revisões no meio).
+const LOG_RESULT_CHARS: usize = 2_000;
 /// Preferência: `raw` (log de tarefas bruto, padrão) ou `haiku` (run de consolidação com modelo barato).
 pub const CONSOLIDATION_SETTING: &str = "memory.consolidation";
 pub const CONSOLIDATION_MODEL: &str = "claude-haiku-5-5";
@@ -829,7 +831,10 @@ impl Store {
             first_chars(prompt.trim(), 300)
         ));
         if let Some(r) = result_text.as_deref().filter(|s| !s.trim().is_empty()) {
-            entry.push_str(&format!("**Resultado:** {}\n", first_chars(r.trim(), 600)));
+            entry.push_str(&format!(
+                "**Resultado:** {}\n",
+                first_chars(r.trim(), LOG_RESULT_CHARS)
+            ));
         }
         if let Some(e) = error_message.as_deref().filter(|s| !s.trim().is_empty()) {
             entry.push_str(&format!("**Erro:** {}\n", first_chars(e.trim(), 300)));
@@ -1198,20 +1203,25 @@ impl Store {
 ",
             );
             let budget = MAX_BRIEF_CHARS.saturating_sub(text.len() + 220);
-            let per_page = (budget / pages.len()).clamp(200, 700);
+            let per_page = (budget / pages.len()).clamp(200, 1_400);
             for p in &pages {
                 text.push_str(&format!(
                     "- **{}** ({}): {}
 ",
                     p.title,
                     p.kind,
-                    first_chars(&p.body_md, per_page)
+                    // No log de tarefas o mais recente fica no fim da página.
+                    if p.kind == "tasklog" {
+                        last_chars(&p.body_md, per_page)
+                    } else {
+                        first_chars(&p.body_md, per_page)
+                    }
                 ));
                 items.push(p.title.clone());
             }
         }
         text.push_str("
-Use a tool memory_search para mais contexto, memory_write para registrar decisões/armadilhas e memory_handoff para deixar uma nota ao próximo run se não terminar.
+Use a tool memory_search para mais contexto, memory_write para registrar decisões/armadilhas e memory_handoff para deixar uma nota ao próximo run se não terminar. Essas tools só gravam na memória do Octopus (nunca no projeto) e valem em qualquer modo de permissão, inclusive no de planejamento.
 ");
         let ids: Vec<String> = pages.iter().map(|p| p.id.clone()).collect();
         if claim {
@@ -1490,6 +1500,17 @@ fn first_chars(s: &str, n: usize) -> String {
         one_line
     } else {
         format!("{}…", one_line.chars().take(n).collect::<String>())
+    }
+}
+
+/// Como `first_chars`, mas guardando o fim do texto.
+fn last_chars(s: &str, n: usize) -> String {
+    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = one_line.chars().count();
+    if count <= n {
+        one_line
+    } else {
+        format!("…{}", one_line.chars().skip(count - n).collect::<String>())
     }
 }
 

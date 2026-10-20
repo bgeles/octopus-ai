@@ -1,7 +1,7 @@
 import type { RunEvent } from "@octopus/protocol";
 import { describe, expect, it } from "vitest";
 import type { SdkMessageLike } from "./events.js";
-import { RunManager, type HookCallbackLike, type QueryFn, type QueryOptionsLike } from "./runner.js";
+import { MEMORY_TOOLS_NOTE, RunManager, type HookCallbackLike, type QueryFn, type QueryOptionsLike } from "./runner.js";
 import type { RunHookNotification, RunMemoryCallNotification } from "@octopus/protocol";
 import type { MemoryCaller } from "./octopusTools.js";
 
@@ -282,6 +282,11 @@ describe("RunManager", () => {
     manager.start({ runId: "r1", cwd: "/p", prompt: "oi", options: { allowedTools: ["Read"], memory: { capture: false, tools: true } } });
     expect(seen?.mcpServers).toEqual({ octopus: { fake: "server" } });
     expect(seen?.allowedTools).toEqual(["Read", "mcp__octopus__memory_search", "mcp__octopus__memory_write", "mcp__octopus__memory_handoff"]);
+    // As tools internas não viram pedido de aprovação; as outras sim.
+    const signal = new AbortController().signal;
+    expect(await seen!.canUseTool("mcp__octopus__memory_write", { title: "t" }, { signal })).toEqual({ behavior: "allow", updatedInput: { title: "t" } });
+    // Sem brief, o agente ainda fica sabendo que a memória vale em qualquer modo (inclusive plan).
+    expect(seen?.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: MEMORY_TOOLS_NOTE });
     const pending = caller!("search", { query: "flyway" });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ runId: "r1", op: "search", args: { query: "flyway" } });

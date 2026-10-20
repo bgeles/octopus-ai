@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CustomHook } from "@octopus/protocol";
 import { describe, expect, it } from "vitest";
-import { interpretHookRun, runCustomHook, sanitizeOutput, type HookProcessResult } from "./customHooks.js";
+import { hookSafeEnv, interpretHookRun, runCustomHook, sanitizeOutput, type HookProcessResult } from "./customHooks.js";
 
 const hook = (over: Partial<CustomHook> = {}): CustomHook => ({ id: "hook_1", name: "Guarda", event: "PreToolUse", command: "true", timeoutSec: 5, ...over });
 const raw = (over: Partial<HookProcessResult> = {}): HookProcessResult => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false, durationMs: 12, ...over });
@@ -68,5 +68,42 @@ describe("runCustomHook com /bin/sh", () => {
     const slow = await runCustomHook(hook({ command: "sleep 5", timeoutSec: 1 }), {}, cwd);
     expect(slow.outcome).toBe("timeout");
     expect(slow.durationMs).toBeLessThan(4000);
+  });
+});
+
+describe("achados do uso real (revisão de 20/10/2026)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "octopus-hook-"));
+
+  it("o tempo limite mata também os filhos do comando", async () => {
+    const r = await runCustomHook(hook({ command: "(sleep 20; echo tarde) | cat", timeoutSec: 1 }), {}, cwd);
+    expect(r.outcome).toBe("timeout");
+    expect(r.durationMs).toBeLessThan(3000);
+  });
+
+  it("UTF-8 dividido entre pedaços da saída não vira caractere inválido", async () => {
+    const r = await runCustomHook(hook({ event: "SessionStart", command: "i=0; while [ $i -lt 400 ]; do printf 'ação ünico 😀 %.0s' 1 2 3 4 5 6 7 8 9 10; i=$((i+1)); done" }), {}, cwd);
+    const ctx = (r.output.hookSpecificOutput as { additionalContext: string }).additionalContext;
+    expect(ctx).not.toContain("\uFFFD");
+    expect(ctx.startsWith("ação ünico 😀")).toBe(true);
+  });
+
+  it("JSON maior que o que guardamos ainda é interpretado e bloqueia", () => {
+    const big = JSON.stringify({ decision: "block", reason: "grande", systemMessage: "x".repeat(20_000) });
+    const r = interpretHookRun(hook({ event: "Stop" }), raw({ stdout: big }));
+    expect(r.outcome).toBe("blocked");
+    expect(r.message).toBe("grande");
+    expect(r.stdout.length).toBe(8_000);
+  });
+
+  it("texto que começa com { vira contexto onde texto é contexto", () => {
+    expect(interpretHookRun(hook({ event: "UserPromptSubmit" }), raw({ stdout: "{rascunho} lembre dos testes" })).output).toEqual({
+      hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "{rascunho} lembre dos testes" },
+    });
+    expect(interpretHookRun(hook(), raw({ stdout: "{quebrado", truncated: true })).message).toContain("foi cortada");
+  });
+
+  it("o hook não recebe credenciais do ambiente do sidecar", () => {
+    const env = hookSafeEnv({ PATH: "/bin", HOME: "/h", ANTHROPIC_API_KEY: "sk", GITHUB_TOKEN: "t", CLAUDE_CODE_MESSAGING_TOKEN: "m", DB_PASSWORD: "p", NPM_CONFIG_PREFIX: "/x" });
+    expect(env).toEqual({ PATH: "/bin", HOME: "/h", NPM_CONFIG_PREFIX: "/x" });
   });
 });

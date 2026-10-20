@@ -15,10 +15,15 @@ import { toSessionSummary } from "./sessions.js";
 import { checkMcpServer, defaultMcpDeps } from "./mcpCheck.js";
 import { createOctopusToolsFactory } from "./octopusTools.js";
 import { runCustomHook } from "./customHooks.js";
+import { defaultClaudePathDeps, resolveClaudePath } from "./paths.js";
 
+// No binário único (scripts/build-sidecar-binary.mjs) as versões vêm embutidas pelo esbuild.
+declare const __OCTOPUS_RUNTIME_VERSION__: string | undefined;
+declare const __OCTOPUS_SDK_VERSION__: string | undefined;
 const require = createRequire(import.meta.url);
-const runtimeVersion: string = require("../package.json").version;
-const sdkVersion: string = resolveSdkVersion();
+const runtimeVersion: string = typeof __OCTOPUS_RUNTIME_VERSION__ === "string" ? __OCTOPUS_RUNTIME_VERSION__ : require("../package.json").version;
+const sdkVersion: string = typeof __OCTOPUS_SDK_VERSION__ === "string" ? __OCTOPUS_SDK_VERSION__ : resolveSdkVersion();
+const claudePath = resolveClaudePath(defaultClaudePathDeps(require));
 
 /** O SDK não exporta `./package.json`; subimos a partir do arquivo de entrada até achar o manifesto. */
 function resolveSdkVersion(): string {
@@ -67,6 +72,8 @@ const runs = new RunManager(
   (hook) => server.notify("run.hook", hook),
   undefined,
   (call) => server.notify("run.memory_call", call),
+  undefined,
+  claudePath,
 );
 
 server.register("runtime.hello", async () => ({ protocolVersion: PROTOCOL_VERSION, runtimeVersion, sdkVersion }));
@@ -135,4 +142,4 @@ process.on("unhandledRejection", (reason) => {
   log("error", `unhandledRejection: ${String(reason)}`);
 });
 
-log("info", `agent-runtime ${runtimeVersion} pronto (sdk ${sdkVersion}, protocolo ${PROTOCOL_VERSION})`);
+log("info", `agent-runtime ${runtimeVersion} pronto (sdk ${sdkVersion}, protocolo ${PROTOCOL_VERSION}${claudePath ? `, claude em ${claudePath}` : ""})`);
