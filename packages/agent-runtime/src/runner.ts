@@ -45,6 +45,8 @@ export type QueryOptionsLike = {
   sandbox?: unknown;
   /** Plugins locais (`SdkPluginConfig[]`); o runner só repassa. */
   plugins?: Array<{ type: "local"; path: string; skipMcpDiscovery?: boolean }>;
+  /** Claude Code nativo; ausente = o SDK acha o do pacote opcional da plataforma. */
+  pathToClaudeCodeExecutable?: string;
   abortController: AbortController;
   canUseTool: CanUseToolLike;
 };
@@ -110,6 +112,7 @@ export class RunManager {
     private readonly hookTimeoutMs: number = HOOK_TIMEOUT_MS,
     private readonly emitMemoryCall: MemoryCallSink | null = null,
     private readonly hookSpawn: HookSpawn = defaultHookSpawn,
+    private readonly claudePath: string | null = null,
   ) {}
 
   get activeRunIds(): string[] {
@@ -204,6 +207,7 @@ export class RunManager {
       includePartialMessages: o.includePartialMessages ?? true,
       canUseTool: (toolName, input, { signal }) => this.requestPermission(run, toolName, input, signal),
     };
+    if (this.claudePath) options.pathToClaudeCodeExecutable = this.claudePath;
     if (o.model) options.model = o.model;
     if (o.effort) options.effort = o.effort;
     if (o.permissionMode) options.permissionMode = o.permissionMode;

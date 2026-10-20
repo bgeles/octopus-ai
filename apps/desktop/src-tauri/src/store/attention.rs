@@ -388,6 +388,7 @@ mod tests {
                     tools: vec![],
                     mcp_servers: vec![],
                     permission_mode: None,
+                    skills: vec![],
                 },
             )
             .unwrap();

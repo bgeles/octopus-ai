@@ -12,6 +12,7 @@ describe("mapSdkMessage", () => {
       tools: ["Read", "Bash"],
       mcp_servers: [{ name: "memoria", status: "connected" }],
       permissionMode: "default",
+      skills: ["flyway-migration"],
     });
     expect(events).toEqual([
       {
@@ -21,6 +22,7 @@ describe("mapSdkMessage", () => {
         tools: ["Read", "Bash"],
         mcpServers: [{ name: "memoria", status: "connected" }],
         permissionMode: "default",
+        skills: ["flyway-migration"],
       },
     ]);
   });

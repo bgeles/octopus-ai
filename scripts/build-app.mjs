@@ -8,6 +8,9 @@
  *   ("Developer ID Application: …") e, para notarizar, APPLE_ID, APPLE_PASSWORD (senha de app) e
  *   APPLE_TEAM_ID; o Tauri usa essas variáveis direto.
  * - Gera release/latest.json (manifesto do updater) com a URL base em OCTOPUS_RELEASE_BASE_URL.
+ * - Sidecar: binário único (Node SEA) + Claude Code nativo em Contents/MacOS, via `externalBin`
+ *   (scripts/build-sidecar-binary.mjs); a máquina não precisa de Node. `OCTOPUS_SIDECAR=node`
+ *   volta ao modo antigo (scripts/bundle-sidecar.mjs nos resources, rodando com o node da máquina).
  */
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -21,14 +24,31 @@ const conf = JSON.parse(readFileSync(join(app, "src-tauri/tauri.conf.json"), "ut
 const keyPath = process.env.OCTOPUS_UPDATER_KEY ?? join(homedir(), ".tauri/octopus-updater.key");
 const env = { ...process.env };
 const args = ["tauri", "build"];
+/** Sobrescritas do tauri.conf.json, mescladas num único `--config`. */
+const overrides = {};
+if (env.OCTOPUS_SIDECAR !== "node") {
+  for (const step of [
+    ["npm", ["run", "build", "-w", "@octopus/protocol"]],
+    ["node", [join(root, "scripts/build-sidecar-binary.mjs")]],
+  ]) {
+    const s = spawnSync(step[0], step[1], { cwd: root, env, stdio: "inherit" });
+    if (s.status !== 0) process.exit(s.status ?? 1);
+  }
+  overrides.build = { beforeBuildCommand: "npm run sidecar:build && npm run build" };
+  overrides.bundle = { externalBin: ["binaries/agent-runtime", "binaries/claude"], resources: null, macOS: { entitlements: "Entitlements.plist" } };
+  console.log("[build-app] sidecar como binário único (sem Node na máquina)");
+} else {
+  console.log("[build-app] sidecar no modo node (resources + node da máquina)");
+}
 if (existsSync(keyPath)) {
   env.TAURI_SIGNING_PRIVATE_KEY = readFileSync(keyPath, "utf8");
   env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? "";
   console.log(`[build-app] artefatos do updater assinados com ${keyPath}`);
 } else {
   console.log("[build-app] sem chave do updater: gerando só .app/.dmg (crie com `npx tauri signer generate -w ~/.tauri/octopus-updater.key`)");
-  args.push("--config", JSON.stringify({ bundle: { createUpdaterArtifacts: false } }));
+  overrides.bundle = { ...(overrides.bundle ?? {}), createUpdaterArtifacts: false };
 }
+if (Object.keys(overrides).length) args.push("--config", JSON.stringify(overrides));
 if (env.APPLE_SIGNING_IDENTITY) console.log(`[build-app] assinatura de código: ${env.APPLE_SIGNING_IDENTITY}`);
 else console.log("[build-app] assinatura de código ad-hoc (uso local; para distribuir defina APPLE_SIGNING_IDENTITY)");
 

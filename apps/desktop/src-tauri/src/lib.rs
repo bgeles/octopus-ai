@@ -11,6 +11,8 @@ pub mod commands_orchestration;
 pub mod commands_security;
 pub mod commands_team;
 pub mod protocol;
+#[cfg(test)]
+mod real_tests;
 pub mod scheduler;
 pub mod secrets;
 pub mod sidecar;

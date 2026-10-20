@@ -15,6 +15,7 @@ export type SdkMessageLike = {
   model?: string;
   tools?: string[];
   mcp_servers?: Array<{ name: string; status: string }>;
+  skills?: string[];
   permissionMode?: string;
   // assistant/user
   message?: {
@@ -75,6 +76,7 @@ function mapSystem(message: SdkMessageLike): RunEvent[] {
       tools: message.tools ?? [],
       mcpServers: (message.mcp_servers ?? []).map((s) => ({ name: s.name, status: s.status })),
       permissionMode: message.permissionMode ?? null,
+      skills: message.skills ?? [],
     },
   ];
 }
