@@ -17,11 +17,15 @@ export type HookProcessResult = {
   stderr: string;
   timedOut: boolean;
   durationMs: number;
+  /** A saída passou de `CAPTURE_LIMIT` e foi cortada. */
+  truncated?: boolean;
 };
 
 export type HookSpawn = (command: string, options: { cwd: string; env: Record<string, string>; stdin: string; timeoutMs: number }) => Promise<HookProcessResult>;
 
-/** Limite do que guardamos de stdout/stderr (o resto é descartado). */
+/** Quanto lemos de stdout/stderr (o JSON do hook é interpretado sobre isto). */
+const CAPTURE_LIMIT = 64_000;
+/** Quanto guardamos no resultado (`stdout`/`stderr` do teste e do evento). */
 const OUTPUT_LIMIT = 8_000;
 /** Contexto que um hook pode acrescentar ao agente por chamada. */
 const CONTEXT_LIMIT = 10_000;
@@ -30,6 +34,16 @@ const CONTEXT_LIMIT = 10_000;
 const BLOCKABLE: ReadonlySet<CustomHookEvent> = new Set(["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop"]);
 /** Eventos cujo stdout (texto) ou `additionalContext` entra no contexto do agente. */
 const CONTEXT_EVENTS: ReadonlySet<CustomHookEvent> = new Set(["UserPromptSubmit", "SessionStart", "PostToolUse"]);
+/** Eventos em que texto simples no stdout entra como contexto. */
+const TEXT_CONTEXT_EVENTS: ReadonlySet<CustomHookEvent> = new Set(["UserPromptSubmit", "SessionStart"]);
+/** Variáveis que não vão para o comando do hook (credenciais do sidecar e do host). */
+const SECRET_ENV = /^(ANTHROPIC_|CLAUDE_CODE_)|(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)$/i;
+
+/** Ambiente do sidecar sem segredos: o hook é um comando do usuário, não precisa deles. */
+export function hookSafeEnv(env: Record<string, string | undefined>): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === "string" && !SECRET_ENV.test(e[0])));
+}
+
 /** Eventos com nome de ferramenta, em que o `matcher` faz sentido. */
 export const TOOL_EVENTS: ReadonlySet<CustomHookEvent> = new Set(["PreToolUse", "PostToolUse"]);
 
@@ -39,23 +53,39 @@ export const defaultHookSpawn: HookSpawn = (command, { cwd, env, stdin, timeoutM
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let truncated = false;
     let settled = false;
-    const child = spawn("/bin/sh", ["-c", command], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    // Grupo de processos próprio: no tempo limite matamos o `sh` e tudo que ele abriu.
+    const child = spawn("/bin/sh", ["-c", command], { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     const finish = (exitCode: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ exitCode, stdout, stderr, timedOut, durationMs: Date.now() - started });
+      resolve({ exitCode, stdout, stderr, timedOut, durationMs: Date.now() - started, truncated });
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      // Filhos podem segurar o stdout aberto: não esperamos o `close`.
+      finish(null);
     }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => {
-      if (stdout.length < OUTPUT_LIMIT) stdout += chunk.toString("utf8");
+    // Decodifica no stream: um caractere UTF-8 dividido entre dois pedaços não vira "�".
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    const append = (current: string, chunk: string) => {
+      if (current.length + chunk.length <= CAPTURE_LIMIT) return current + chunk;
+      truncated = true;
+      return (current + chunk).slice(0, CAPTURE_LIMIT);
+    };
+    child.stdout.on("data", (chunk: string) => {
+      stdout = append(stdout, chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (stderr.length < OUTPUT_LIMIT) stderr += chunk.toString("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr = append(stderr, chunk);
     });
     child.on("error", (error) => {
       stderr += String(error.message);
@@ -71,7 +101,7 @@ export const defaultHookSpawn: HookSpawn = (command, { cwd, env, stdin, timeoutM
 /** Roda o hook e interpreta o resultado. Nunca lança: falhas viram `outcome: "error"`. */
 export async function runCustomHook(hook: CustomHook, input: unknown, cwd: string, spawnFn: HookSpawn = defaultHookSpawn, extraEnv: Record<string, string> = {}): Promise<HookRunResult> {
   const env = Object.fromEntries(
-    Object.entries({ ...process.env, CLAUDE_PROJECT_DIR: cwd, ...extraEnv }).filter((e): e is [string, string] => typeof e[1] === "string"),
+    Object.entries({ ...hookSafeEnv(process.env), CLAUDE_PROJECT_DIR: cwd, ...extraEnv }).filter((e): e is [string, string] => typeof e[1] === "string"),
   );
   let raw: HookProcessResult;
   try {
@@ -104,13 +134,19 @@ export function interpretHookRun(hook: CustomHook, raw: HookProcessResult): Hook
     return { ...base, outcome: "error", message: `Saída ${raw.exitCode ?? "desconhecida"}${detail ? `: ${detail}` : ""}`, output: {} };
   }
   const text = raw.stdout.trim();
+  let parsed: unknown = undefined;
   if (text.startsWith("{")) {
-    let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
-      return { ...base, outcome: "error", message: "O stdout começa com { mas não é JSON válido", output: {} };
+      // Como o Claude Code: onde texto vira contexto, um "{" solto é só texto.
+      if (!TEXT_CONTEXT_EVENTS.has(hook.event)) {
+        const why = raw.truncated ? ` (a saída passou de ${CAPTURE_LIMIT / 1000} kB e foi cortada)` : "";
+        return { ...base, outcome: "error", message: `O stdout começa com { mas não é JSON válido${why}`, output: {} };
+      }
     }
+  }
+  if (parsed !== undefined) {
     const output = sanitizeOutput(hook.event, parsed);
     const hso = output.hookSpecificOutput as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
     if (output.decision === "block" || hso?.permissionDecision === "deny" || output.continue === false) {
@@ -120,7 +156,7 @@ export function interpretHookRun(hook: CustomHook, raw: HookProcessResult): Hook
     const message = hso?.permissionDecision === "ask" ? `Pediu aprovação${hso.permissionDecisionReason ? `: ${hso.permissionDecisionReason}` : ""}` : null;
     return { ...base, outcome: "ok", message, output };
   }
-  if (text && CONTEXT_EVENTS.has(hook.event) && hook.event !== "PostToolUse") {
+  if (text && TEXT_CONTEXT_EVENTS.has(hook.event)) {
     return { ...base, outcome: "ok", message: null, output: { hookSpecificOutput: { hookEventName: hook.event, additionalContext: text.slice(0, CONTEXT_LIMIT) } } };
   }
   return { ...base, outcome: "ok", message: null, output: {} };

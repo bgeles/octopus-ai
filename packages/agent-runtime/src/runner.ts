@@ -70,6 +70,14 @@ export const HOOK_TIMEOUT_MS = 30_000;
 export type MemoryCallSink = (notification: RunMemoryCallNotification) => void;
 
 export const TASK_UPDATE_TOOL = "mcp__octopus__task_update";
+const OCTOPUS_INTERNAL_TOOLS: ReadonlySet<string> = new Set([TASK_UPDATE_TOOL, ...MEMORY_TOOLS]);
+
+/**
+ * Vai no system prompt quando as tools de memória estão ligadas. No uso real (20/10/2026), em
+ * modo plan o agente se recusava a chamar `memory_write` achando que era escrita no projeto.
+ */
+export const MEMORY_TOOLS_NOTE =
+  "Memória do Octopus: as tools mcp__octopus__memory_search, mcp__octopus__memory_write e mcp__octopus__memory_handoff leem e gravam só na memória do Octopus, fora da pasta do projeto. Elas não alteram arquivos e valem em qualquer modo de permissão, inclusive no modo de planejamento: use-as quando o pedido mandar registrar algo ou quando precisar recuperar contexto de runs anteriores.";
 
 type PendingPermission = {
   resolve: (decision: PermissionDecision) => void;
@@ -273,6 +281,10 @@ export class RunManager {
       options.hooks = hooks;
     }
     const wantsMemoryTools = Boolean(o.memory?.tools) && this.emitMemoryCall !== null;
+    if (wantsMemoryTools) {
+      const append = [options.systemPrompt?.append, MEMORY_TOOLS_NOTE].filter(Boolean).join("\n\n");
+      options.systemPrompt = { type: "preset", preset: "claude_code", append };
+    }
     if ((o.taskContext || wantsMemoryTools) && this.octopusTools) {
       const ctx = o.taskContext;
       const server = this.octopusTools({
@@ -408,6 +420,9 @@ export class RunManager {
     input: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<PermissionResultLike> {
+    // Tools internas do Octopus (memória, task_update) não tocam no projeto: não pedem aprovação,
+    // nem no modo plan (no uso real a memory_write virava um cartão de aprovação sem motivo).
+    if (OCTOPUS_INTERNAL_TOOLS.has(toolName)) return Promise.resolve({ behavior: "allow", updatedInput: input });
     const requestId = `perm_${++this.permissionCounter}`;
     const key = askKey(toolName, input);
     const reason = run.askReasons.get(key) ?? null;

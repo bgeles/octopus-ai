@@ -174,7 +174,7 @@ fn matches(rule: &PolicyRule, ctx: &PolicyContext<'_>) -> bool {
             };
             let resolved = resolve(ctx.project_path, path);
             if rule.pattern == "@outside-project" {
-                return !is_inside(&resolved, ctx.project_path);
+                return !is_inside(&resolved, ctx.project_path) && !is_claude_plan_file(&resolved);
             }
             let text = resolved.to_string_lossy();
             rule.pattern
@@ -210,6 +210,16 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 /// `rm -rf`, `rm -r`, `rmdir`, `shred`, `mkfs`, `dd of=` apontando para fora do projeto (ou para a raiz/home).
+/// O modo plan do Claude Code grava o plano em `~/.claude/plans/*.md`; não é o projeto, mas
+/// também não é algo a confinar (achado no uso real de 20/10/2026).
+fn is_claude_plan_file(path: &std::path::Path) -> bool {
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let plans = std::path::Path::new(&home).join(".claude/plans");
+    path.starts_with(&plans) && path.extension().is_some_and(|e| e == "md")
+}
+
 fn destructive_outside_project(command: &str, project_path: &Path) -> bool {
     let re = Regex::new(
         r"(?x)
@@ -481,6 +491,28 @@ mod tests {
 
     fn decide(s: &Store, project: &str, path: &Path, tool: &str, input: Value) -> PolicyDecision {
         s.evaluate_policy(project, path, tool, &input).unwrap()
+    }
+
+    #[test]
+    fn claude_plan_files_are_not_confined_but_the_rest_of_home_is() {
+        let (s, project, path) = store_with_project();
+        let home = std::env::var("HOME").unwrap();
+        let write = |file: String| {
+            decide(
+                &s,
+                &project,
+                &path,
+                "Write",
+                serde_json::json!({"file_path": file, "content": "x"}),
+            )
+            .behavior
+        };
+        assert_eq!(write(format!("{home}/.claude/plans/revisao.md")), "pass");
+        assert_eq!(write(format!("{home}/.claude/settings.json")), "deny");
+        assert_eq!(
+            write(format!("{home}/.claude/plans/../settings.md")),
+            "deny"
+        );
     }
 
     #[test]

@@ -39,6 +39,8 @@ npm run dev
 ```bash
 npm test                 # vitest: protocolo, sidecar e UI
 npm run test:rust        # cargo test: store, protocolo, supervisor (com sidecar falso em Node)
+# Com o Claude de verdade (custa centavos; precisa de `claude auth status` com loggedIn: true):
+# cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib real_ -- --ignored --nocapture --test-threads=1
 npm run test:e2e -w @octopus/desktop   # Playwright contra a UI com mock
 ```
 

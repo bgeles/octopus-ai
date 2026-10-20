@@ -437,3 +437,138 @@ async fn real_budget_stops_the_run_midway() {
     assert!(Path::new(&project.path).exists());
     sidecar.shutdown().await;
 }
+
+/// Uso real: o Octopus revisa o próprio código numa cópia limpa do repositório (`git worktree`),
+/// como um membro do time (Revisor, modo plan), com política, sandbox, memória e orçamento
+/// montados como no `start_run`. Um segundo run no mesmo projeto confere se a memória leva o
+/// contexto adiante. Imprime o que importa para anotar atritos.
+#[tokio::test]
+#[ignore = "usa o Claude de verdade (custa dinheiro); rode com --ignored"]
+async fn real_dogfood_review_on_a_repo_copy() {
+    use crate::store::team::TeamMemberInput;
+    let (sidecar, mut notifications) = real_sidecar().await;
+    let store = Store::open_in_memory().unwrap();
+    let repo = manifest().join("../../..").canonicalize().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let copy = tmp.path().join("octopus-copia");
+    assert!(std::process::Command::new("git")
+        .args(["worktree", "add", "--detach", "-q"])
+        .arg(&copy)
+        .arg("HEAD")
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let project = store
+        .create_project("octopus-ai (cópia)", copy.to_str().unwrap())
+        .unwrap();
+    let revisor = store
+        .add_team_member(
+            &project.id,
+            &TeamMemberInput {
+                name: "Rui".into(),
+                role_id: "role_revisor".into(),
+                max_turns: Some(25),
+                max_budget_usd: Some(1.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let mut total = 0.0;
+    let prompts = [
+        "Revise packages/agent-runtime/src/customHooks.ts procurando bugs reais (não estilo). Para cada um: arquivo:linha, o problema e a correção sugerida, em no máximo 5 itens. Não edite arquivos. Antes de terminar, registre o resumo na memória do projeto com memory_write.",
+        "O que você revisou antes neste projeto e o que encontrou? Responda em até 5 linhas, sem ler arquivos de novo.",
+    ];
+    for (i, prompt) in prompts.iter().enumerate() {
+        // Como o `start_run`: membro → defaults do projeto → segurança → orçamento → memória/harness.
+        let mut options = store
+            .agent_run_options(&revisor.profile.id, &RunOptions::default())
+            .unwrap();
+        store
+            .apply_project_defaults(&project.id, &mut options)
+            .unwrap();
+        options.policy_hooks = Some(true);
+        options.memory.get_or_insert_with(Default::default);
+        options.sandbox = store.sandbox_for_project(&project).unwrap();
+        let options = store
+            .apply_budget(&project.id, Some(&revisor.profile.id), options)
+            .unwrap();
+        let run = store
+            .create_run_for_agent(&project.id, prompt, &options, Some(&revisor.profile.id))
+            .unwrap();
+        let mut options = options;
+        let brief = store
+            .memory_brief(&project.id, None, prompt, &run.id)
+            .unwrap();
+        let memory = options.memory.get_or_insert_with(Default::default);
+        memory.tools = Some(true);
+        if let Some(b) = &brief {
+            memory.brief = Some(b.text.clone());
+            memory.brief_items = Some(b.items.clone());
+        }
+        options.setting_sources = store.project_setting_sources(&project.id).unwrap();
+        options.custom_hooks = store.custom_hooks_for_run(&project.id).unwrap();
+        let started = std::time::Instant::now();
+        sidecar
+            .start_run(RunStartParams {
+                run_id: run.id.clone(),
+                cwd: project.path.clone(),
+                prompt: prompt.to_string(),
+                options,
+            })
+            .await
+            .unwrap();
+        let events = drive(&store, &sidecar, &mut notifications, &run.id, |tool| {
+            tool.starts_with("mcp__octopus__memory")
+        })
+        .await;
+        let done = store.get_run(&run.id).unwrap().unwrap();
+        let count = |k: &str| events.iter().filter(|e| e.kind() == k).count();
+        let tools: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::ToolUse { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        total += done.cost_usd.unwrap_or(done.est_cost_usd);
+        eprintln!(
+            "\n=== run {} · {:?} · {:.0}s · modelo {:?} · custo US$ {:?} (estimado {:.4}) · turnos {:?}\nbrief: {:?}\nferramentas: {:?}\npedidos de permissão: {} · observações: {} · erros: {}\nresultado:\n{}\n",
+            i + 1,
+            done.status,
+            started.elapsed().as_secs_f64(),
+            done.model,
+            done.cost_usd,
+            done.est_cost_usd,
+            done.num_turns,
+            brief.as_ref().map(|b| b.items.clone()),
+            tools,
+            count("permission_request"),
+            count("observation"),
+            count("error"),
+            done.result_text.clone().unwrap_or_default()
+        );
+        assert_eq!(
+            done.status,
+            RunStatus::Completed,
+            "{:?}",
+            done.error_message
+        );
+    }
+    let pages = store.list_pages(&project.id, false).unwrap();
+    eprintln!(
+        "páginas de memória: {:?}\nauditoria: {} eventos · custo total US$ {total:.4}",
+        pages.iter().map(|p| p.title.clone()).collect::<Vec<_>>(),
+        store
+            .list_audit_events(Some(&project.id), None, 500)
+            .unwrap()
+            .len()
+    );
+    sidecar.shutdown().await;
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&copy)
+        .current_dir(&repo)
+        .status();
+}
