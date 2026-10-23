@@ -32,6 +32,8 @@ pub enum SidecarNotification {
     Hook(RunHookNotification),
     /// Tool de memória chamada pelo agente: o core responde com `memory_result`.
     MemoryCall(RunMemoryCallNotification),
+    /// Tool de delegação (board) chamada pelo agente: o core valida e responde com `board_result`.
+    BoardCall(RunBoardCallNotification),
     Log(RuntimeLog),
     /// O processo terminou (código de saída, se houver).
     Exited(Option<i32>),
@@ -214,6 +216,10 @@ impl Sidecar {
         self.request("memory.result", params).await
     }
 
+    pub async fn board_result(&self, params: BoardResultParams) -> Result<BoardResultResult> {
+        self.request("board.result", params).await
+    }
+
     pub async fn hooks_test(&self, params: HooksTestParams) -> Result<HookRunResult> {
         self.request("hooks.test", params).await
     }
@@ -315,6 +321,16 @@ async fn dispatch_line(
                     Err(e) => error!("run.memory_call inválido: {e}"),
                 }
             }
+            "run.board_call" => {
+                match serde_json::from_value::<RunBoardCallNotification>(
+                    params.unwrap_or(Value::Null),
+                ) {
+                    Ok(n) => {
+                        let _ = notify_tx.send(SidecarNotification::BoardCall(n)).await;
+                    }
+                    Err(e) => error!("run.board_call inválido: {e}"),
+                }
+            }
             "runtime.log" => {
                 if let Ok(log) = serde_json::from_value::<RuntimeLog>(params.unwrap_or(Value::Null))
                 {
@@ -413,7 +429,7 @@ mod tests {
                 }
                 SidecarNotification::Log(_) => saw_log = true,
                 SidecarNotification::Hook(_) => {}
-                SidecarNotification::MemoryCall(_) => {}
+                SidecarNotification::MemoryCall(_) | SidecarNotification::BoardCall(_) => {}
                 SidecarNotification::Exited(_) => panic!("sidecar saiu cedo demais"),
             }
         }

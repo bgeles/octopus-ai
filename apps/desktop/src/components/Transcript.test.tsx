@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { summarizeInput } from "./ApprovalCard";
@@ -38,6 +38,26 @@ describe("Transcript", () => {
     expect(onDecide).toHaveBeenCalledWith("r1", "p1", { behavior: "deny", message: "não" }, "não");
     await user.click(screen.getByRole("button", { name: "Permitir uma vez" }));
     expect(onDecide).toHaveBeenCalledWith("r1", "p1", { behavior: "allow" }, "não");
+  });
+});
+
+describe("ResultCard", () => {
+  it("fecha o transcript com o texto final do run, custo e turnos", () => {
+    render(<Transcript runId="r1" items={[{ kind: "assistant", id: "a", text: "Feito.", streaming: false, parentToolUseId: null, at: "t" }]} pendingPermissions={[]} onDecide={() => {}} result={{ subtype: "success", isError: false, costUsd: 0.42, durationMs: 9000, numTurns: 6, stopReason: "end_turn", resultText: "## Entrega\n\n- Testes **verdes** (42/42).\n- Abri a task T-22." }} />);
+    const card = screen.getByTestId("run-result");
+    expect(card).toHaveTextContent("Resultado");
+    expect(card).toHaveTextContent("concluído · 6 turnos · US$ 0,42");
+    expect(within(card).getByRole("heading", { level: 4 })).toHaveTextContent("Entrega");
+    expect(within(card).getByText("verdes").tagName).toBe("STRONG");
+    expect(within(card).getByRole("button", { name: "Copiar" })).toBeInTheDocument();
+  });
+
+  it("não aparece enquanto o run não terminou e avisa quando o agente termina sem texto", () => {
+    const { rerender } = render(<Transcript runId="r1" items={[]} pendingPermissions={[]} onDecide={() => {}} result={null} />);
+    expect(screen.queryByTestId("run-result")).not.toBeInTheDocument();
+    rerender(<Transcript runId="r1" items={[]} pendingPermissions={[]} onDecide={() => {}} result={{ subtype: "error_during_execution", isError: true, costUsd: null, durationMs: null, numTurns: 1, stopReason: null, resultText: null }} />);
+    expect(screen.getByTestId("run-result")).toHaveTextContent("terminou com erro");
+    expect(screen.getByTestId("run-result")).toHaveTextContent("sem texto final");
   });
 });
 

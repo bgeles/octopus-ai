@@ -698,7 +698,7 @@ mod tests {
         for r in [&a, &b, &elsewhere] {
             s.set_run_status(&r.id, RunStatus::Running).unwrap();
         }
-        assert!(s.claim_task(&task.id, &a.id, None).unwrap());
+        assert!(s.claim_task(&task.id, &a.id, None, None).unwrap());
 
         // 100k de saída no Opus 5.5 = US$ 2,00 > limite de 1,00... mas só depois do segundo run somar.
         s.record_run_event(&a.id, 1, "t", &usage(0, 30_000, Some("a1"), None))

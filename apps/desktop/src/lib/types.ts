@@ -50,7 +50,7 @@ export type Run = {
   stopCause?: "budget" | null;
 };
 
-export type RunKind = "agent" | "consolidation";
+export type RunKind = "agent" | "consolidation" | "review";
 export type ConsolidationMode = "raw" | "haiku";
 export const CONSOLIDATION_SETTING = "memory.consolidation";
 export const CONSOLIDATION_MODEL = "claude-haiku-5-5";
@@ -59,12 +59,16 @@ export const CONSOLIDATION_MODEL = "claude-haiku-5-5";
 // Orquestração (Fase 2c): workflows, tasks e scheduler. Espelham `store::orchestration`.
 // ---------------------------------------------------------------------------
 
+export type StageApprover = "human" | "policy";
+
 export type Stage = {
   id: string;
   name: string;
   agentProfileId: string | null;
   gate: boolean;
   instruction: string | null;
+  /** Quem aprova no gate: você (`human`, padrão) ou a política de confiança do responsável. */
+  approver?: StageApprover;
 };
 
 export type Workflow = {
@@ -100,6 +104,31 @@ export type Task = {
   position: number;
   createdAt: string;
   updatedAt: string;
+  /** Entrega: resumo em markdown deixado pelo agente (task_update.result) ou o texto final do run. */
+  resultMd: string | null;
+  /** Arquivos tocados (Write/Edit…) no run que entregou. */
+  filesChanged: string[];
+  resultRunId: string | null;
+  /** Commit em que o trabalho começou; base do diff. */
+  baseCommit: string | null;
+  /** Membro revisando a task (status `review`). */
+  approverAgentId: string | null;
+  /** Devoluções por agentes nesta rodada; acima do limite, sobe para você. */
+  returnCount: number;
+  reviewAttempts: number;
+  /** Membro (agente) que criou a task pelas tools de delegação; null = você. */
+  createdByAgentId: string | null;
+};
+
+export type FileDiff = { path: string; status: "added" | "modified" | "deleted" | "renamed"; before: string; after: string; truncated: boolean };
+
+export type TaskDiff = {
+  available: boolean;
+  reason: string | null;
+  base: string | null;
+  /** `worktree` (branch da task) ou `project` (pasta do projeto; pode incluir mudanças de fora). */
+  scope: "worktree" | "project";
+  files: FileDiff[];
 };
 
 export type TaskInput = {
@@ -178,7 +207,7 @@ export type AuditVerification = {
 };
 
 export type TickReport = {
-  started: { taskId: string; runId: string; projectId: string }[];
+  started: { taskId: string; runId: string; projectId: string; kind?: "task" | "review" }[];
   failed: [string, string][];
   parked: number;
   paused: boolean;
@@ -189,6 +218,13 @@ export type TickReport = {
 // ---------------------------------------------------------------------------
 
 export type RoleScope = "global" | "project";
+
+export type Autonomy = "supervised" | "managed" | "autonomous";
+
+/** Confiança efetiva de um membro: quem aprova o trabalho dele, se delega e se aprova os de baixo. */
+export type TrustPolicy = { autonomy: Autonomy; canAssignTasks: boolean; canApprove: boolean };
+
+export const AUTONOMY_LABELS: Record<Autonomy, string> = { supervised: "supervisionado", managed: "gerenciado", autonomous: "autônomo" };
 
 export type Role = {
   id: string;
@@ -204,6 +240,10 @@ export type Role = {
   position: number;
   createdAt: string;
   updatedAt: string;
+  /** Confiança padrão de quem tem o cargo (null = supervisionado / não). */
+  defaultAutonomy?: Autonomy | null;
+  defaultCanAssignTasks?: boolean | null;
+  defaultCanApprove?: boolean | null;
 };
 
 export type RoleInput = {
@@ -235,6 +275,10 @@ export type AgentProfile = {
   mcpServerIds?: string[] | null;
   /** Skills escolhidas (null = todas as ativas). */
   skillIds?: string[] | null;
+  /** Confiança do membro (null = herda do cargo). */
+  autonomy?: Autonomy | null;
+  canAssignTasks?: boolean | null;
+  canApprove?: boolean | null;
 };
 
 export type TeamMember = {
@@ -246,6 +290,8 @@ export type TeamMember = {
   reportsToAgentId: string | null;
   position: number;
   createdAt: string;
+  /** Confiança efetiva (membro, senão cargo, senão supervisionado). */
+  trust: TrustPolicy;
 };
 
 export type TeamMemberInput = {
@@ -261,6 +307,9 @@ export type TeamMemberInput = {
   effort?: EffortLevel | null;
   mcpServerIds?: string[] | null;
   skillIds?: string[] | null;
+  autonomy?: Autonomy | null;
+  canAssignTasks?: boolean | null;
+  canApprove?: boolean | null;
 };
 
 export type AgentTotals = {
@@ -426,6 +475,7 @@ export type Commands = {
   approve_task: { args: { taskId: string; note?: string | null }; result: Task };
   return_task: { args: { taskId: string; stageId: string; note?: string | null }; result: Task };
   list_task_events: { args: { taskId: string }; result: TaskEvent[] };
+  task_diff: { args: { taskId: string }; result: TaskDiff };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };

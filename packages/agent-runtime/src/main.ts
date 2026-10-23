@@ -74,6 +74,7 @@ const runs = new RunManager(
   (call) => server.notify("run.memory_call", call),
   undefined,
   claudePath,
+  (call) => server.notify("run.board_call", call),
 );
 
 server.register("runtime.hello", async () => ({ protocolVersion: PROTOCOL_VERSION, runtimeVersion, sdkVersion }));
@@ -95,6 +96,10 @@ server.register("hook.decide", async ({ runId, hookId, decision }) => ({
 
 server.register("memory.result", async ({ runId, callId, result }) => ({
   applied: runs.resolveMemoryCall(runId, callId, result),
+}));
+
+server.register("board.result", async ({ runId, callId, result }) => ({
+  applied: runs.resolveBoardCall(runId, callId, result),
 }));
 
 server.register("mcp.check", async ({ name, config }) => {

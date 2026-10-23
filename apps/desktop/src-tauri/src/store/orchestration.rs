@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
+use super::team::{resolve_approver, Approver};
 use super::{new_id, now, Store};
-use crate::protocol::{TaskContext, TaskStatusUpdate};
+use crate::protocol::{TaskContext, TaskMode, TaskStatusUpdate};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,12 +20,23 @@ pub struct Stage {
     /// Membro responsável (agent_profile). `None` = run avulso, ou gate humano.
     #[serde(default)]
     pub agent_profile_id: Option<String>,
-    /// Gate humano: a task para em `waiting_approval` até você aprovar.
+    /// Gate: a task para aqui até alguém aprovar (quem, decide `approver`).
     #[serde(default)]
     pub gate: bool,
     /// Instrução extra do estágio para o prompt.
     #[serde(default)]
     pub instruction: Option<String>,
+    /// Quem aprova neste gate: você (`human`, padrão) ou a política de confiança do responsável (`policy`).
+    #[serde(default)]
+    pub approver: StageApprover,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StageApprover {
+    #[default]
+    Human,
+    Policy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,10 +125,33 @@ pub struct Task {
     pub position: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Entrega: resumo em markdown deixado pelo agente (ou o texto final do run).
+    #[serde(default)]
+    pub result_md: Option<String>,
+    /// Arquivos que o run de entrega escreveu/editou (das observações da memória).
+    #[serde(default)]
+    pub files_changed: Vec<String>,
+    #[serde(default)]
+    pub result_run_id: Option<String>,
+    /// Membro revisando a task (status `review`).
+    #[serde(default)]
+    pub approver_agent_id: Option<String>,
+    /// Vezes que um agente devolveu a task; acima do limite, sobe para você.
+    #[serde(default)]
+    pub return_count: u32,
+    /// Runs de revisão já tentados para a revisão atual.
+    #[serde(default)]
+    pub review_attempts: u32,
+    /// Membro (agente) que criou a task pelas tools de delegação; `None` = você.
+    #[serde(default)]
+    pub created_by_agent_id: Option<String>,
+    /// Commit base no claim, para o diff da entrega.
+    #[serde(default)]
+    pub base_commit: Option<String>,
 }
 
 impl Task {
-    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at FROM task";
+    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit, approver_agent_id, return_count, review_attempts, created_by_agent_id FROM task";
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let deps: String = row.get(9)?;
@@ -137,6 +172,17 @@ impl Task {
             position: row.get(13)?,
             created_at: row.get(14)?,
             updated_at: row.get(15)?,
+            result_md: row.get(16)?,
+            files_changed: row
+                .get::<_, Option<String>>(17)?
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
+            result_run_id: row.get(18)?,
+            base_commit: row.get(19)?,
+            approver_agent_id: row.get(20)?,
+            return_count: row.get::<_, i64>(21)? as u32,
+            review_attempts: row.get::<_, i64>(22)? as u32,
+            created_by_agent_id: row.get(23)?,
         })
     }
 }
@@ -287,6 +333,7 @@ impl Store {
                 }),
                 gate: *gate,
                 instruction: Some((*instruction).to_string()),
+                approver: StageApprover::Human,
             })
             .collect();
         self.create_workflow(
@@ -357,6 +404,20 @@ impl Store {
         workflow_id: &str,
         input: &TaskInput,
     ) -> Result<Task> {
+        self.create_task_as(project_id, workflow_id, input, "você", None, None)
+    }
+
+    /// Cria a task em nome de alguém: você (`actor` "você") ou um membro pelas tools de delegação
+    /// (`created_by` = agente; o evento sai como `created_by_agent`).
+    pub(crate) fn create_task_as(
+        &self,
+        project_id: &str,
+        workflow_id: &str,
+        input: &TaskInput,
+        actor: &str,
+        created_by: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<Task> {
         if input.title.trim().is_empty() {
             anyhow::bail!("Informe o título da task");
         }
@@ -388,8 +449,8 @@ impl Store {
                 |r| r.get(0),
             )?;
             tx.execute(
-                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at, created_by_agent_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
                 params![
                     id,
                     project_id,
@@ -402,17 +463,22 @@ impl Store {
                     input.assigned_agent_id,
                     serde_json::to_string(&input.depends_on)?,
                     position,
-                    ts
+                    ts,
+                    created_by
                 ],
             )?;
             insert_event(
                 &tx,
                 &id,
-                "created",
+                if created_by.is_some() {
+                    "created_by_agent"
+                } else {
+                    "created"
+                },
                 None,
                 Some(&stage_id),
-                None,
-                "você",
+                run_id,
+                actor,
                 None,
             )?;
             tx.commit()?;
@@ -523,6 +589,11 @@ impl Store {
         {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
+            // Override humano: limpa a revisão em andamento (o run de revisão, se houver, é interrompido pelo comando).
+            tx.execute(
+                "UPDATE task SET approver_agent_id = NULL, lock_run_id = NULL, return_count = 0, review_attempts = 0 WHERE id = ?1",
+                params![task.id],
+            )?;
             advance_task(
                 &tx,
                 &task,
@@ -530,6 +601,7 @@ impl Store {
                 "você",
                 note.or(Some("aprovado")),
                 true,
+                task.assigned_agent_id.as_deref(),
             )?;
             tx.commit()?;
         }
@@ -551,7 +623,7 @@ impl Store {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
             tx.execute(
-                "UPDATE task SET stage_id = ?2, status = 'ready', last_note = COALESCE(?3, last_note), updated_at = ?4 WHERE id = ?1",
+                "UPDATE task SET stage_id = ?2, status = 'ready', last_note = COALESCE(?3, last_note), approver_agent_id = NULL, lock_run_id = NULL, review_attempts = 0, updated_at = ?4 WHERE id = ?1",
                 params![id, stage_id, note, now()],
             )?;
             insert_event(
@@ -611,7 +683,8 @@ impl Store {
         Ok(out)
     }
 
-    /// Tasks em estágio gate que ainda estão `ready` viram `waiting_approval` (sem run).
+    /// Tasks em estágio gate que ainda estão `ready` entram no gate (sem run): esperam você,
+    /// um revisor do organograma, ou seguem auto-aprovadas, conforme o gate e a confiança.
     pub fn park_gate_tasks(&self, project_id: &str) -> Result<usize> {
         let tasks = self.list_tasks(project_id)?;
         let workflows = self.list_workflows(project_id)?;
@@ -620,19 +693,215 @@ impl Store {
             let Some(workflow) = workflows.iter().find(|w| w.id == task.workflow_id) else {
                 continue;
             };
-            let Some(stage) = workflow.stages.iter().find(|s| s.id == task.stage_id) else {
+            let Some(index) = workflow.stages.iter().position(|s| s.id == task.stage_id) else {
                 continue;
             };
-            if stage.gate {
-                let conn = self.conn.lock().expect("store mutex");
-                conn.execute(
-                    "UPDATE task SET status = 'waiting_approval', updated_at = ?2 WHERE id = ?1",
-                    params![task.id, now()],
+            if workflow.stages[index].gate {
+                // Quem fez o trabalho que chega ao gate: o atribuído ou o responsável do estágio anterior.
+                let worker = task.assigned_agent_id.clone().or_else(|| {
+                    workflow.stages[..index]
+                        .iter()
+                        .rev()
+                        .find_map(|s| s.agent_profile_id.clone())
+                });
+                let mut conn = self.conn.lock().expect("store mutex");
+                let tx = conn.transaction()?;
+                enter_gate(
+                    &tx,
+                    task,
+                    workflow,
+                    index,
+                    None,
+                    worker.as_deref(),
+                    "scheduler",
                 )?;
+                tx.commit()?;
                 parked += 1;
             }
         }
         Ok(parked)
+    }
+
+    /// Tasks em `review` esperando um run de revisão do aprovador, respeitando o paralelismo
+    /// do workflow (runs de trabalho e de revisão contam juntos).
+    pub fn reviewable_tasks(&self, project_id: &str) -> Result<Vec<(Task, Workflow, Stage)>> {
+        let tasks = self.list_tasks(project_id)?;
+        let workflows = self.list_workflows(project_id)?;
+        let mut out = Vec::new();
+        for workflow in &workflows {
+            let active = tasks
+                .iter()
+                .filter(|t| t.workflow_id == workflow.id && t.lock_run_id.is_some())
+                .count() as u32;
+            let mut slots = workflow.max_parallel.saturating_sub(active);
+            for task in tasks.iter().filter(|t| {
+                t.workflow_id == workflow.id
+                    && t.status == TaskStatus::Review
+                    && t.approver_agent_id.is_some()
+                    && t.lock_run_id.is_none()
+            }) {
+                if slots == 0 {
+                    break;
+                }
+                let Some(stage) = workflow.stages.iter().find(|s| s.id == task.stage_id) else {
+                    continue;
+                };
+                out.push((task.clone(), workflow.clone(), stage.clone()));
+                slots -= 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reserva a task para um run de revisão (só se ainda estiver `review` e sem run).
+    pub fn claim_review(&self, task_id: &str, run_id: &str) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex");
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE task SET lock_run_id = ?2, review_attempts = review_attempts + 1, updated_at = ?3 WHERE id = ?1 AND status = 'review' AND lock_run_id IS NULL",
+            params![task_id, run_id, now()],
+        )?;
+        if changed > 0 {
+            insert_event(
+                &tx,
+                task_id,
+                "review_started",
+                None,
+                None,
+                Some(run_id),
+                "scheduler",
+                None,
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
+    /// O run de revisão nem começou (sidecar recusou): solta o lock; na segunda falha, sobe para você.
+    pub fn release_review(&self, task_id: &str, note: &str) -> Result<()> {
+        let mut conn = self.conn.lock().expect("store mutex");
+        let tx = conn.transaction()?;
+        let attempts: Option<i64> = tx
+            .query_row(
+                "SELECT review_attempts FROM task WHERE id = ?1",
+                params![task_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if attempts.unwrap_or(0) >= 2 {
+            tx.execute(
+                "UPDATE task SET status = 'waiting_approval', approver_agent_id = NULL, lock_run_id = NULL, updated_at = ?2 WHERE id = ?1",
+                params![task_id, now()],
+            )?;
+            insert_event(
+                &tx,
+                task_id,
+                "escalated",
+                None,
+                None,
+                None,
+                "sistema",
+                Some(note),
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE task SET lock_run_id = NULL, updated_at = ?2 WHERE id = ?1",
+                params![task_id, now()],
+            )?;
+            insert_event(
+                &tx,
+                task_id,
+                "review_failed",
+                None,
+                None,
+                None,
+                "sistema",
+                Some(note),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Limites da revisão por agentes (Configurações → Board): devoluções antes de subir para você
+    /// e turnos de cada run de revisão.
+    pub fn review_limits(&self) -> ReviewLimits {
+        let num = |key: &str, default: u32| {
+            self.get_setting(key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+                .unwrap_or(default)
+        };
+        ReviewLimits {
+            max_agent_returns: num(MAX_AGENT_RETURNS_SETTING, 2),
+            review_max_turns: num(REVIEW_MAX_TURNS_SETTING, 15),
+        }
+    }
+
+    /// Prompt do run de revisão: o revisor vê a task, a entrega e os critérios, e decide.
+    pub fn review_prompt(
+        task: &Task,
+        stage: &Stage,
+        workflow: &Workflow,
+        worker: Option<&str>,
+    ) -> String {
+        let mut text = format!(
+            "Revisão da task {id} do board \"{wf}\" (estágio \"{stage}\"), feita por {who}.\n\n# {title}\n",
+            id = task.id,
+            wf = workflow.name,
+            stage = stage.name,
+            who = worker.unwrap_or("um membro do time"),
+            title = task.title
+        );
+        if !task.description_md.trim().is_empty() {
+            text.push_str("\nPedido original:\n");
+            text.push_str(task.description_md.trim());
+            text.push('\n');
+        }
+        if !task.acceptance_md.trim().is_empty() {
+            text.push_str("\nCritérios de aceite:\n");
+            text.push_str(task.acceptance_md.trim());
+            text.push('\n');
+        }
+        if let Some(result) = task
+            .result_md
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            text.push_str("\nResumo da entrega deixado pelo autor:\n");
+            text.push_str(result);
+            text.push('\n');
+        }
+        if !task.files_changed.is_empty() {
+            text.push_str("\nArquivos tocados: ");
+            text.push_str(&task.files_changed.join(", "));
+            text.push('\n');
+        }
+        if let Some(note) = task
+            .last_note
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            text.push_str("\nÚltima nota: ");
+            text.push_str(note);
+            text.push('\n');
+        }
+        text.push_str("\nVocê é o revisor: inspecione o trabalho no diretório atual (leia os arquivos, rode testes se fizer sentido), sem editar nada. Depois chame a tool task_update com status \"approved\" se a entrega cumpre o pedido e os critérios, ou \"returned\" com uma nota objetiva do que falta ou está errado.");
+        text
+    }
+
+    pub fn review_context(task: &Task, stage: &Stage) -> TaskContext {
+        TaskContext {
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            stage: stage.name.clone(),
+            allowed_statuses: vec![TaskStatusUpdate::Approved, TaskStatusUpdate::Returned],
+            mode: TaskMode::Review,
+        }
     }
 
     /// Marca a task como em execução pelo run (checkout atômico: só se ainda estiver `ready`).
@@ -641,12 +910,13 @@ impl Store {
         task_id: &str,
         run_id: &str,
         worktree_path: Option<&str>,
+        base_commit: Option<&str>,
     ) -> Result<bool> {
         let mut conn = self.conn.lock().expect("store mutex");
         let tx = conn.transaction()?;
         let changed = tx.execute(
-            "UPDATE task SET status = 'running', lock_run_id = ?2, worktree_path = COALESCE(?3, worktree_path), updated_at = ?4 WHERE id = ?1 AND status = 'ready'",
-            params![task_id, run_id, worktree_path, now()],
+            "UPDATE task SET status = 'running', lock_run_id = ?2, worktree_path = COALESCE(?3, worktree_path), base_commit = COALESCE(?5, base_commit), updated_at = ?4 WHERE id = ?1 AND status = 'ready'",
+            params![task_id, run_id, worktree_path, now(), base_commit],
         )?;
         if changed > 0 {
             let stage: String = tx.query_row(
@@ -700,6 +970,12 @@ impl Store {
             stage = stage.name,
             title = task.title
         );
+        if task.created_by_agent_id.is_some() {
+            // Só um rótulo: política, sandbox e permissões não mudam por quem criou a task.
+            text.push_str(
+                "(Task criada por um membro do time pelo board; a descrição abaixo veio dele.)\n",
+            );
+        }
         if !task.description_md.trim().is_empty() {
             text.push('\n');
             text.push_str(task.description_md.trim());
@@ -730,7 +1006,7 @@ impl Store {
             text.push_str(note);
             text.push('\n');
         }
-        text.push_str("\nAo terminar, chame a tool task_update com status \"done\" (concluiu este estágio), \"review\" (precisa de revisão) ou \"blocked\" (não consegue prosseguir) e uma nota curta.");
+        text.push_str("\nAo terminar, chame a tool task_update com status \"done\" (concluiu este estágio), \"review\" (precisa de revisão) ou \"blocked\" (não consegue prosseguir), uma nota curta e, em `result`, o resumo da entrega em markdown: o que mudou, onde, e como verificar.");
         text
     }
 
@@ -744,6 +1020,7 @@ impl Store {
                 TaskStatusUpdate::Review,
                 TaskStatusUpdate::Blocked,
             ],
+            mode: TaskMode::Work,
         }
     }
 
@@ -792,6 +1069,7 @@ impl Store {
         run_id: &str,
         status: TaskStatusUpdate,
         note: Option<&str>,
+        result: Option<&str>,
     ) -> Result<()> {
         let task_id: Option<String> = tx
             .query_row(
@@ -808,10 +1086,12 @@ impl Store {
             TaskStatusUpdate::Done => "done",
             TaskStatusUpdate::Review => "review",
             TaskStatusUpdate::Blocked => "blocked",
+            TaskStatusUpdate::Approved => "approved",
+            TaskStatusUpdate::Returned => "returned",
         };
         tx.execute(
-            "UPDATE task SET last_note = COALESCE(?2, last_note), updated_at = ?3 WHERE id = ?1",
-            params![task_id, note, now()],
+            "UPDATE task SET last_note = COALESCE(?2, last_note), result_md = COALESCE(?4, result_md), updated_at = ?3 WHERE id = ?1",
+            params![task_id, note, now(), result.map(str::trim).filter(|r| !r.is_empty())],
         )?;
         insert_event(
             tx,
@@ -864,21 +1144,21 @@ impl Store {
         Ok(Some(task_id))
     }
 
+    /// `summary` é o texto final do run (sucesso) ou a mensagem de erro (falha).
     pub(crate) fn finish_task_run(
         tx: &Transaction<'_>,
         run_id: &str,
         success: bool,
-        error: Option<&str>,
+        summary: Option<&str>,
     ) -> Result<()> {
-        let task_id: Option<String> = tx
+        let run_row: Option<(Option<String>, String, Option<String>)> = tx
             .query_row(
-                "SELECT task_id FROM run WHERE id = ?1",
+                "SELECT task_id, kind, agent_profile_id FROM run WHERE id = ?1",
                 params![run_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .optional()?
-            .flatten();
-        let Some(task_id) = task_id else {
+            .optional()?;
+        let Some((Some(task_id), run_kind, run_agent)) = run_row else {
             return Ok(());
         };
         let task = tx
@@ -891,6 +1171,9 @@ impl Store {
         let Some(task) = task else { return Ok(()) };
         if task.lock_run_id.as_deref() != Some(run_id) {
             return Ok(());
+        }
+        if run_kind == "review" {
+            return finish_review_run(tx, run_id, &task, success, run_agent.as_deref());
         }
         let workflow = tx
             .query_row(
@@ -914,7 +1197,7 @@ impl Store {
             .as_deref()
             .map(|n| n.split(':').next().unwrap_or("").trim().to_string());
         if !success {
-            let note = error.unwrap_or("run falhou");
+            let note = summary.unwrap_or("run falhou");
             tx.execute(
                 "UPDATE task SET status = 'failed', lock_run_id = NULL, last_note = ?2, updated_at = ?3 WHERE id = ?1",
                 params![task.id, note, now()],
@@ -931,6 +1214,29 @@ impl Store {
             )?;
             return Ok(());
         }
+        // Entrega: o resumo do agente (task_update.result) vence; senão o texto final do run.
+        let project_path: String = tx
+            .query_row(
+                "SELECT path FROM project WHERE id = ?1",
+                params![task.project_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        let roots = [task.worktree_path.as_deref().unwrap_or(""), &project_path];
+        let files: Vec<String> = super::memory::files_touched_in(tx, run_id)?
+            .into_iter()
+            .map(|f| super::task_diff::relativize(&f, &roots))
+            .collect();
+        tx.execute(
+            "UPDATE task SET result_md = COALESCE(result_md, ?2), files_changed_json = ?3, result_run_id = ?4 WHERE id = ?1",
+            params![
+                task.id,
+                summary.map(str::trim).filter(|s| !s.is_empty()),
+                serde_json::to_string(&files)?,
+                run_id
+            ],
+        )?;
         match requested.as_deref() {
             Some("blocked") => {
                 tx.execute(
@@ -949,11 +1255,8 @@ impl Store {
                 )?;
             }
             Some("review") => {
-                // Precisa de olhos humanos antes de seguir: para em waiting_approval no estágio atual.
-                tx.execute(
-                    "UPDATE task SET status = 'waiting_approval', lock_run_id = NULL, updated_at = ?2 WHERE id = ?1",
-                    params![task.id, now()],
-                )?;
+                // Precisa de revisão antes de seguir: a política do autor diz se é você, o chefe dele
+                // ou ninguém (auto-aprovado) — a task fica no estágio atual.
                 insert_event(
                     tx,
                     &task.id,
@@ -964,6 +1267,49 @@ impl Store {
                     "agente",
                     Some("pediu revisão"),
                 )?;
+                tx.execute(
+                    "UPDATE task SET lock_run_id = NULL WHERE id = ?1",
+                    params![task.id],
+                )?;
+                let worker = run_agent.as_deref().or(task.assigned_agent_id.as_deref());
+                match route_approval(tx, &task, worker)? {
+                    Approver::Human => {
+                        tx.execute(
+                            "UPDATE task SET status = 'waiting_approval', approver_agent_id = NULL, updated_at = ?2 WHERE id = ?1",
+                            params![task.id, now()],
+                        )?;
+                    }
+                    Approver::Agent(reviewer) => {
+                        request_review(tx, &task, &reviewer, Some(run_id))?;
+                    }
+                    Approver::Auto => {
+                        insert_event(
+                            tx,
+                            &task.id,
+                            "auto_approved",
+                            Some(&task.stage_id),
+                            Some(&task.stage_id),
+                            Some(run_id),
+                            "política",
+                            Some("autônomo, sem revisor acima: segue sem aprovação humana"),
+                        )?;
+                        audit_review(
+                            tx,
+                            &task,
+                            "board.review.auto_approved",
+                            "pedido de revisão de membro autônomo sem revisor acima",
+                        )?;
+                        advance_task(
+                            tx,
+                            &task,
+                            &workflow,
+                            "política",
+                            task.last_note.as_deref(),
+                            false,
+                            worker,
+                        )?;
+                    }
+                }
             }
             _ => {
                 advance_task(
@@ -973,6 +1319,7 @@ impl Store {
                     "scheduler",
                     task.last_note.as_deref(),
                     false,
+                    run_agent.as_deref().or(task.assigned_agent_id.as_deref()),
                 )?;
                 tx.execute(
                     "UPDATE task SET lock_run_id = NULL WHERE id = ?1",
@@ -985,7 +1332,9 @@ impl Store {
     }
 }
 
-/// Próximo estágio: gate → `waiting_approval`; estágio normal → `ready`; fim → `done`.
+/// Próximo estágio: estágio normal → `ready`; fim → `done`; gate → entra no gate (você, um revisor
+/// do organograma, ou auto-aprovado, conforme `Stage.approver` e a confiança de `worker`).
+#[allow(clippy::too_many_arguments)]
 fn advance_task(
     tx: &Transaction<'_>,
     task: &Task,
@@ -993,6 +1342,7 @@ fn advance_task(
     actor: &str,
     note: Option<&str>,
     human: bool,
+    worker: Option<&str>,
 ) -> Result<()> {
     let index = workflow
         .stages
@@ -1001,12 +1351,12 @@ fn advance_task(
         .unwrap_or(0);
     let next = workflow.stages.get(index + 1);
     let (stage_id, status) = match next {
-        Some(stage) if stage.gate => (stage.id.clone(), "waiting_approval"),
+        Some(stage) if stage.gate => (stage.id.clone(), "ready"),
         Some(stage) => (stage.id.clone(), "ready"),
         None => (task.stage_id.clone(), "done"),
     };
     tx.execute(
-        "UPDATE task SET stage_id = ?2, status = ?3, lock_run_id = NULL, last_note = COALESCE(?4, last_note), updated_at = ?5 WHERE id = ?1",
+        "UPDATE task SET stage_id = ?2, status = ?3, lock_run_id = NULL, approver_agent_id = NULL, last_note = COALESCE(?4, last_note), updated_at = ?5 WHERE id = ?1",
         params![task.id, stage_id, status, note, now()],
     )?;
     let kind = if human {
@@ -1026,7 +1376,335 @@ fn advance_task(
         actor,
         note,
     )?;
+    if let Some(stage) = next.filter(|s| s.gate) {
+        let moved = Task {
+            stage_id: stage.id.clone(),
+            status: TaskStatus::Ready,
+            ..task.clone()
+        };
+        enter_gate(tx, &moved, workflow, index + 1, None, worker, actor)?;
+    }
     Ok(())
+}
+
+/// A task chegou a um estágio gate: decide quem aprova. `human` → espera você; `policy` → a
+/// confiança de quem fez o trabalho diz se é você, um chefe (status `review`) ou ninguém
+/// (auto-aprovada: segue adiante, o que pode encadear outros gates).
+fn enter_gate(
+    tx: &Transaction<'_>,
+    task: &Task,
+    workflow: &Workflow,
+    gate_index: usize,
+    run_id: Option<&str>,
+    worker: Option<&str>,
+    actor: &str,
+) -> Result<()> {
+    let gate = &workflow.stages[gate_index];
+    let decision = if gate.approver == StageApprover::Policy {
+        route_approval(tx, task, worker)?
+    } else {
+        Approver::Human
+    };
+    match decision {
+        Approver::Human => {
+            tx.execute(
+                "UPDATE task SET status = 'waiting_approval', approver_agent_id = NULL, updated_at = ?2 WHERE id = ?1",
+                params![task.id, now()],
+            )?;
+        }
+        Approver::Agent(reviewer) => request_review(tx, task, &reviewer, run_id)?,
+        Approver::Auto => {
+            insert_event(
+                tx,
+                &task.id,
+                "auto_approved",
+                Some(&gate.id),
+                Some(&gate.id),
+                run_id,
+                "política",
+                Some("autônomo, sem revisor acima: gate aprovado sem humano"),
+            )?;
+            audit_review(
+                tx,
+                task,
+                "board.review.auto_approved",
+                &format!(
+                    "gate \"{}\" por política, membro autônomo sem revisor acima",
+                    gate.name
+                ),
+            )?;
+            let _ = actor;
+            advance_task(tx, task, workflow, "política", None, false, worker)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a política de confiança de `worker` dentro da transação.
+fn route_approval(tx: &Transaction<'_>, task: &Task, worker: Option<&str>) -> Result<Approver> {
+    let Some(worker) = worker else {
+        return Ok(Approver::Human);
+    };
+    let team = super::team::list_team_in(tx, &task.project_id)?;
+    Ok(resolve_approver(&team, worker))
+}
+
+fn request_review(
+    tx: &Transaction<'_>,
+    task: &Task,
+    reviewer: &str,
+    run_id: Option<&str>,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE task SET status = 'review', approver_agent_id = ?2, lock_run_id = NULL, review_attempts = 0, updated_at = ?3 WHERE id = ?1",
+        params![task.id, reviewer, now()],
+    )?;
+    let name: Option<String> = tx
+        .query_row(
+            "SELECT name FROM agent_profile WHERE id = ?1",
+            params![reviewer],
+            |r| r.get(0),
+        )
+        .optional()?;
+    insert_event(
+        tx,
+        &task.id,
+        "review_requested",
+        Some(&task.stage_id),
+        Some(&task.stage_id),
+        run_id,
+        "política",
+        Some(&format!(
+            "revisão encaminhada a {}",
+            name.as_deref().unwrap_or(reviewer)
+        )),
+    )?;
+    Ok(())
+}
+
+/// Fim de um run de revisão: `approved` segue; `returned` reabre (ou sobe para você após o
+/// limite); sem decisão ou com falha, tenta de novo uma vez e depois sobe para você.
+fn finish_review_run(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    task: &Task,
+    success: bool,
+    reviewer: Option<&str>,
+) -> Result<()> {
+    let workflow = tx
+        .query_row(
+            "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE id = ?1",
+            params![task.workflow_id],
+            workflow_from_row,
+        )
+        .optional()?;
+    let Some(workflow) = workflow else {
+        return Ok(());
+    };
+    let reviewer_name: Option<String> = match reviewer {
+        Some(id) => tx
+            .query_row(
+                "SELECT name FROM agent_profile WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    let actor = format!("agente {}", reviewer_name.as_deref().unwrap_or("revisor"));
+    let last_update: Option<String> = tx
+        .query_row(
+            "SELECT note FROM task_event WHERE task_id = ?1 AND run_id = ?2 AND kind = 'agent_update' ORDER BY at DESC, rowid DESC LIMIT 1",
+            params![task.id, run_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let (decision, note) = match last_update.as_deref() {
+        Some(raw) => {
+            let (d, n) = raw.split_once(':').unwrap_or((raw, ""));
+            (d.trim().to_string(), n.trim().to_string())
+        }
+        None => (String::new(), String::new()),
+    };
+    let note = if note.is_empty() { None } else { Some(note) };
+    let limits = review_limits_in(tx);
+    match (success, decision.as_str()) {
+        (true, "approved") => {
+            tx.execute(
+                "UPDATE task SET return_count = 0, review_attempts = 0 WHERE id = ?1",
+                params![task.id],
+            )?;
+            advance_task(
+                tx,
+                task,
+                &workflow,
+                &actor,
+                note.as_deref().or(Some("aprovado na revisão")),
+                true,
+                task.assigned_agent_id.as_deref(),
+            )?;
+        }
+        (true, "returned") => {
+            let returns = task.return_count + 1;
+            if returns > limits.max_agent_returns {
+                tx.execute(
+                    "UPDATE task SET status = 'waiting_approval', approver_agent_id = NULL, lock_run_id = NULL, return_count = ?2, last_note = COALESCE(?3, last_note), updated_at = ?4 WHERE id = ?1",
+                    params![task.id, returns as i64, note, now()],
+                )?;
+                insert_event(
+                    tx,
+                    &task.id,
+                    "escalated",
+                    Some(&task.stage_id),
+                    Some(&task.stage_id),
+                    Some(run_id),
+                    &actor,
+                    Some(&format!(
+                        "devolvida {returns} vezes (limite {}); precisa de você",
+                        limits.max_agent_returns
+                    )),
+                )?;
+                audit_review(
+                    tx,
+                    task,
+                    "board.review.escalated",
+                    &format!(
+                        "devolvida {returns} vezes por agentes (limite {})",
+                        limits.max_agent_returns
+                    ),
+                )?;
+            } else {
+                // Volta para quem fez o trabalho: o estágio atual se for de trabalho, senão o anterior.
+                let index = workflow
+                    .stages
+                    .iter()
+                    .position(|s| s.id == task.stage_id)
+                    .unwrap_or(0);
+                let target = if workflow.stages[index].gate && index > 0 {
+                    workflow.stages[index - 1].id.clone()
+                } else {
+                    task.stage_id.clone()
+                };
+                tx.execute(
+                    "UPDATE task SET stage_id = ?2, status = 'ready', approver_agent_id = NULL, lock_run_id = NULL, return_count = ?3, review_attempts = 0, last_note = COALESCE(?4, last_note), updated_at = ?5 WHERE id = ?1",
+                    params![task.id, target, returns as i64, note, now()],
+                )?;
+                insert_event(
+                    tx,
+                    &task.id,
+                    "returned",
+                    Some(&task.stage_id),
+                    Some(&target),
+                    Some(run_id),
+                    &actor,
+                    note.as_deref(),
+                )?;
+            }
+        }
+        _ => {
+            // Sem decisão (falhou, estourou turnos, não chamou task_update): solta o lock; na segunda
+            // tentativa frustrada, sobe para você.
+            if task.review_attempts >= 2 {
+                tx.execute(
+                    "UPDATE task SET status = 'waiting_approval', approver_agent_id = NULL, lock_run_id = NULL, updated_at = ?2 WHERE id = ?1",
+                    params![task.id, now()],
+                )?;
+                insert_event(
+                    tx,
+                    &task.id,
+                    "escalated",
+                    Some(&task.stage_id),
+                    Some(&task.stage_id),
+                    Some(run_id),
+                    "sistema",
+                    Some("a revisão por agente falhou duas vezes; precisa de você"),
+                )?;
+                audit_review(
+                    tx,
+                    task,
+                    "board.review.escalated",
+                    "a revisão por agente falhou duas vezes",
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE task SET lock_run_id = NULL, updated_at = ?2 WHERE id = ?1",
+                    params![task.id, now()],
+                )?;
+                insert_event(
+                    tx,
+                    &task.id,
+                    "review_failed",
+                    Some(&task.stage_id),
+                    Some(&task.stage_id),
+                    Some(run_id),
+                    &actor,
+                    Some(if success {
+                        "terminou sem decidir; será tentado de novo"
+                    } else {
+                        "run de revisão falhou; será tentado de novo"
+                    }),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Auditoria das decisões automáticas da cadeia de aprovação (o que aconteceu sem você).
+fn audit_review(tx: &Transaction<'_>, task: &Task, kind: &str, reason: &str) -> Result<()> {
+    super::Store::audit_in(
+        tx,
+        "política",
+        kind,
+        Some(&task.project_id),
+        serde_json::json!({"taskId": task.id, "title": task.title, "stage": task.stage_id, "reason": reason}),
+    )?;
+    Ok(())
+}
+
+pub const MAX_AGENT_RETURNS_SETTING: &str = "board.maxAgentReturns";
+pub const REVIEW_MAX_TURNS_SETTING: &str = "board.reviewMaxTurns";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewLimits {
+    pub max_agent_returns: u32,
+    pub review_max_turns: u32,
+}
+
+fn review_limits_in(tx: &Transaction<'_>) -> ReviewLimits {
+    let num = |key: &str, default: u32| -> u32 {
+        tx.query_row(
+            "SELECT value_json FROM app_setting WHERE key = ?1",
+            params![key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(default)
+    };
+    ReviewLimits {
+        max_agent_returns: num(MAX_AGENT_RETURNS_SETTING, 2),
+        review_max_turns: num(REVIEW_MAX_TURNS_SETTING, 15),
+    }
+}
+
+/// Evento da task para outros módulos do store (ex.: escalar revisões ao remover um membro).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_task_event(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    kind: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    run_id: Option<&str>,
+    actor: &str,
+    note: Option<&str>,
+) -> Result<()> {
+    insert_event(tx, task_id, kind, from, to, run_id, actor, note)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,6 +1780,700 @@ mod tests {
             stop_reason: None,
             result_text: None,
         }
+    }
+
+    /// Time para os testes de política: Gabi (gestora autônoma, aprova) ← Rui (revisor gerenciado,
+    /// aprova) ← Ana (implementadora gerenciada); Téo (testador supervisionado) reporta a Ana.
+    fn policy_team(s: &Store, project: &str) -> (String, String, String, String) {
+        use crate::store::team::Autonomy;
+        let add = |name: &str,
+                   role: &str,
+                   boss: Option<&str>,
+                   autonomy: Option<Autonomy>,
+                   approve: Option<bool>| {
+            s.add_team_member(
+                project,
+                &TeamMemberInput {
+                    name: name.into(),
+                    role_id: role.into(),
+                    reports_to_agent_id: boss.map(str::to_string),
+                    autonomy,
+                    can_approve: approve,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id
+        };
+        let gabi = add("Gabi", "role_gestor_produto", None, None, None);
+        let rui = add(
+            "Rui",
+            "role_revisor",
+            Some(&gabi),
+            Some(Autonomy::Managed),
+            Some(true),
+        );
+        let ana = add(
+            "Ana",
+            "role_implementador",
+            Some(&rui),
+            Some(Autonomy::Managed),
+            None,
+        );
+        let teo = add("Téo", "role_testador", Some(&ana), None, None);
+        (gabi, rui, ana, teo)
+    }
+
+    fn policy_gate_workflow(s: &Store, project: &str) -> Workflow {
+        let mut wf = s
+            .create_workflow_from_template(project, "plan-implement-review-approve", false)
+            .unwrap();
+        wf.stages[3].approver = StageApprover::Policy;
+        s.update_workflow(
+            &wf.id,
+            &WorkflowInput {
+                name: wf.name.clone(),
+                stages: wf.stages.clone(),
+                use_worktrees: false,
+                max_parallel: 2,
+            },
+        )
+        .unwrap()
+    }
+
+    fn task_for(s: &Store, project: &str, wf: &Workflow, title: &str, assignee: &str) -> Task {
+        s.create_task(
+            project,
+            &wf.id,
+            &TaskInput {
+                title: title.into(),
+                assigned_agent_id: Some(assignee.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn update_event(task_id: &str, status: TaskStatusUpdate, note: &str) -> RunEvent {
+        RunEvent::TaskUpdate {
+            task_id: task_id.into(),
+            status,
+            note: Some(note.into()),
+            result: None,
+        }
+    }
+
+    fn kinds(s: &Store, task_id: &str) -> Vec<String> {
+        s.list_task_events(task_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
+    }
+
+    #[test]
+    fn review_request_is_routed_by_trust_and_human_gate_stays_human() {
+        let s = Store::open_in_memory().unwrap();
+        let project = s.create_project("p", "/tmp/p").unwrap().id;
+        let (_gabi, rui, ana, teo) = policy_team(&s, &project);
+        let wf = s
+            .create_workflow_from_template(&project, "plan-implement-review-approve", false)
+            .unwrap();
+
+        // Ana (gerenciada, reporta a Rui que aprova) pede revisão: vai para Rui, não para você.
+        let t = task_for(&s, &project, &wf, "Migração", &ana);
+        let run = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t.id, &run.id, None, None).unwrap());
+        s.record_run_event(
+            &run.id,
+            0,
+            "t",
+            &update_event(&t.id, TaskStatusUpdate::Review, "pronto"),
+        )
+        .unwrap();
+        s.record_run_event(&run.id, 1, "t", &result_event(true))
+            .unwrap();
+        let now = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(now.status, TaskStatus::Review);
+        assert_eq!(now.approver_agent_id.as_deref(), Some(rui.as_str()));
+        assert!(now.lock_run_id.is_none());
+        assert_eq!(
+            now.stage_id, "stage_1",
+            "fica no estágio onde pediu revisão"
+        );
+        assert!(kinds(&s, &t.id).contains(&"review_requested".to_string()));
+        // Só ela aparece para o scheduler de revisões.
+        let reviewable = s.reviewable_tasks(&project).unwrap();
+        assert_eq!(reviewable.len(), 1);
+        assert_eq!(reviewable[0].0.id, t.id);
+
+        // Téo (supervisionado) pede revisão: você, como sempre.
+        let t2 = task_for(&s, &project, &wf, "Testes", &teo);
+        let run2 = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&teo),
+                Some(&t2.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t2.id, &run2.id, None, None).unwrap());
+        s.record_run_event(
+            &run2.id,
+            0,
+            "t",
+            &update_event(&t2.id, TaskStatusUpdate::Review, "ok"),
+        )
+        .unwrap();
+        s.record_run_event(&run2.id, 1, "t", &result_event(true))
+            .unwrap();
+        let t2_now = s.get_task(&t2.id).unwrap().unwrap();
+        assert_eq!(t2_now.status, TaskStatus::WaitingApproval);
+        assert!(t2_now.approver_agent_id.is_none());
+
+        // Gate humano (default do template) continua humano mesmo para quem é gerenciado: Ana
+        // termina Revisar (stage_3) → Aprovar é gate `human` → aguardando você.
+        let t3 = task_for(&s, &project, &wf, "Direto ao gate", &ana);
+        s.move_task(&t3.id, Some("stage_3"), TaskStatus::Ready, None)
+            .unwrap();
+        let run3 = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t3.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t3.id, &run3.id, None, None).unwrap());
+        s.record_run_event(
+            &run3.id,
+            0,
+            "t",
+            &update_event(&t3.id, TaskStatusUpdate::Done, "feito"),
+        )
+        .unwrap();
+        s.record_run_event(&run3.id, 1, "t", &result_event(true))
+            .unwrap();
+        let t3_now = s.get_task(&t3.id).unwrap().unwrap();
+        assert_eq!(t3_now.stage_id, "stage_4");
+        assert_eq!(t3_now.status, TaskStatus::WaitingApproval);
+    }
+
+    #[test]
+    fn policy_gate_routes_to_manager_review_approves_or_returns_and_escalates() {
+        let s = Store::open_in_memory().unwrap();
+        let project = s.create_project("p", "/tmp/p").unwrap().id;
+        let (_gabi, rui, ana, _teo) = policy_team(&s, &project);
+        let wf = policy_gate_workflow(&s, &project);
+
+        // Ana termina Revisar: o gate Aprovar é por política → Rui revisa (status review no gate).
+        let t = task_for(&s, &project, &wf, "Endpoint", &ana);
+        s.move_task(&t.id, Some("stage_3"), TaskStatus::Ready, None)
+            .unwrap();
+        let run = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t.id, &run.id, None, None).unwrap());
+        s.record_run_event(
+            &run.id,
+            0,
+            "t",
+            &update_event(&t.id, TaskStatusUpdate::Done, "feito"),
+        )
+        .unwrap();
+        s.record_run_event(&run.id, 1, "t", &result_event(true))
+            .unwrap();
+        let now = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(now.stage_id, "stage_4");
+        assert_eq!(now.status, TaskStatus::Review);
+        assert_eq!(now.approver_agent_id.as_deref(), Some(rui.as_str()));
+
+        // Run de revisão do Rui devolve: volta para Revisar (estágio anterior ao gate), ready.
+        let review1 = s
+            .create_review_run(&project, "revise", &RunOptions::default(), &rui, &t.id)
+            .unwrap();
+        assert_eq!(review1.kind, "review");
+        assert!(s.claim_review(&t.id, &review1.id).unwrap());
+        assert!(!s.claim_review(&t.id, "outro").unwrap(), "claim é único");
+        assert_eq!(s.get_task(&t.id).unwrap().unwrap().review_attempts, 1);
+        s.record_run_event(
+            &review1.id,
+            0,
+            "t",
+            &update_event(&t.id, TaskStatusUpdate::Returned, "falta teste"),
+        )
+        .unwrap();
+        s.record_run_event(&review1.id, 1, "t", &result_event(true))
+            .unwrap();
+        let returned = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(returned.status, TaskStatus::Ready);
+        assert_eq!(returned.stage_id, "stage_3");
+        assert_eq!(returned.return_count, 1);
+        assert!(returned.approver_agent_id.is_none());
+        assert_eq!(returned.last_note.as_deref(), Some("falta teste"));
+        let ev = s.list_task_events(&t.id).unwrap();
+        let ret = ev.iter().rev().find(|e| e.kind == "returned").unwrap();
+        assert_eq!(ret.actor, "agente Rui");
+
+        // Segunda rodada: Ana refaz, Rui aprova → concluída com ator "agente Rui", sem clique seu.
+        let run2 = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t.id, &run2.id, None, None).unwrap());
+        s.record_run_event(
+            &run2.id,
+            0,
+            "t",
+            &update_event(&t.id, TaskStatusUpdate::Done, "com teste"),
+        )
+        .unwrap();
+        s.record_run_event(&run2.id, 1, "t", &result_event(true))
+            .unwrap();
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().status,
+            TaskStatus::Review
+        );
+        let review2 = s
+            .create_review_run(&project, "revise", &RunOptions::default(), &rui, &t.id)
+            .unwrap();
+        assert!(s.claim_review(&t.id, &review2.id).unwrap());
+        s.record_run_event(
+            &review2.id,
+            0,
+            "t",
+            &update_event(&t.id, TaskStatusUpdate::Approved, "ok agora"),
+        )
+        .unwrap();
+        s.record_run_event(&review2.id, 1, "t", &result_event(true))
+            .unwrap();
+        let done = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(done.status, TaskStatus::Done);
+        assert_eq!(done.return_count, 0);
+        let approved = s
+            .list_task_events(&t.id)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|e| e.kind == "approved")
+            .unwrap();
+        assert_eq!(approved.actor, "agente Rui");
+        assert_eq!(approved.note.as_deref(), Some("ok agora"));
+        // O log de tarefas da memória registra a revisão (consolidação bruta roda ao fim do run).
+        let tasklog = s
+            .list_pages(&project, false)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == "tasklog")
+            .expect("log de tarefas");
+        assert!(
+            tasklog
+                .body_md
+                .contains("**Revisão:** devolvido · falta teste"),
+            "{}",
+            tasklog.body_md
+        );
+        assert!(tasklog.body_md.contains("· revisão run_"));
+
+        // Devoluções demais sobem para você (limite padrão 2).
+        let t2 = task_for(&s, &project, &wf, "Teimosa", &ana);
+        s.move_task(&t2.id, Some("stage_3"), TaskStatus::Ready, None)
+            .unwrap();
+        for i in 0..3 {
+            let r = s
+                .create_run_full(
+                    &project,
+                    "x",
+                    &RunOptions::default(),
+                    Some(&ana),
+                    Some(&t2.id),
+                )
+                .unwrap();
+            assert!(s.claim_task(&t2.id, &r.id, None, None).unwrap());
+            s.record_run_event(
+                &r.id,
+                0,
+                "t",
+                &update_event(&t2.id, TaskStatusUpdate::Done, "feito"),
+            )
+            .unwrap();
+            s.record_run_event(&r.id, 1, "t", &result_event(true))
+                .unwrap();
+            assert_eq!(
+                s.get_task(&t2.id).unwrap().unwrap().status,
+                TaskStatus::Review,
+                "rodada {i}"
+            );
+            let rv = s
+                .create_review_run(&project, "revise", &RunOptions::default(), &rui, &t2.id)
+                .unwrap();
+            assert!(s.claim_review(&t2.id, &rv.id).unwrap());
+            s.record_run_event(
+                &rv.id,
+                0,
+                "t",
+                &update_event(&t2.id, TaskStatusUpdate::Returned, "não"),
+            )
+            .unwrap();
+            s.record_run_event(&rv.id, 1, "t", &result_event(true))
+                .unwrap();
+        }
+        let escalated = s.get_task(&t2.id).unwrap().unwrap();
+        assert_eq!(escalated.status, TaskStatus::WaitingApproval);
+        assert_eq!(escalated.return_count, 3);
+        assert!(kinds(&s, &t2.id).contains(&"escalated".to_string()));
+        assert!(!s
+            .list_audit_events(Some(&project), Some("board.review.escalated"), 10)
+            .unwrap()
+            .is_empty());
+
+        // Você aprova por cima: conclui e limpa a revisão.
+        let over = s.approve_task(&t2.id, Some("resolvo eu")).unwrap();
+        assert_eq!(over.status, TaskStatus::Done);
+        assert!(over.approver_agent_id.is_none());
+    }
+
+    #[test]
+    fn autonomous_member_at_the_top_auto_approves_policy_gate_and_review_requests() {
+        let s = Store::open_in_memory().unwrap();
+        let project = s.create_project("p", "/tmp/p").unwrap().id;
+        let (gabi, _rui, _ana, _teo) = policy_team(&s, &project);
+        let wf = policy_gate_workflow(&s, &project);
+
+        // Gabi (autônoma, reporta a você) termina Revisar: o gate por política é auto-aprovado → done.
+        let t = task_for(&s, &project, &wf, "Plano trimestral", &gabi);
+        s.move_task(&t.id, Some("stage_3"), TaskStatus::Ready, None)
+            .unwrap();
+        let run = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&gabi),
+                Some(&t.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t.id, &run.id, None, None).unwrap());
+        s.record_run_event(
+            &run.id,
+            0,
+            "t",
+            &update_event(&t.id, TaskStatusUpdate::Done, "feito"),
+        )
+        .unwrap();
+        s.record_run_event(&run.id, 1, "t", &result_event(true))
+            .unwrap();
+        let done = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(done.status, TaskStatus::Done);
+        let k = kinds(&s, &t.id);
+        assert!(k.contains(&"auto_approved".to_string()), "{k:?}");
+        let auto = s
+            .list_task_events(&t.id)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "auto_approved")
+            .unwrap();
+        assert_eq!(auto.actor, "política");
+        let audited = s
+            .list_audit_events(Some(&project), Some("board.review.auto_approved"), 10)
+            .unwrap();
+        assert!(!audited.is_empty(), "auto-aprovação auditada");
+        assert_eq!(audited[0].actor, "política");
+
+        // Pedido de review da Gabi: ninguém acima revisa → segue (auto-aprovado) para o próximo estágio.
+        let t2 = task_for(&s, &project, &wf, "Roadmap", &gabi);
+        let run2 = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&gabi),
+                Some(&t2.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t2.id, &run2.id, None, None).unwrap());
+        s.record_run_event(
+            &run2.id,
+            0,
+            "t",
+            &update_event(&t2.id, TaskStatusUpdate::Review, "olhem"),
+        )
+        .unwrap();
+        s.record_run_event(&run2.id, 1, "t", &result_event(true))
+            .unwrap();
+        let t2_now = s.get_task(&t2.id).unwrap().unwrap();
+        assert_eq!(t2_now.stage_id, "stage_2");
+        assert_eq!(t2_now.status, TaskStatus::Ready);
+
+        // park_gate_tasks também respeita o gate por política: task criada direto em Aprovar, da Gabi.
+        let t3 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Já pronta".into(),
+                    stage_id: Some("stage_4".into()),
+                    assigned_agent_id: Some(gabi.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.park_gate_tasks(&project).unwrap(), 1);
+        assert_eq!(
+            s.get_task(&t3.id).unwrap().unwrap().status,
+            TaskStatus::Done
+        );
+    }
+
+    #[test]
+    fn failed_review_runs_retry_once_then_escalate_and_removing_the_reviewer_escalates() {
+        let s = Store::open_in_memory().unwrap();
+        let project = s.create_project("p", "/tmp/p").unwrap().id;
+        let (_gabi, rui, ana, _teo) = policy_team(&s, &project);
+        let wf = s
+            .create_workflow_from_template(&project, "plan-implement-review-approve", false)
+            .unwrap();
+        let t = task_for(&s, &project, &wf, "Instável", &ana);
+        let run = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t.id, &run.id, None, None).unwrap());
+        s.record_run_event(
+            &run.id,
+            0,
+            "t",
+            &update_event(&t.id, TaskStatusUpdate::Review, "?"),
+        )
+        .unwrap();
+        s.record_run_event(&run.id, 1, "t", &result_event(true))
+            .unwrap();
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().status,
+            TaskStatus::Review
+        );
+
+        // Primeira revisão falha (run com erro): continua em review, sem lock, para tentar de novo.
+        let rv1 = s
+            .create_review_run(&project, "revise", &RunOptions::default(), &rui, &t.id)
+            .unwrap();
+        assert!(s.claim_review(&t.id, &rv1.id).unwrap());
+        s.record_run_event(&rv1.id, 0, "t", &result_event(false))
+            .unwrap();
+        let after1 = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(after1.status, TaskStatus::Review);
+        assert!(after1.lock_run_id.is_none());
+        assert_eq!(after1.review_attempts, 1);
+        assert!(!s.reviewable_tasks(&project).unwrap().is_empty());
+
+        // Segunda termina sem decidir: sobe para você.
+        let rv2 = s
+            .create_review_run(&project, "revise", &RunOptions::default(), &rui, &t.id)
+            .unwrap();
+        assert!(s.claim_review(&t.id, &rv2.id).unwrap());
+        s.record_run_event(&rv2.id, 0, "t", &result_event(true))
+            .unwrap();
+        let after2 = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(after2.status, TaskStatus::WaitingApproval);
+        assert!(after2.approver_agent_id.is_none());
+        assert!(kinds(&s, &t.id).contains(&"escalated".to_string()));
+
+        // Outra task em revisão do Rui; remover o Rui do time escala para você.
+        let t2 = task_for(&s, &project, &wf, "Órfã", &ana);
+        let run2 = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t2.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t2.id, &run2.id, None, None).unwrap());
+        s.record_run_event(
+            &run2.id,
+            0,
+            "t",
+            &update_event(&t2.id, TaskStatusUpdate::Review, "?"),
+        )
+        .unwrap();
+        s.record_run_event(&run2.id, 1, "t", &result_event(true))
+            .unwrap();
+        assert_eq!(
+            s.get_task(&t2.id)
+                .unwrap()
+                .unwrap()
+                .approver_agent_id
+                .as_deref(),
+            Some(rui.as_str())
+        );
+        assert!(s.remove_team_member(&rui).unwrap());
+        let orphan = s.get_task(&t2.id).unwrap().unwrap();
+        assert_eq!(orphan.status, TaskStatus::WaitingApproval);
+        assert!(orphan.approver_agent_id.is_none());
+        let esc = s
+            .list_task_events(&t2.id)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|e| e.kind == "escalated")
+            .unwrap();
+        assert!(esc.note.as_deref().unwrap().contains("Rui saiu do time"));
+
+        // Limites vêm das configurações.
+        assert_eq!(s.review_limits().max_agent_returns, 2);
+        s.set_setting(MAX_AGENT_RETURNS_SETTING, &serde_json::json!(5))
+            .unwrap();
+        s.set_setting(REVIEW_MAX_TURNS_SETTING, &serde_json::json!(8))
+            .unwrap();
+        assert_eq!(
+            s.review_limits(),
+            ReviewLimits {
+                max_agent_returns: 5,
+                review_max_turns: 8
+            }
+        );
+    }
+
+    #[test]
+    fn finish_task_run_fills_result_files_and_run() {
+        use crate::protocol::ObservationKind;
+        let (s, project, wf) = setup();
+        let path = s.get_project(&project).unwrap().unwrap().path;
+        let t = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Entrega".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run = s
+            .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t.id))
+            .unwrap();
+        assert!(s.claim_task(&t.id, &run.id, None, Some("abc123")).unwrap());
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().base_commit.as_deref(),
+            Some("abc123")
+        );
+        // O agente escreve dois arquivos (um deles duas vezes) e entrega com resumo.
+        for (seq, file) in ["src/a.rs", "src/b.rs", "src/a.rs"].iter().enumerate() {
+            s.record_run_event(
+                &run.id,
+                seq as u64,
+                "t",
+                &RunEvent::Observation {
+                    kind: ObservationKind::ToolUse,
+                    title: format!("Write {path}/{file}"),
+                    body: String::new(),
+                    tool_name: Some("Write".into()),
+                    tool_use_id: None,
+                    parent_tool_use_id: None,
+                    agent_id: None,
+                },
+            )
+            .unwrap();
+        }
+        s.record_run_event(
+            &run.id,
+            10,
+            "t",
+            &RunEvent::TaskUpdate {
+                task_id: t.id.clone(),
+                status: TaskStatusUpdate::Done,
+                note: Some("feito".into()),
+                result: Some("## Entrega\n\n- a.rs e b.rs".into()),
+            },
+        )
+        .unwrap();
+        // O resumo fica visível já na chamada, antes de o run terminar.
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().result_md.as_deref(),
+            Some("## Entrega\n\n- a.rs e b.rs")
+        );
+        s.record_run_event(&run.id, 11, "t", &result_event(true))
+            .unwrap();
+        let done = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(
+            done.result_md.as_deref(),
+            Some("## Entrega\n\n- a.rs e b.rs")
+        );
+        assert_eq!(done.files_changed, vec!["src/a.rs", "src/b.rs"]);
+        assert_eq!(done.result_run_id.as_deref(), Some(run.id.as_str()));
+
+        // Sem task_update: o texto final do run vira o resumo; run falho não grava entrega.
+        let t2 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Sem resumo".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run2 = s
+            .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t2.id))
+            .unwrap();
+        assert!(s.claim_task(&t2.id, &run2.id, None, None).unwrap());
+        let mut ev = result_event(true);
+        if let RunEvent::Result { result_text, .. } = &mut ev {
+            *result_text = Some("  Terminei o plano.  ".into());
+        }
+        s.record_run_event(&run2.id, 0, "t", &ev).unwrap();
+        let t2_now = s.get_task(&t2.id).unwrap().unwrap();
+        assert_eq!(t2_now.result_md.as_deref(), Some("Terminei o plano."));
+        assert!(t2_now.files_changed.is_empty());
+
+        let t3 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Falha".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run3 = s
+            .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t3.id))
+            .unwrap();
+        assert!(s.claim_task(&t3.id, &run3.id, None, None).unwrap());
+        s.record_run_event(&run3.id, 0, "t", &result_event(false))
+            .unwrap();
+        let t3_now = s.get_task(&t3.id).unwrap().unwrap();
+        assert_eq!(t3_now.status, TaskStatus::Failed);
+        assert!(t3_now.result_md.is_none());
+        assert!(t3_now.result_run_id.is_none());
     }
 
     #[test]
@@ -1181,8 +2553,8 @@ mod tests {
                 Some(&t1.id),
             )
             .unwrap();
-        assert!(s.claim_task(&t1.id, &run.id, None).unwrap());
-        assert!(!s.claim_task(&t1.id, "outro", None).unwrap());
+        assert!(s.claim_task(&t1.id, &run.id, None, None).unwrap());
+        assert!(!s.claim_task(&t1.id, "outro", None, None).unwrap());
         assert_eq!(
             s.get_task(&t1.id).unwrap().unwrap().status,
             TaskStatus::Running
@@ -1201,6 +2573,7 @@ mod tests {
                 task_id: t1.id.clone(),
                 status: TaskStatusUpdate::Done,
                 note: Some("plano pronto".into()),
+                result: None,
             },
         )
         .unwrap();
@@ -1216,7 +2589,7 @@ mod tests {
         let run2 = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t1.id))
             .unwrap();
-        assert!(s.claim_task(&t1.id, &run2.id, None).unwrap());
+        assert!(s.claim_task(&t1.id, &run2.id, None, None).unwrap());
         s.record_run_event(
             &run2.id,
             0,
@@ -1225,6 +2598,7 @@ mod tests {
                 task_id: t1.id.clone(),
                 status: TaskStatusUpdate::Review,
                 note: Some("olhem o diff".into()),
+                result: None,
             },
         )
         .unwrap();
@@ -1243,7 +2617,7 @@ mod tests {
         let run3 = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t1.id))
             .unwrap();
-        assert!(s.claim_task(&t1.id, &run3.id, None).unwrap());
+        assert!(s.claim_task(&t1.id, &run3.id, None, None).unwrap());
         s.record_run_event(&run3.id, 0, "t", &result_event(true))
             .unwrap();
         let t1_now = s.get_task(&t1.id).unwrap().unwrap();
@@ -1307,7 +2681,7 @@ mod tests {
         let run = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t.id))
             .unwrap();
-        assert!(s.claim_task(&t.id, &run.id, None).unwrap());
+        assert!(s.claim_task(&t.id, &run.id, None, None).unwrap());
         s.record_run_event(
             &run.id,
             0,
@@ -1332,7 +2706,7 @@ mod tests {
         let run2 = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t.id))
             .unwrap();
-        assert!(s.claim_task(&t.id, &run2.id, None).unwrap());
+        assert!(s.claim_task(&t.id, &run2.id, None, None).unwrap());
         s.record_run_event(
             &run2.id,
             0,
@@ -1341,6 +2715,7 @@ mod tests {
                 task_id: t.id.clone(),
                 status: TaskStatusUpdate::Blocked,
                 note: Some("falta acesso".into()),
+                result: None,
             },
         )
         .unwrap();

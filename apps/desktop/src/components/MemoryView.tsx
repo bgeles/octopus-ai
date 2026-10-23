@@ -1,7 +1,8 @@
 import { Archive, BookOpen, History, Plus, RefreshCw, Search } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Transport } from "../lib/transport";
 import { CONSOLIDATION_MODEL, CONSOLIDATION_SETTING, MEMORY_KIND_LABELS, MEMORY_PAGE_KINDS, settingSourcesKey, type ConsolidationMode, type ContextEvent, type ContextPin, type ContextPinKind, type MemoryHandoff, type Run, type SettingSourcesChoice, type MemoryObservation, type MemoryPage, type MemoryPageKind, type MemoryPageVersion, type MemorySearchHit, type Project, type Task } from "../lib/types";
+import { renderMarkdown } from "../lib/markdown";
 import { formatRelative } from "./SessionsView";
 
 export type MemoryTab = "pages" | "observations" | "handoffs" | "context";
@@ -556,65 +557,4 @@ export function MemoryView({ project, transport, availableTabs = ["pages", "obse
       )}
     </div>
   );
-}
-
-/** Markdown mínimo e seguro (sem HTML): títulos, negrito, código inline, listas e parágrafos. */
-export function renderMarkdown(md: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  const lines = md.split("\n");
-  let list: string[] = [];
-  const flushList = () => {
-    if (list.length === 0) return;
-    out.push(
-      <ul key={`ul_${out.length}`} className="m-0 flex list-disc flex-col gap-0.5 pl-5">
-        {list.map((item, i) => (
-          <li key={i}>{inline(item)}</li>
-        ))}
-      </ul>,
-    );
-    list = [];
-  };
-  for (const raw of lines) {
-    const line = raw.trimEnd();
-    if (/^\s*[-*]\s+/.test(line)) {
-      list.push(line.replace(/^\s*[-*]\s+/, ""));
-      continue;
-    }
-    flushList();
-    if (!line.trim()) continue;
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      const level = heading[1]!.length;
-      const cls = level <= 2 ? "m-0 mt-2 font-display text-[15px] font-semibold" : "m-0 mt-1 text-[13px] font-semibold";
-      out.push(
-        <p key={`h_${out.length}`} role="heading" aria-level={Math.min(6, level + 2)} className={cls}>
-          {inline(heading[2]!)}
-        </p>,
-      );
-      continue;
-    }
-    out.push(
-      <p key={`p_${out.length}`} className="m-0">
-        {inline(line)}
-      </p>,
-    );
-  }
-  flushList();
-  return out;
-}
-
-function inline(text: string): ReactNode[] {
-  const parts: ReactNode[] = [];
-  const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const token = m[0];
-    if (token.startsWith("**")) parts.push(<strong key={m.index}>{token.slice(2, -2)}</strong>);
-    else parts.push(<code key={m.index} className="rounded-sm bg-paper px-1 font-mono text-xs">{token.slice(1, -1)}</code>);
-    last = m.index + token.length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
 }

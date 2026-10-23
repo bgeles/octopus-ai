@@ -6,6 +6,7 @@
 
 pub mod attention;
 pub mod audit;
+pub mod board_calls;
 pub mod config;
 pub mod harness;
 pub mod hooks;
@@ -17,6 +18,7 @@ pub mod preview;
 pub mod pricing;
 pub mod security;
 pub mod skills;
+pub mod task_diff;
 pub mod team;
 
 use std::path::{Path, PathBuf};
@@ -80,6 +82,15 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0018_usage_cost",
         include_str!("migrations/0018_usage_cost.sql"),
+    ),
+    (
+        "0019_task_result",
+        include_str!("migrations/0019_task_result.sql"),
+    ),
+    ("0020_trust", include_str!("migrations/0020_trust.sql")),
+    (
+        "0021_delegation",
+        include_str!("migrations/0021_delegation.sql"),
     ),
 ];
 
@@ -261,6 +272,44 @@ impl Store {
         agent_profile_id: Option<&str>,
         task_id: Option<&str>,
     ) -> Result<Run> {
+        self.create_run_kind(
+            project_id,
+            prompt,
+            options,
+            agent_profile_id,
+            task_id,
+            "agent",
+        )
+    }
+
+    /// Run de revisão: o aprovador (membro) revisa a task de outro membro; `kind = review`.
+    pub fn create_review_run(
+        &self,
+        project_id: &str,
+        prompt: &str,
+        options: &RunOptions,
+        reviewer_agent_id: &str,
+        task_id: &str,
+    ) -> Result<Run> {
+        self.create_run_kind(
+            project_id,
+            prompt,
+            options,
+            Some(reviewer_agent_id),
+            Some(task_id),
+            "review",
+        )
+    }
+
+    fn create_run_kind(
+        &self,
+        project_id: &str,
+        prompt: &str,
+        options: &RunOptions,
+        agent_profile_id: Option<&str>,
+        task_id: Option<&str>,
+        kind: &str,
+    ) -> Result<Run> {
         let run = Run {
             id: new_id("run"),
             project_id: project_id.to_string(),
@@ -281,7 +330,7 @@ impl Store {
             error_message: None,
             agent_profile_id: agent_profile_id.map(str::to_string),
             task_id: task_id.map(str::to_string),
-            kind: "agent".into(),
+            kind: kind.into(),
             est_cost_usd: 0.0,
             stop_cause: None,
         };
@@ -639,8 +688,13 @@ impl Store {
                     params![run_id, message, now()],
                 )?;
             }
-            RunEvent::TaskUpdate { status, note, .. } => {
-                Self::apply_task_update(&tx, run_id, *status, note.as_deref())?;
+            RunEvent::TaskUpdate {
+                status,
+                note,
+                result,
+                ..
+            } => {
+                Self::apply_task_update(&tx, run_id, *status, note.as_deref(), result.as_deref())?;
             }
             // Hook livre que bloqueou algo: fica na auditoria (os que só rodaram ficam no run).
             RunEvent::HookRan {
@@ -821,11 +875,14 @@ mod tests {
                 "0016_effort".to_string(),
                 "0017_custom_hooks".to_string(),
                 "0018_usage_cost".to_string(),
+                "0019_task_result".to_string(),
+                "0020_trust".to_string(),
+                "0021_delegation".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 18);
+        assert_eq!(s.applied_migrations().unwrap().len(), 21);
     }
 
     #[test]

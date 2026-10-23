@@ -2,12 +2,12 @@
  * Gerencia runs do Agent SDK: inicia, interrompe, encaminha permissões e emite eventos.
  * O acesso ao SDK é injetado (QueryFn) para permitir testes sem rede nem binário do Claude.
  */
-import type { CustomHook, HookDecision, MemoryCallResult, MemoryOp, PermissionDecision, RunEvent, RunHookNotification, RunMemoryCallNotification, RunStartParams } from "@octopus/protocol";
+import type { BoardCallResult, BoardOp, CustomHook, HookDecision, MemoryCallResult, MemoryOp, PermissionDecision, RunBoardCallNotification, RunEvent, RunHookNotification, RunMemoryCallNotification, RunStartParams } from "@octopus/protocol";
 import { JsonRpcErrorCode } from "@octopus/protocol";
 import { TOOL_EVENTS, defaultHookSpawn, runCustomHook, type HookSpawn } from "./customHooks.js";
 import { StreamUsageTracker, mapSdkMessage, type SdkMessageLike } from "./events.js";
 import { MEMORY_HOOK_EVENTS, eventFromMemoryHook, type MemoryHookInputLike } from "./memoryHooks.js";
-import { MEMORY_TOOLS, type OctopusToolsFactory } from "./octopusTools.js";
+import { BOARD_TOOLS, MEMORY_TOOLS, type OctopusToolsFactory } from "./octopusTools.js";
 import { RpcError } from "./rpc.js";
 
 export type PermissionResultLike =
@@ -68,9 +68,14 @@ export const HOOK_TIMEOUT_MS = 30_000;
 
 /** Notifica o core de uma chamada de tool de memória (`run.memory_call`); a resposta chega por `resolveMemoryCall`. */
 export type MemoryCallSink = (notification: RunMemoryCallNotification) => void;
+/** Notifica o core de uma chamada de tool de delegação (`run.board_call`); a resposta chega por `resolveBoardCall`. */
+export type BoardCallSink = (notification: RunBoardCallNotification) => void;
+
+export const BOARD_TOOLS_NOTE =
+  "Delegação no Octopus: as tools mcp__octopus__team_list, mcp__octopus__task_list, mcp__octopus__task_create e mcp__octopus__task_assign estão disponíveis nesta sessão (servidor MCP in-process \"octopus\"): mostram quem está no seu time e criam ou atribuem tasks no board do Octopus para quem reporta a você. Elas não alteram arquivos e valem em qualquer modo de permissão, inclusive no modo de planejamento: criar uma task no board é a sua forma de planejar e delegar. Use-as para quebrar um objetivo em trabalho delegado em vez de fazer tudo sozinho; o core recusa atribuições fora do seu time.";
 
 export const TASK_UPDATE_TOOL = "mcp__octopus__task_update";
-const OCTOPUS_INTERNAL_TOOLS: ReadonlySet<string> = new Set([TASK_UPDATE_TOOL, ...MEMORY_TOOLS]);
+const OCTOPUS_INTERNAL_TOOLS: ReadonlySet<string> = new Set([TASK_UPDATE_TOOL, ...MEMORY_TOOLS, ...BOARD_TOOLS]);
 
 /**
  * Vai no system prompt quando as tools de memória estão ligadas. No uso real (20/10/2026), em
@@ -90,6 +95,9 @@ type PendingHook = {
 type PendingMemoryCall = {
   resolve: (result: MemoryCallResult) => void;
 };
+type PendingBoardCall = {
+  resolve: (result: BoardCallResult) => void;
+};
 
 type ActiveRun = {
   runId: string;
@@ -98,6 +106,7 @@ type ActiveRun = {
   pendingPermissions: Map<string, PendingPermission>;
   pendingHooks: Map<string, PendingHook>;
   pendingMemoryCalls: Map<string, PendingMemoryCall>;
+  pendingBoardCalls: Map<string, PendingBoardCall>;
   /** Motivo de um `ask` da política, para o `permission_request` seguinte da mesma ferramenta. */
   askReasons: Map<string, string>;
   /** O brief de memória só entra uma vez por run. */
@@ -110,6 +119,7 @@ export class RunManager {
   private permissionCounter = 0;
   private hookCounter = 0;
   private memoryCallCounter = 0;
+  private boardCallCounter = 0;
 
   constructor(
     private readonly queryFn: QueryFn,
@@ -121,6 +131,7 @@ export class RunManager {
     private readonly emitMemoryCall: MemoryCallSink | null = null,
     private readonly hookSpawn: HookSpawn = defaultHookSpawn,
     private readonly claudePath: string | null = null,
+    private readonly emitBoardCall: BoardCallSink | null = null,
   ) {}
 
   get activeRunIds(): string[] {
@@ -140,6 +151,7 @@ export class RunManager {
       pendingPermissions: new Map(),
       pendingHooks: new Map(),
       pendingMemoryCalls: new Map(),
+      pendingBoardCalls: new Map(),
       askReasons: new Map(),
       briefInjected: false,
       done: Promise.resolve(),
@@ -156,6 +168,8 @@ export class RunManager {
       run.pendingHooks.clear();
       for (const pending of run.pendingMemoryCalls.values()) pending.resolve({ ok: false, content: "Run encerrado antes da resposta da memória" });
       run.pendingMemoryCalls.clear();
+      for (const pending of run.pendingBoardCalls.values()) pending.resolve({ ok: false, content: "Run encerrado antes da resposta do board" });
+      run.pendingBoardCalls.clear();
       this.runs.delete(params.runId);
     });
   }
@@ -189,6 +203,16 @@ export class RunManager {
     if (!pending) throw new RpcError(JsonRpcErrorCode.HookNotFound, `Hook ${hookId} não encontrado`);
     run.pendingHooks.delete(hookId);
     pending.resolve(decision);
+    return true;
+  }
+
+  resolveBoardCall(runId: string, callId: string, result: BoardCallResult): boolean {
+    const run = this.runs.get(runId);
+    if (!run) throw new RpcError(JsonRpcErrorCode.RunNotFound, `Run ${runId} não encontrado`);
+    const pending = run.pendingBoardCalls.get(callId);
+    if (!pending) throw new RpcError(JsonRpcErrorCode.BoardCallNotFound, `Chamada do board ${callId} não encontrada`);
+    run.pendingBoardCalls.delete(callId);
+    pending.resolve(result);
     return true;
   }
 
@@ -281,18 +305,20 @@ export class RunManager {
       options.hooks = hooks;
     }
     const wantsMemoryTools = Boolean(o.memory?.tools) && this.emitMemoryCall !== null;
-    if (wantsMemoryTools) {
-      const append = [options.systemPrompt?.append, MEMORY_TOOLS_NOTE].filter(Boolean).join("\n\n");
+    const wantsBoardTools = Boolean(o.boardTools) && this.emitBoardCall !== null;
+    if (wantsMemoryTools || wantsBoardTools) {
+      const append = [options.systemPrompt?.append, wantsMemoryTools ? MEMORY_TOOLS_NOTE : null, wantsBoardTools ? BOARD_TOOLS_NOTE : null].filter(Boolean).join("\n\n");
       options.systemPrompt = { type: "preset", preset: "claude_code", append };
     }
-    if ((o.taskContext || wantsMemoryTools) && this.octopusTools) {
+    if ((o.taskContext || wantsMemoryTools || wantsBoardTools) && this.octopusTools) {
       const ctx = o.taskContext;
       const server = this.octopusTools({
-        task: ctx ? { ctx, onUpdate: (status, note) => this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note }) } : undefined,
+        task: ctx ? { ctx, onUpdate: (status, note, result) => this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note, result }) } : undefined,
         memory: wantsMemoryTools ? { call: (op, args) => this.memoryCall(run, op, args) } : undefined,
+        board: wantsBoardTools ? { call: (op, args) => this.boardCall(run, op, args) } : undefined,
       });
       options.mcpServers = { ...(options.mcpServers ?? {}), octopus: server as never };
-      const extra = [...(ctx ? [TASK_UPDATE_TOOL] : []), ...(wantsMemoryTools ? MEMORY_TOOLS : [])];
+      const extra = [...(ctx ? [TASK_UPDATE_TOOL] : []), ...(wantsMemoryTools ? MEMORY_TOOLS : []), ...(wantsBoardTools ? BOARD_TOOLS : [])];
       if (options.allowedTools) {
         const allowed = options.allowedTools;
         options.allowedTools = [...allowed, ...extra.filter((t) => !allowed.includes(t))];
@@ -343,6 +369,26 @@ export class RunManager {
         },
       });
       this.emitMemoryCall!({ runId: run.runId, callId, op, args });
+    });
+  }
+
+  /** Tool de delegação: pergunta ao core (`run.board_call`) e espera `board.result`; sem resposta a tempo, devolve erro textual. */
+  private boardCall(run: ActiveRun, op: BoardOp, args: Record<string, unknown>): Promise<BoardCallResult> {
+    const callId = `board_${++this.boardCallCounter}`;
+    return new Promise<BoardCallResult>((resolve) => {
+      const timer = setTimeout(() => {
+        if (run.pendingBoardCalls.delete(callId)) {
+          this.log("warn", `chamada do board ${callId} sem resposta do core em ${this.hookTimeoutMs} ms`);
+          resolve({ ok: false, content: "Board indisponível: o core não respondeu a tempo. Siga sem delegar." });
+        }
+      }, this.hookTimeoutMs);
+      run.pendingBoardCalls.set(callId, {
+        resolve: (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+      });
+      this.emitBoardCall!({ runId: run.runId, callId, op, args });
     });
   }
 

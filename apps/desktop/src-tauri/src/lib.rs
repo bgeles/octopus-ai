@@ -176,6 +176,32 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                             warn!("memory.result falhou para {}: {e}", call.call_id);
                         }
                     }
+                    SidecarNotification::BoardCall(call) => {
+                        let result =
+                            match store.handle_board_call(&call.run_id, call.op, &call.args) {
+                                Ok(r) => r,
+                                Err(e) => protocol::BoardCallResult {
+                                    ok: false,
+                                    content: format!("Erro no board: {e:#}"),
+                                },
+                            };
+                        if result.ok {
+                            let _ = app.emit(
+                                commands_orchestration::BOARD_CHANGED,
+                                &crate::scheduler::TickReport::default(),
+                            );
+                        }
+                        if let Err(e) = sidecar
+                            .board_result(protocol::BoardResultParams {
+                                run_id: call.run_id.clone(),
+                                call_id: call.call_id.clone(),
+                                result,
+                            })
+                            .await
+                        {
+                            warn!("board.result falhou para {}: {e}", call.call_id);
+                        }
+                    }
                     SidecarNotification::Log(log) => {
                         let _ = app.emit(RUNTIME_LOG, &log);
                     }
@@ -441,6 +467,7 @@ pub fn run() {
             commands_orchestration::return_task,
             commands_orchestration::list_task_events,
             commands_orchestration::scheduler_tick,
+            commands_orchestration::task_diff,
             commands_security::list_audit_events,
             commands_security::verify_audit,
             commands_security::export_audit,

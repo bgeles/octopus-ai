@@ -1,9 +1,9 @@
-import type { RunEvent } from "@octopus/protocol";
+import type { RunEvent, RunBoardCallNotification } from "@octopus/protocol";
 import { describe, expect, it } from "vitest";
 import type { SdkMessageLike } from "./events.js";
-import { MEMORY_TOOLS_NOTE, RunManager, type HookCallbackLike, type QueryFn, type QueryOptionsLike } from "./runner.js";
+import { MEMORY_TOOLS_NOTE, RunManager, type HookCallbackLike, type QueryFn, type QueryOptionsLike, BOARD_TOOLS_NOTE } from "./runner.js";
 import type { RunHookNotification, RunMemoryCallNotification } from "@octopus/protocol";
-import type { MemoryCaller } from "./octopusTools.js";
+import type { MemoryCaller, BoardCaller } from "./octopusTools.js";
 
 type Captured = { runId: string; event: RunEvent };
 
@@ -254,6 +254,51 @@ describe("RunManager", () => {
     await manager.drain();
     expect(emitted.filter((e) => e.type === "brief_injected")).toEqual([{ type: "brief_injected", chars: 22, items: ["Migrações em Flyway"] }]);
     expect(seen?.hooks?.PostToolUse).toBeUndefined();
+  });
+
+  it("com boardTools, libera as tools de delegação e faz o round trip run.board_call → board.result (com timeout)", async () => {
+    let seen: QueryOptionsLike | undefined;
+    let caller: BoardCaller | undefined;
+    const calls: RunBoardCallNotification[] = [];
+    const factory = (opts: { board?: { call: BoardCaller } }) => {
+      caller = opts.board?.call;
+      return { fake: "server" };
+    };
+    const gate = (() => {
+      let release!: () => void;
+      const promise = new Promise<void>((r) => (release = r));
+      return { promise, release };
+    })();
+    const gated: QueryFn = ({ options }) => {
+      seen = options;
+      return {
+        async *[Symbol.asyncIterator]() {
+          await gate.promise;
+          yield { type: "result", subtype: "success", session_id: "s" };
+        },
+      };
+    };
+    const manager = new RunManager(gated, () => {}, () => {}, factory as never, null, 50, null, undefined, null, (call) => calls.push(call));
+    manager.start({ runId: "r1", cwd: "/p", prompt: "delegue", options: { allowedTools: ["Read"], boardTools: true } });
+    expect(seen?.mcpServers).toEqual({ octopus: { fake: "server" } });
+    expect(seen?.allowedTools).toEqual(["Read", "mcp__octopus__team_list", "mcp__octopus__task_list", "mcp__octopus__task_create", "mcp__octopus__task_assign"]);
+    expect(seen?.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: BOARD_TOOLS_NOTE });
+    // As tools do board são internas: não viram pedido de aprovação (o core valida cada chamada).
+    const signal = new AbortController().signal;
+    expect(await seen!.canUseTool("mcp__octopus__task_create", { title: "t", assignee: "Dani" }, { signal })).toEqual({ behavior: "allow", updatedInput: { title: "t", assignee: "Dani" } });
+    const pending = caller!("task_create", { title: "Inventário", assignee: "Dani" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ runId: "r1", op: "task_create", args: { title: "Inventário", assignee: "Dani" } });
+    expect(manager.resolveBoardCall("r1", calls[0]!.callId, { ok: true, content: "Task task_24 criada" })).toBe(true);
+    expect(await pending).toEqual({ ok: true, content: "Task task_24 criada" });
+    const slow = await caller!("team_list", {});
+    expect(slow.ok).toBe(false);
+    expect(slow.content).toContain("não respondeu a tempo");
+    expect(() => manager.resolveBoardCall("r1", "board_999", { ok: true, content: "" })).toThrow(/não encontrada/);
+    const orphan = caller!("task_list", {});
+    gate.release();
+    await manager.interrupt("r1").catch(() => {});
+    expect((await orphan).ok).toBe(false);
   });
 
   it("com memory.tools, monta o MCP com as tools de memória e faz o round trip run.memory_call → memory.result (com timeout)", async () => {

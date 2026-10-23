@@ -5,11 +5,13 @@
  */
 import editApprovalEvents from "@octopus/protocol/fixtures/run-events-edit-approval.notifications.json";
 import subagentEvents from "@octopus/protocol/fixtures/run-events-subagent.notifications.json";
+import delegationEvents from "@octopus/protocol/fixtures/run-events-delegation.notifications.json";
+import reviewEvents from "@octopus/protocol/fixtures/run-events-review.notifications.json";
 import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications.json";
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { AgentProfile, AppSettings, Autonomy, TrustPolicy, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -38,6 +40,7 @@ export function seedRoles(): Role[] {
     { ...base, id: "role_pesquisador", title: "Pesquisador", specialty: "Investigação e síntese", responsibilitiesMd: "- Investigar o código, a documentação e a web para responder a uma pergunta específica.\n- Entregar uma síntese curta com fontes e incertezas.\n- Não alterar arquivos do projeto.", defaultPermissionMode: "plan", defaultTools: ["Read", "Glob", "Grep", "WebSearch", "WebFetch"], position: 5 },
     { ...base, id: "role_documentador", title: "Documentador", specialty: "Documentação e comunicação", responsibilitiesMd: "- Manter README, docs e comentários alinhados ao código.\n- Escrever em português claro, com exemplos curtos.\n- Editar apenas documentação, salvo pedido explícito.", defaultPermissionMode: "acceptEdits", defaultTools: ["Read", "Glob", "Grep", "Edit", "Write"], position: 6 },
     { ...base, id: "role_seguranca", title: "Segurança", specialty: "Segurança e conformidade", responsibilitiesMd: "- Procurar segredos expostos, dependências vulneráveis e permissões excessivas.\n- Classificar o risco de cada achado e propor a mitigação.\n- Nunca executar comandos destrutivos.", defaultPermissionMode: "plan", defaultTools: ["Read", "Glob", "Grep", "Bash"], position: 7 },
+    { ...base, id: "role_gestor_produto", title: "Gestor de produto", specialty: "Prioridades e delegação", responsibilitiesMd: "- Transformar objetivos em tasks pequenas e claras, com critérios de aceite.\n- Delegar para quem reporta a você e acompanhar o andamento no board.\n- Revisar as entregas do seu time: aprovar o que cumpre os critérios, devolver com nota o que não cumpre.\n- Não alterar código: só ler, investigar, planejar e decidir.", defaultPermissionMode: "plan", defaultTools: ["Read", "Glob", "Grep"], position: 8, defaultAutonomy: "autonomous", defaultCanAssignTasks: true, defaultCanApprove: true },
   ];
 }
 
@@ -78,9 +81,33 @@ export function subagentRunEvents(): RunEventNotification[] {
 }
 
 /** Roteiro de um run de task: o agente chama task_update(review) e termina. */
-export function taskRunEvents(): RunEventNotification[] {
-  return (taskEvents as FixtureNotification[]).map((n) => n.params);
+/** Roteiro de um run de quem delega: team_list e task_create para um subordinado. */
+export function delegationRunEvents(): RunEventNotification[] {
+  return (delegationEvents as FixtureNotification[]).map((n) => n.params);
 }
+
+/** Roteiro de um run de revisão: o revisor lê e aprova com task_update(approved). */
+export function reviewRunEvents(): RunEventNotification[] {
+  return (reviewEvents as FixtureNotification[]).map((n) => n.params);
+}
+
+export function taskRunEvents(): RunEventNotification[] {
+  const base = (taskEvents as FixtureNotification[]).map((n) => n.params);
+  // Antes de avisar o board, o agente escreve a migração: assim a entrega tem arquivos e diff no mock.
+  const at = base[0]?.at ?? new Date().toISOString();
+  const write: RunEventNotification[] = [
+    { runId: base[0]!.runId, seq: 0, at, event: { type: "tool_use", toolUseId: "toolu_write_v12", name: "Write", input: { file_path: MOCK_DELIVERY_FILE, content: MOCK_DELIVERY_AFTER }, parentToolUseId: null } },
+    { runId: base[0]!.runId, seq: 0, at, event: { type: "tool_result", toolUseId: "toolu_write_v12", content: `Arquivo ${MOCK_DELIVERY_FILE} criado.`, isError: false, parentToolUseId: null } },
+  ];
+  const first = base.findIndex((n) => n.event.type === "tool_use");
+  return first === -1 ? [...base, ...write] : [...base.slice(0, first), ...write, ...base.slice(first)];
+}
+
+export const MOCK_DELIVERY_FILE = "src/main/resources/db/migration/V12__add_triage_status.sql";
+export const MOCK_DELIVERY_AFTER = "ALTER TABLE leads ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'NEW';\nCREATE INDEX idx_leads_status ON leads (status) WHERE status <> 'DONE';\n";
+const MOCK_REPO_FILE = "src/main/java/br/com/chatcore/lead/LeadRepository.java";
+const MOCK_REPO_BEFORE = "public interface LeadRepository extends JpaRepository<Lead, Long> {\n  @Query(\"select l from Lead l\")\n  List<Lead> findAll();\n}\n";
+const MOCK_REPO_AFTER = "public interface LeadRepository extends JpaRepository<Lead, Long> {\n  @Query(\"select l from Lead l where l.status = :status\")\n  List<Lead> findByStatus(@Param(\"status\") TriageStatus status);\n}\n";
 
 export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
@@ -222,12 +249,21 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       createdAt: existing?.profile.createdAt ?? new Date().toISOString(),
       mcpServerIds: input.mcpServerIds ?? null,
       skillIds: input.skillIds ?? null,
+      autonomy: input.autonomy ?? null,
+      canAssignTasks: input.canAssignTasks ?? null,
+      canApprove: input.canApprove ?? null,
+    };
+    const trust: TrustPolicy = {
+      autonomy: (profile.autonomy ?? role.defaultAutonomy ?? "supervised") as Autonomy,
+      canAssignTasks: profile.canAssignTasks ?? role.defaultCanAssignTasks ?? false,
+      canApprove: profile.canApprove ?? role.defaultCanApprove ?? false,
     };
     return {
       id: existing?.id ?? `member_${memberCounter}`,
       projectId,
       profile,
       role,
+      trust,
       reportsToAgentId: input.reportsToAgentId ?? null,
       position: existing?.position ?? members.filter((m) => m.projectId === projectId).length + 1,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
@@ -243,27 +279,122 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     taskEventsLog.push({ id: `tev_${++tevCounter}`, taskId, at: new Date().toISOString(), kind, fromStage: from, toStage: to, runId, actor, note });
   };
   const requestedByRun = new Map<string, string>();
-  const advanceTask = (task: Task, workflow: Workflow, actor: string, note: string | null, human: boolean) => {
+  const resultByRun = new Map<string, string>();
+  /** Como `resolve_approver` no core: supervisionado → você; senão sobe até um chefe que aprova; no topo, autônomo → auto. */
+  const resolveApproverMock = (assignee: string | null): { kind: "human" } | { kind: "agent"; id: string } | { kind: "auto" } => {
+    const member = assignee ? findMember(assignee) : undefined;
+    if (!member || member.trust.autonomy === "supervised") return { kind: "human" };
+    let current = member.reportsToAgentId;
+    let hops = 0;
+    while (current && hops++ < members.length) {
+      const boss = findMember(current);
+      if (!boss) break;
+      if (boss.trust.canApprove) return { kind: "agent", id: boss.profile.id };
+      current = boss.reportsToAgentId;
+    }
+    return member.trust.autonomy === "autonomous" ? { kind: "auto" } : { kind: "human" };
+  };
+  const nameOf = (agentId: string) => findMember(agentId)?.profile.name ?? agentId;
+  const requestReview = (task: Task, reviewer: string, runId: string | null) => {
+    task.status = "review";
+    task.approverAgentId = reviewer;
+    task.lockRunId = null;
+    task.reviewAttempts = 0;
+    pushTaskEvent(task.id, "review_requested", task.stageId, task.stageId, runId, "política", `revisão encaminhada a ${nameOf(reviewer)}`);
+    setTimeout(() => void handlers.scheduler_tick({}), tickMs);
+  };
+  /** A task chegou a um gate: você, um revisor do organograma, ou auto-aprovada (e segue). */
+  const enterGate = (task: Task, workflow: Workflow, gateIndex: number, worker: string | null, runId: string | null) => {
+    const gate = workflow.stages[gateIndex]!;
+    const decision = gate.approver === "policy" ? resolveApproverMock(worker) : { kind: "human" as const };
+    if (decision.kind === "human") {
+      task.status = "waiting_approval";
+      task.approverAgentId = null;
+    } else if (decision.kind === "agent") {
+      requestReview(task, decision.id, runId);
+    } else {
+      pushTaskEvent(task.id, "auto_approved", gate.id, gate.id, runId, "política", "autônomo, sem revisor acima: gate aprovado sem humano");
+      advanceTask(task, workflow, "política", null, false, worker);
+    }
+  };
+  const advanceTask = (task: Task, workflow: Workflow, actor: string, note: string | null, human: boolean, worker: string | null = task.assignedAgentId) => {
     const index = workflow.stages.findIndex((s) => s.id === task.stageId);
     const next = workflow.stages[index + 1];
     const from = task.stageId;
     if (!next) task.status = "done";
     else {
       task.stageId = next.id;
-      task.status = next.gate ? "waiting_approval" : "ready";
+      task.status = "ready";
     }
     task.lockRunId = null;
+    task.approverAgentId = null;
     if (note) task.lastNote = note;
     task.updatedAt = new Date().toISOString();
     pushTaskEvent(task.id, human ? "approved" : task.status === "done" ? "completed" : "advanced", from, task.stageId, null, actor, note);
+    if (next?.gate) enterGate(task, workflow, index + 1, worker, null);
   };
-  const finishTaskRun = (run: Run, success: boolean, error: string | null) => {
+  const maxAgentReturns = () => (typeof settings["board.maxAgentReturns"] === "number" ? (settings["board.maxAgentReturns"] as number) : 2);
+  /** Fim do run de revisão: aprova (segue), devolve (reabre ou sobe para você) ou falha (tenta de novo, depois sobe). */
+  const finishReviewRun = (run: Run, task: Task, workflow: Workflow, success: boolean) => {
+    const actor = `agente ${run.agentProfileId ? nameOf(run.agentProfileId) : "revisor"}`;
+    const requested = requestedByRun.get(run.id);
+    if (success && requested === "approved") {
+      task.returnCount = 0;
+      task.reviewAttempts = 0;
+      advanceTask(task, workflow, actor, task.lastNote ?? "aprovado na revisão", true);
+    } else if (success && requested === "returned") {
+      task.returnCount += 1;
+      if (task.returnCount > maxAgentReturns()) {
+        task.status = "waiting_approval";
+        task.approverAgentId = null;
+        task.lockRunId = null;
+        pushTaskEvent(task.id, "escalated", task.stageId, task.stageId, run.id, actor, `devolvida ${task.returnCount} vezes (limite ${maxAgentReturns()}); precisa de você`);
+      } else {
+        const index = workflow.stages.findIndex((s) => s.id === task.stageId);
+        const from = task.stageId;
+        if (workflow.stages[index]?.gate && index > 0) task.stageId = workflow.stages[index - 1]!.id;
+        task.status = "ready";
+        task.approverAgentId = null;
+        task.lockRunId = null;
+        task.reviewAttempts = 0;
+        pushTaskEvent(task.id, "returned", from, task.stageId, run.id, actor, task.lastNote);
+      }
+    } else if (task.reviewAttempts >= 2) {
+      task.status = "waiting_approval";
+      task.approverAgentId = null;
+      task.lockRunId = null;
+      pushTaskEvent(task.id, "escalated", task.stageId, task.stageId, run.id, "sistema", "a revisão por agente falhou duas vezes; precisa de você");
+    } else {
+      task.lockRunId = null;
+      pushTaskEvent(task.id, "review_failed", task.stageId, task.stageId, run.id, actor, success ? "terminou sem decidir; será tentado de novo" : "run de revisão falhou; será tentado de novo");
+    }
+    task.updatedAt = new Date().toISOString();
+  };
+  const finishTaskRun = (run: Run, success: boolean, summary: string | null) => {
     if (!run.taskId) return;
     const task = tasks.find((t) => t.id === run.taskId);
     if (!task || task.lockRunId !== run.id) return;
     const workflow = workflows.find((w) => w.id === task.workflowId);
     if (!workflow) return;
+    if (run.kind === "review") {
+      finishReviewRun(run, task, workflow, success);
+      emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+      setTimeout(() => void handlers.scheduler_tick({}), tickMs);
+      return;
+    }
     const requested = requestedByRun.get(run.id);
+    if (success) {
+      // Como o core: o resumo do task_update vence; sem ele, fica o texto final do run.
+      task.resultMd = resultByRun.get(run.id) ?? task.resultMd ?? (summary?.trim() || null);
+      const touched = (events.get(run.id) ?? [])
+        .map((e) => e.event)
+        .filter((e): e is Extract<typeof e, { type: "tool_use" }> => e.type === "tool_use" && ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(e.name))
+        .map((e) => String((e.input as { file_path?: unknown }).file_path ?? ""))
+        .filter(Boolean);
+      task.filesChanged = [...new Set(touched)];
+      task.resultRunId = run.id;
+    }
+    const error = success ? null : summary;
     if (!success) {
       task.status = "failed";
       task.lockRunId = null;
@@ -274,13 +405,25 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       task.lockRunId = null;
       pushTaskEvent(task.id, "blocked", task.stageId, task.stageId, run.id, "agente", task.lastNote);
     } else if (requested === "review") {
-      task.status = "waiting_approval";
-      task.lockRunId = null;
       pushTaskEvent(task.id, "run_finished", task.stageId, task.stageId, run.id, "agente", "pediu revisão");
+      task.lockRunId = null;
+      const worker = run.agentProfileId ?? task.assignedAgentId;
+      const decision = resolveApproverMock(worker);
+      if (decision.kind === "human") {
+        task.status = "waiting_approval";
+        task.approverAgentId = null;
+      } else if (decision.kind === "agent") {
+        requestReview(task, decision.id, run.id);
+      } else {
+        pushTaskEvent(task.id, "auto_approved", task.stageId, task.stageId, run.id, "política", "autônomo, sem revisor acima: segue sem aprovação humana");
+        advanceTask(task, workflow, "política", task.lastNote, false, worker);
+      }
     } else {
-      advanceTask(task, workflow, "scheduler", task.lastNote, false);
+      advanceTask(task, workflow, "scheduler", task.lastNote, false, run.agentProfileId ?? task.assignedAgentId);
     }
     emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+    // Como o loop do core: o próximo estágio (ou a revisão) começa sem esperar um clique.
+    setTimeout(() => void handlers.scheduler_tick({}), tickMs);
   };
   const runnableTasks = (projectId: string): Array<{ task: Task; workflow: Workflow; stage: Stage }> => {
     const out: Array<{ task: Task; workflow: Workflow; stage: Stage }> = [];
@@ -799,6 +942,37 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       finishTaskRun(run, !ev.isError, ev.resultText);
       audit("sistema", "run.finished", run.projectId, { runId, status: run.status, costUsd: ev.costUsd, numTurns: ev.numTurns });
       consolidateRunMock(run);
+    } else if (ev.type === "tool_use" && (ev.name === "mcp__octopus__task_create" || ev.name === "mcp__octopus__task_assign") && run.agentProfileId) {
+      // Como `handle_board_call` no core: só para quem reporta ao membro do run; o responsável pode vir por nome.
+      const me = findMember(run.agentProfileId);
+      const reports: TeamMember[] = [];
+      const frontier = me ? [me.profile.id] : [];
+      while (frontier.length) {
+        const current = frontier.pop()!;
+        for (const m of members) if (m.reportsToAgentId === current && !reports.includes(m)) (reports.push(m), frontier.push(m.profile.id));
+      }
+      const input = ev.input as { title?: string; description?: string; acceptance?: string; assignee?: string; dependsOn?: string[]; ready?: boolean; taskId?: string };
+      const assignee = reports.find((m) => m.profile.id === input.assignee || m.profile.name.toLowerCase() === String(input.assignee ?? "").toLowerCase());
+      if (me?.trust.canAssignTasks && assignee) {
+        if (ev.name === "mcp__octopus__task_create" && input.title) {
+          const wf = workflows.find((w) => w.projectId === run.projectId);
+          if (wf) {
+            const at = new Date().toISOString();
+            const task: Task = { id: `task_${++taskCounter}`, projectId: run.projectId, workflowId: wf.id, stageId: wf.stages[0]!.id, title: input.title.trim(), descriptionMd: input.description?.trim() ?? "", acceptanceMd: input.acceptance?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: assignee.profile.id, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: me.profile.id };
+            tasks.push(task);
+            pushTaskEvent(task.id, "created_by_agent", null, task.stageId, run.id, `agente ${me.profile.name}`, null);
+            audit(`agente ${me.profile.name}`, "board.task.created_by_agent", run.projectId, { taskId: task.id, title: task.title, assignee: assignee.profile.name, runId: run.id });
+            emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+          }
+        } else if (ev.name === "mcp__octopus__task_assign" && input.taskId) {
+          const task = tasks.find((t) => t.id === input.taskId);
+          if (task && task.status !== "running") {
+            task.assignedAgentId = assignee.profile.id;
+            pushTaskEvent(task.id, "assigned", task.stageId, task.stageId, run.id, `agente ${me.profile.name}`, `atribuída a ${assignee.profile.name}`);
+            emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+          }
+        }
+      }
     } else if (ev.type === "tool_use" && ev.name === "mcp__octopus__memory_write" && run.kind === "consolidation") {
       const input = ev.input as { kind: MemoryPageKind; title: string; body: string; source?: string };
       const existing = pages.find((p) => p.projectId === run.projectId && !p.archivedAt && p.slug === slugifyMock(input.title));
@@ -818,6 +992,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (task) {
         requestedByRun.set(run.id, ev.status);
         if (ev.note) task.lastNote = ev.note;
+        if (ev.result) {
+          resultByRun.set(run.id, ev.result);
+          task.resultMd = ev.result;
+        }
         pushTaskEvent(task.id, "agent_update", null, null, run.id, "agente", `${ev.status}${ev.note ? `: ${ev.note}` : ""}`);
       }
     } else if (ev.type === "permission_request") {
@@ -986,8 +1164,11 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       };
       runs.set(run.id, run);
       events.set(run.id, []);
+      // Quem pode criar e atribuir tasks ganha as tools do board e, no mock, um roteiro que delega.
+      const memberScript = member?.trust.canAssignTasks ? delegationRunEvents() : script;
+      if (member?.trust.canAssignTasks) run.options = { ...run.options, boardTools: true };
       const brief = buildBriefMock(run.projectId, null, run.prompt, run.id);
-      if (brief) scriptByRun.set(run.id, [briefEvent(run.id, brief), ...script]);
+      scriptByRun.set(run.id, brief ? [briefEvent(run.id, brief), ...memberScript] : memberScript);
       schedule(run.id, 0);
       return { ...run };
     },
@@ -1151,6 +1332,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!existing) return false;
       members.splice(members.indexOf(existing), 1);
       for (const m of members) if (m.reportsToAgentId === agentProfileId) m.reportsToAgentId = null;
+      for (const t of tasks) {
+        if (t.approverAgentId === agentProfileId && t.status === "review") {
+          t.status = "waiting_approval";
+          t.approverAgentId = null;
+          t.lockRunId = null;
+          pushTaskEvent(t.id, "escalated", null, null, null, "sistema", `${existing.profile.name} saiu do time; a revisão passa para você`);
+        }
+      }
       for (const r of runs.values()) if (r.agentProfileId === agentProfileId) r.agentProfileId = null;
       writeSnapshot("auto");
       return true;
@@ -1216,7 +1405,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!wf.stages.some((s) => s.id === stageId)) throw new Error(`Estágio ${stageId} não existe neste workflow`);
       for (const dep of input.dependsOn ?? []) if (!tasks.some((t) => t.id === dep)) throw new Error(`Dependência ${dep} não encontrada`);
       const at = new Date().toISOString();
-      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at };
+      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: null };
       tasks.push(task);
       pushTaskEvent(task.id, "created", null, stageId, null, "você", null);
       return { ...task };
@@ -1251,6 +1440,18 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!task) throw new Error(`Task ${taskId} não encontrada`);
       if (task.status !== "waiting_approval" && task.status !== "review") throw new Error("A task não está aguardando aprovação");
       const wf = workflows.find((w) => w.id === task.workflowId)!;
+      if (task.lockRunId) {
+        // Aprovação por cima de uma revisão em andamento: o run de revisão é interrompido.
+        const review = runs.get(task.lockRunId);
+        if (review && review.status === "running") {
+          for (const t of pendingTimers.get(review.id) ?? []) clearTimeout(t);
+          pendingTimers.delete(review.id);
+          review.status = "interrupted";
+          review.endedAt = new Date().toISOString();
+        }
+      }
+      task.returnCount = 0;
+      task.reviewAttempts = 0;
       advanceTask(task, wf, "você", note ?? "aprovado", true);
       return { ...task };
     },
@@ -1260,32 +1461,45 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const from = task.stageId;
       task.stageId = stageId;
       task.status = "ready";
+      task.approverAgentId = null;
+      task.lockRunId = null;
+      task.reviewAttempts = 0;
       if (note) task.lastNote = note;
       pushTaskEvent(task.id, "returned", from, stageId, null, "você", note ?? null);
       return { ...task };
     },
     list_task_events: async ({ taskId }) => taskEventsLog.filter((e) => e.taskId === taskId).map((e) => ({ ...e })),
+    task_diff: async ({ taskId }) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} não encontrada`);
+      if (!task.baseCommit) return { available: false, reason: "A task ainda não começou: não há commit base para comparar.", base: null, scope: "project", files: [] };
+      const files = task.filesChanged.map((path) => (path === MOCK_DELIVERY_FILE ? { path, status: "added" as const, before: "", after: MOCK_DELIVERY_AFTER, truncated: false } : { path, status: "modified" as const, before: MOCK_REPO_BEFORE, after: MOCK_REPO_AFTER, truncated: false }));
+      if (task.resultRunId && !files.some((f) => f.path === MOCK_REPO_FILE)) files.push({ path: MOCK_REPO_FILE, status: "modified", before: MOCK_REPO_BEFORE, after: MOCK_REPO_AFTER, truncated: false });
+      return { available: true, reason: null, base: task.baseCommit, scope: task.worktreePath ? "worktree" : "project", files };
+    },
     scheduler_tick: async () => {
       const report: TickReport = { started: [], failed: [], parked: 0, paused: settings["scheduler.paused"] === true };
       if (report.paused) return report;
       for (const project of projects) {
         for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "ready")) {
           const wf = workflows.find((w) => w.id === task.workflowId);
-          const stage = wf?.stages.find((s) => s.id === task.stageId);
-          if (stage?.gate) {
-            task.status = "waiting_approval";
+          const index = wf?.stages.findIndex((s) => s.id === task.stageId) ?? -1;
+          if (wf && index >= 0 && wf.stages[index]!.gate) {
+            const worker = task.assignedAgentId ?? wf.stages.slice(0, index).reverse().find((s) => s.agentProfileId)?.agentProfileId ?? null;
+            enterGate(task, wf, index, worker, null);
             report.parked++;
           }
         }
         for (const { task, workflow, stage } of runnableTasks(project.id)) {
-          const agentId = stage.agentProfileId ?? task.assignedAgentId;
+          // Quem foi atribuído (por você ou por um gestor delegando) vence o padrão do estágio.
+          const agentId = task.assignedAgentId ?? stage.agentProfileId;
           const member = agentId ? findMember(agentId) : undefined;
           const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}`;
           const run: Run = {
             id: `run_mock_${++runCounter}`,
             projectId: project.id,
             prompt,
-            options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"] }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
+            options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"], mode: "work" }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
             agentProfileId: member?.profile.id ?? null,
             kind: "agent",
             taskId: task.id,
@@ -1309,10 +1523,54 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           scriptByRun.set(run.id, taskBrief ? [briefEvent(run.id, taskBrief), ...taskRunEvents()] : taskRunEvents());
           task.status = "running";
           task.lockRunId = run.id;
+          task.baseCommit = task.baseCommit ?? "9c1f2e0a7b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f";
+          if (workflow.useWorktrees && !task.worktreePath) task.worktreePath = `${project.path}/.octopus/worktrees/${task.id}`;
           task.updatedAt = run.startedAt;
           pushTaskEvent(task.id, "run_started", task.stageId, task.stageId, run.id, "scheduler", null);
           schedule(run.id, 0);
-          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id });
+          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "task" });
+        }
+        // Revisões por agentes: task em `review` esperando o run do aprovador.
+        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "review" && t.approverAgentId && !t.lockRunId)) {
+          const workflow = workflows.find((w) => w.id === task.workflowId);
+          const stage = workflow?.stages.find((s) => s.id === task.stageId);
+          const reviewer = findMember(task.approverAgentId!);
+          if (!workflow || !stage || !reviewer) continue;
+          const busy = tasks.filter((t) => t.workflowId === workflow.id && t.lockRunId).length;
+          if (busy >= workflow.maxParallel) continue;
+          const worker = task.assignedAgentId ?? stage.agentProfileId;
+          const prompt = `Revisão da task ${task.id} do board "${workflow.name}" (estágio "${stage.name}"), feita por ${worker ? nameOf(worker) : "um membro do time"}.\n\n# ${task.title}\n${task.resultMd ? `\nResumo da entrega deixado pelo autor:\n${task.resultMd}\n` : ""}\nVocê é o revisor: inspecione o trabalho sem editar nada e chame task_update com "approved" ou "returned".`;
+          const run: Run = {
+            id: `run_mock_${++runCounter}`,
+            projectId: project.id,
+            prompt,
+            options: { maxTurns: typeof settings["board.reviewMaxTurns"] === "number" ? (settings["board.reviewMaxTurns"] as number) : 15, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["approved", "returned"], mode: "review" }, disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"], systemPromptAppend: `Você é ${reviewer.profile.name}, ${reviewer.role.title} do time deste projeto.`, permissionMode: reviewer.profile.permissionMode ?? reviewer.role.defaultPermissionMode ?? undefined },
+            agentProfileId: reviewer.profile.id,
+            kind: "review",
+            taskId: task.id,
+            status: "running",
+            claudeSessionId: null,
+            model: null,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            costUsd: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            numTurns: null,
+            stopReason: null,
+            resultText: null,
+            errorMessage: null,
+          };
+          runs.set(run.id, run);
+          events.set(run.id, []);
+          scriptByRun.set(run.id, reviewRunEvents());
+          task.lockRunId = run.id;
+          task.reviewAttempts += 1;
+          task.updatedAt = run.startedAt;
+          pushTaskEvent(task.id, "review_started", null, null, run.id, "scheduler", null);
+          schedule(run.id, 0);
+          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "review" });
         }
       }
       if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);

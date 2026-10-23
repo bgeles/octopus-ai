@@ -326,6 +326,7 @@ mod tests {
             task_id: "t".into(),
             status: TaskStatusUpdate::Review,
             note: Some("V12 pronta".into()),
+            result: None,
         };
         assert_eq!(
             notification_for(&review, "p", None, "x", prefs)
@@ -337,6 +338,7 @@ mod tests {
             task_id: "t".into(),
             status: TaskStatusUpdate::Done,
             note: None,
+            result: None,
         };
         assert!(notification_for(&done, "p", None, "x", prefs).is_none());
         let result = RunEvent::Result {

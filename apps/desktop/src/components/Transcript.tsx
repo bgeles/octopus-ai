@@ -1,8 +1,9 @@
 import { AlertTriangle, Check, ChevronRight, X } from "lucide-react";
 import { useState } from "react";
 import type { HookOutcome } from "@octopus/protocol";
-import { subagentTree, topLevelItems, type PendingPermission, type SubagentNode, type TranscriptItem } from "../state/runReducer";
+import { subagentTree, topLevelItems, type PendingPermission, type RunResultSummary, type SubagentNode, type TranscriptItem } from "../state/runReducer";
 import { ApprovalCard, summarizeInput, type DecideFn, type ReadFileFn } from "./ApprovalCard";
+import { ResultCard } from "./ResultCard";
 import { subagentCounters } from "./RunSidebar";
 
 type TranscriptProps = {
@@ -12,10 +13,12 @@ type TranscriptProps = {
   onDecide: DecideFn;
   deciding?: string | null;
   readFile?: ReadFileFn;
+  /** Fecho do run (texto final, custo, turnos); vira um card no fim do transcript. */
+  result?: RunResultSummary | null;
 };
 
-export function Transcript({ runId, items, pendingPermissions, onDecide, deciding, readFile }: TranscriptProps) {
-  if (items.length === 0 && pendingPermissions.length === 0) {
+export function Transcript({ runId, items, pendingPermissions, onDecide, deciding, readFile, result = null }: TranscriptProps) {
+  if (items.length === 0 && pendingPermissions.length === 0 && !result) {
     return (
       <div className="flex flex-1 items-center justify-center p-6 text-center text-slate">
         <p className="max-w-sm">Nenhum run ainda. Descreva uma tarefa abaixo e acompanhe o agente trabalhando aqui.</p>
@@ -76,6 +79,8 @@ export function Transcript({ runId, items, pendingPermissions, onDecide, decidin
           </article>
         ),
       )}
+
+      {result && <ResultCard result={result} />}
 
       {pendingPermissions.map((permission) => (
         <ApprovalCard

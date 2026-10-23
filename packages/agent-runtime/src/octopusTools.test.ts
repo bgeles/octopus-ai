@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MEMORY_TOOLS, buildMemoryHandler, createOctopusToolsFactory } from "./octopusTools.js";
+import { BOARD_TOOLS, MEMORY_TOOLS, buildBoardHandler, buildMemoryHandler, createOctopusToolsFactory } from "./octopusTools.js";
 
 describe("octopus tools", () => {
   it("monta só as tools pedidas e repassa chamadas de memória ao core", async () => {
@@ -18,6 +18,25 @@ describe("octopus tools", () => {
     expect(both.tools).toEqual(["task_update", "memory_search", "memory_write", "memory_handoff"]);
     expect(created.find((t) => t.name === "memory_write")?.description).toContain("Nunca inclua segredos");
     expect(MEMORY_TOOLS).toHaveLength(3);
+  });
+
+  it("as tools de delegação só entram quando `board` é passado e repassam ao core", async () => {
+    const created: { name: string; description: string }[] = [];
+    const factory = createOctopusToolsFactory(
+      (opts) => ({ server: opts.name, tools: opts.tools }),
+      (name, description) => {
+        created.push({ name, description });
+        return name;
+      },
+    );
+    const calls: unknown[] = [];
+    const withBoard = factory({ board: { call: async (op, args) => (calls.push([op, args]), { ok: true, content: "Task task_24 criada" }) } }) as { tools: unknown[] };
+    expect(withBoard.tools).toEqual(["team_list", "task_list", "task_create", "task_assign"]);
+    expect(created.find((t) => t.name === "task_create")?.description).toContain("reporta a você");
+    expect(BOARD_TOOLS).toEqual(["mcp__octopus__team_list", "mcp__octopus__task_list", "mcp__octopus__task_create", "mcp__octopus__task_assign"]);
+    const handler = buildBoardHandler("task_create", async (op, args) => (calls.push([op, args]), { ok: false, content: "Responsável inválido" }));
+    expect(await handler({ title: "X", assignee: "Leo" })).toEqual({ content: [{ type: "text", text: "Responsável inválido" }], isError: true });
+    expect(calls.at(-1)).toEqual(["task_create", { title: "X", assignee: "Leo" }]);
   });
 
   it("buildMemoryHandler traduz ok/erro para o formato de tool", async () => {

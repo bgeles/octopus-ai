@@ -19,5 +19,15 @@ test.describe("Board (mock)", () => {
     await expect(page.getByTestId("task-detail")).toContainText("aguardando você");
     await page.getByTestId("task-detail").getByRole("button", { name: "Aprovar e seguir" }).click();
     await expect(card).toHaveAttribute("data-status", "running");
+
+    // Segundo estágio: aprovar e concluir; a entrega aparece na task e na aba Entregas.
+    await expect(card).toHaveAttribute("data-status", "waiting_approval", { timeout: 10_000 });
+    await page.getByTestId("task-detail").getByRole("button", { name: "Aprovar e concluir" }).click();
+    await expect(card).toHaveAttribute("data-status", "done");
+    await expect(page.getByTestId("task-result")).toContainText("Como verificar");
+    await page.getByTestId("task-detail").getByRole("button", { name: "Ver diff" }).click();
+    await expect(page.getByTestId("task-diff")).toContainText("V12__add_triage_status.sql");
+    await page.getByRole("radio", { name: /Entregas · 1/ }).click();
+    await expect(page.getByTestId("delivery-row")).toContainText("Mapear integrações");
   });
 });

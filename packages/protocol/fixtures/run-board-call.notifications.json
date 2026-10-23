@@ -1,0 +1,53 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "run.board_call",
+    "params": {
+      "runId": "run_board_01",
+      "callId": "board_1",
+      "op": "team_list",
+      "args": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.board_call",
+    "params": {
+      "runId": "run_board_01",
+      "callId": "board_2",
+      "op": "task_create",
+      "args": {
+        "title": "Inventário de integrações externas",
+        "description": "Listar todas as integrações externas do chat-core com dono, SLA e credencial usada.",
+        "acceptance": "Tabela com as integrações e fontes citadas.",
+        "assignee": "Dani",
+        "ready": true
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.board_call",
+    "params": {
+      "runId": "run_board_01",
+      "callId": "board_3",
+      "op": "task_list",
+      "args": {
+        "status": "open"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "run.board_call",
+    "params": {
+      "runId": "run_board_01",
+      "callId": "board_4",
+      "op": "task_assign",
+      "args": {
+        "taskId": "task_24",
+        "assignee": "Ana"
+      }
+    }
+  }
+]

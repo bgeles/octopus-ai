@@ -182,16 +182,29 @@ pub fn move_task(state: State<'_, AppState>, input: MoveTaskInput) -> CmdResult<
         .map_err(err)
 }
 
+/// Aprovação sua: vale para `waiting_approval` e também por cima de uma revisão por agente
+/// (`review`); nesse caso o run de revisão em andamento é interrompido.
 #[tauri::command]
-pub fn approve_task(
+pub async fn approve_task(
     state: State<'_, AppState>,
     task_id: String,
     note: Option<String>,
 ) -> CmdResult<Task> {
-    state
+    let before = state.store.get_task(&task_id).map_err(err)?;
+    let task = state
         .store
         .approve_task(&task_id, note.as_deref())
-        .map_err(err)
+        .map_err(err)?;
+    if let Some(run_id) = before.and_then(|t| t.lock_run_id) {
+        if let Ok(result) = state.sidecar.interrupt_run(&run_id).await {
+            if result.interrupted {
+                let _ = state
+                    .store
+                    .set_run_status(&run_id, crate::store::models::RunStatus::Interrupted);
+            }
+        }
+    }
+    Ok(task)
 }
 
 #[tauri::command]
@@ -222,4 +235,13 @@ pub async fn scheduler_tick(app: AppHandle, state: State<'_, AppState>) -> CmdRe
         let _ = app.emit(BOARD_CHANGED, &report);
     }
     Ok(report)
+}
+
+/// Diff da entrega da task (worktree contra o commit base; sem worktree, a pasta do projeto).
+#[tauri::command]
+pub fn task_diff(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> CmdResult<crate::store::task_diff::TaskDiff> {
+    state.store.task_diff(&task_id).map_err(err)
 }
