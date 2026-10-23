@@ -131,7 +131,8 @@ pub async fn tick(
             } else {
                 None
             };
-            if !store.claim_task(&task.id, &run.id, worktree)? {
+            let base_commit = crate::store::task_diff::git_head(Path::new(&cwd));
+            if !store.claim_task(&task.id, &run.id, worktree, base_commit.as_deref())? {
                 // Alguém mudou a task entre a seleção e o claim.
                 store.mark_run_failed(&run.id, "task deixou de estar pronta")?;
                 continue;
@@ -758,6 +759,204 @@ mod tests {
             .collect();
         assert!(kinds.contains(&"agent_update".to_string()));
         assert!(kinds.contains(&"advanced".to_string()));
+        sidecar.shutdown().await;
+    }
+
+    /// Verificação da Fase 8 (entregas) com o Claude de verdade: a task roda num worktree, o agente
+    /// cria um arquivo e chama `task_update(done, result)`; o core guarda o resumo, os arquivos
+    /// tocados e consegue montar o diff contra o commit base.
+    /// Custa dinheiro: `cargo test real_delivery -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "usa o Claude de verdade (custa dinheiro); rode com --ignored"]
+    async fn real_delivery_is_recorded_with_files_and_diff() {
+        use crate::protocol::{PermissionDecideParams, PermissionDecision, RunEvent};
+        use crate::sidecar::command::find_node;
+        use crate::sidecar::SidecarNotification;
+
+        let main_js = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../packages/agent-runtime/dist/main.js")
+            .canonicalize()
+            .expect("sidecar compilado");
+        let (sidecar, mut notifications) = Sidecar::spawn(SidecarCommand::new(
+            find_node(),
+            vec![main_js.to_string_lossy().into_owned()],
+        ))
+        .await
+        .unwrap();
+        sidecar.hello().await.unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# verificação\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let project = store
+            .create_project("entregas", dir.path().to_str().unwrap())
+            .unwrap();
+        store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Ana".into(),
+                    role_id: "role_implementador".into(),
+                    max_turns: Some(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", true)
+            .unwrap();
+        let ana = store.list_team(&project.id).unwrap()[0].profile.id.clone();
+        let task = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Notas da verificação".into(),
+                    description_md: "Crie o arquivo NOTAS.md na raiz do diretório de trabalho atual com exatamente uma linha: \"Notas da verificação\". Não altere nada mais. Depois chame a tool task_update com status \"done\", uma nota curta e, em \"result\", um resumo em markdown com um título \"## Entrega\" e a frase \"Como verificar\".".into(),
+                    assigned_agent_id: Some(ana),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
+        assert_eq!(report.started.len(), 1, "{report:?}");
+        let run_id = report.started[0].run_id.clone();
+        let claimed = store.get_task(&task.id).unwrap().unwrap();
+        assert!(claimed.base_commit.is_some(), "claim grava o commit base");
+        let worktree = claimed.worktree_path.clone().unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            let n = tokio::time::timeout_at(deadline, notifications.recv())
+                .await
+                .expect("timeout esperando o run")
+                .expect("canal fechado");
+            match n {
+                SidecarNotification::MemoryCall(call) => {
+                    let result = store
+                        .handle_memory_call(&call.run_id, call.op, &call.args)
+                        .unwrap();
+                    sidecar
+                        .memory_result(crate::protocol::MemoryResultParams {
+                            run_id: call.run_id.clone(),
+                            call_id: call.call_id.clone(),
+                            result,
+                        })
+                        .await
+                        .unwrap();
+                }
+                SidecarNotification::Hook(hook) => {
+                    let decision = crate::decide_hook(&store, &hook);
+                    eprintln!("hook {} → {:?}", hook.tool_name, decision.behavior);
+                    sidecar
+                        .decide_hook(crate::protocol::HookDecideParams {
+                            run_id: hook.run_id.clone(),
+                            hook_id: hook.hook_id.clone(),
+                            decision,
+                        })
+                        .await
+                        .unwrap();
+                }
+                SidecarNotification::RunEvent(ev) if ev.run_id == run_id => {
+                    eprintln!("[{}] {}", ev.seq, ev.event.kind());
+                    if let RunEvent::PermissionRequest {
+                        request_id,
+                        tool_name,
+                        ..
+                    } = &ev.event
+                    {
+                        // Como você clicando "Permitir uma vez" para a escrita do arquivo.
+                        eprintln!("permitindo {tool_name}");
+                        sidecar
+                            .decide_permission(PermissionDecideParams {
+                                run_id: run_id.clone(),
+                                request_id: request_id.clone(),
+                                decision: PermissionDecision::Allow {
+                                    updated_input: None,
+                                },
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    let terminal = ev.event.is_terminal();
+                    store
+                        .record_run_event(&ev.run_id, ev.seq, &ev.at, &ev.event)
+                        .unwrap();
+                    if terminal {
+                        break;
+                    }
+                }
+                SidecarNotification::Exited(code) => panic!("sidecar saiu: {code:?}"),
+                _ => {}
+            }
+        }
+        let run = store.get_run(&run_id).unwrap().unwrap();
+        eprintln!("run {:?} custo {:?}", run.status, run.cost_usd);
+        assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error_message);
+        assert!(
+            Path::new(&worktree).join("NOTAS.md").exists(),
+            "o agente não criou NOTAS.md no worktree"
+        );
+
+        let after = store.get_task(&task.id).unwrap().unwrap();
+        eprintln!(
+            "entrega: result_md={:?} files={:?}",
+            after.result_md, after.files_changed
+        );
+        let result_md = after.result_md.clone().expect("result_md preenchido");
+        assert!(
+            result_md.to_lowercase().contains("entrega"),
+            "resumo da entrega: {result_md}"
+        );
+        assert_eq!(after.result_run_id.as_deref(), Some(run_id.as_str()));
+        assert!(
+            after.files_changed.iter().any(|f| f == "NOTAS.md"),
+            "arquivos tocados: {:?}",
+            after.files_changed
+        );
+        let diff = store.task_diff(&task.id).unwrap();
+        eprintln!(
+            "diff: available={} scope={} files={:?}",
+            diff.available,
+            diff.scope,
+            diff.files
+                .iter()
+                .map(|f| (f.path.clone(), f.status.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(diff.available, "{:?}", diff.reason);
+        assert_eq!(diff.scope, "worktree");
+        let notas = diff
+            .files
+            .iter()
+            .find(|f| f.path == "NOTAS.md")
+            .expect("NOTAS.md no diff");
+        assert_eq!(notas.status, "added");
+        assert!(notas.after.contains("Notas da verificação"));
         sidecar.shutdown().await;
     }
 }

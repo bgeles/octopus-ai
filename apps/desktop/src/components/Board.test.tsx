@@ -78,6 +78,32 @@ describe("Board e scheduler", () => {
     await waitFor(() => expect(screen.getByTestId("task-card")).toHaveAttribute("data-status", "done"));
     const tasks = await transport.invoke("list_tasks", { projectId: "proj_demo" });
     expect(tasks[0]?.status).toBe("done");
+
+    // A entrega fica visível na própria task: resumo do agente, arquivos tocados e o diff contra o commit base.
+    const done = screen.getByTestId("task-detail");
+    const result = within(done).getByTestId("task-result");
+    expect(result).toHaveTextContent("Como verificar:");
+    expect(result).toHaveTextContent("./mvnw -q test");
+    expect(within(done).getByText(/Arquivos alterados · 1/)).toBeInTheDocument();
+    expect(within(done).getByTestId("task-files")).toHaveTextContent("V12__add_triage_status.sql");
+    expect(within(screen.getByTestId("task-card")).getByLabelText("com entrega")).toBeInTheDocument();
+    await user.click(within(done).getByRole("button", { name: "Ver diff" }));
+    const diff = await within(done).findByTestId("task-diff");
+    expect(within(diff).getAllByTestId("diff").length).toBeGreaterThanOrEqual(1);
+    expect(diff).toHaveTextContent("V12__add_triage_status.sql");
+    expect(tasks[0]?.filesChanged).toEqual(["src/main/resources/db/migration/V12__add_triage_status.sql"]);
+    expect(tasks[0]?.resultMd).toContain("## Entrega");
+
+    // A aba Entregas lista as tasks concluídas com o resumo; clicar abre o painel.
+    await user.click(screen.getByRole("radio", { name: /Entregas · 1/ }));
+    const rows = within(screen.getByTestId("deliveries")).getAllByTestId("delivery-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("Mapear integrações");
+    expect(rows[0]).toHaveTextContent("Criada a migração");
+    expect(rows[0]).toHaveTextContent("1 arquivo");
+    expect(screen.queryByTestId("kanban")).not.toBeVisible();
+    await user.click(screen.getByRole("radio", { name: "Kanban" }));
+    expect(screen.getByTestId("kanban")).toBeVisible();
     const runs = await transport.invoke("list_runs", { projectId: "proj_demo" });
     expect(runs).toHaveLength(2);
     expect(runs.every((r) => r.taskId === tasks[0]?.id)).toBe(true);

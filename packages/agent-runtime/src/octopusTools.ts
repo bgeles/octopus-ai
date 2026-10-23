@@ -5,7 +5,7 @@
  */
 import type { MemoryCallResult, MemoryOp, TaskContext, TaskStatusUpdate } from "@octopus/protocol";
 import { z } from "zod";
-import { buildTaskUpdateHandler, taskUpdateDescription } from "./taskTools.js";
+import { buildTaskUpdateHandler, TASK_UPDATE_SCHEMA_EXTRA, taskUpdateDescription, type TaskUpdateFn } from "./taskTools.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 type ToolFn = (name: string, description: string, schema: Record<string, unknown>, handler: (args: never, extra: unknown) => Promise<ToolResult>) => unknown;
@@ -13,7 +13,7 @@ type CreateServerFn = (options: { name: string; version?: string; instructions?:
 
 export type MemoryCaller = (op: MemoryOp, args: Record<string, unknown>) => Promise<MemoryCallResult>;
 export type OctopusToolsOptions = {
-  task?: { ctx: TaskContext; onUpdate: (status: TaskStatusUpdate, note: string | null) => void };
+  task?: { ctx: TaskContext; onUpdate: TaskUpdateFn };
   memory?: { call: MemoryCaller };
 };
 export type OctopusToolsFactory = (opts: OctopusToolsOptions) => unknown;
@@ -33,7 +33,7 @@ export function createOctopusToolsFactory(createServer: CreateServerFn, tool: To
     const tools: unknown[] = [];
     if (opts.task) {
       const { ctx, onUpdate } = opts.task;
-      tools.push(tool("task_update", taskUpdateDescription(ctx), { status: z.enum(ctx.allowedStatuses as [TaskStatusUpdate, ...TaskStatusUpdate[]]), note: z.string().optional() }, buildTaskUpdateHandler(ctx, onUpdate) as never));
+      tools.push(tool("task_update", taskUpdateDescription(ctx), { status: z.enum(ctx.allowedStatuses as [TaskStatusUpdate, ...TaskStatusUpdate[]]), note: z.string().optional(), ...TASK_UPDATE_SCHEMA_EXTRA }, buildTaskUpdateHandler(ctx, onUpdate) as never));
     }
     if (opts.memory) {
       const { call } = opts.memory;

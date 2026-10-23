@@ -17,6 +17,7 @@ pub mod preview;
 pub mod pricing;
 pub mod security;
 pub mod skills;
+pub mod task_diff;
 pub mod team;
 
 use std::path::{Path, PathBuf};
@@ -80,6 +81,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0018_usage_cost",
         include_str!("migrations/0018_usage_cost.sql"),
+    ),
+    (
+        "0019_task_result",
+        include_str!("migrations/0019_task_result.sql"),
     ),
 ];
 
@@ -639,8 +644,13 @@ impl Store {
                     params![run_id, message, now()],
                 )?;
             }
-            RunEvent::TaskUpdate { status, note, .. } => {
-                Self::apply_task_update(&tx, run_id, *status, note.as_deref())?;
+            RunEvent::TaskUpdate {
+                status,
+                note,
+                result,
+                ..
+            } => {
+                Self::apply_task_update(&tx, run_id, *status, note.as_deref(), result.as_deref())?;
             }
             // Hook livre que bloqueou algo: fica na auditoria (os que só rodaram ficam no run).
             RunEvent::HookRan {
@@ -821,11 +831,12 @@ mod tests {
                 "0016_effort".to_string(),
                 "0017_custom_hooks".to_string(),
                 "0018_usage_cost".to_string(),
+                "0019_task_result".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 18);
+        assert_eq!(s.applied_migrations().unwrap().len(), 19);
     }
 
     #[test]

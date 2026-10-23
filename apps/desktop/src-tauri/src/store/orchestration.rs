@@ -113,10 +113,21 @@ pub struct Task {
     pub position: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Entrega: resumo em markdown deixado pelo agente (ou o texto final do run).
+    #[serde(default)]
+    pub result_md: Option<String>,
+    /// Arquivos que o run de entrega escreveu/editou (das observações da memória).
+    #[serde(default)]
+    pub files_changed: Vec<String>,
+    #[serde(default)]
+    pub result_run_id: Option<String>,
+    /// Commit base no claim, para o diff da entrega.
+    #[serde(default)]
+    pub base_commit: Option<String>,
 }
 
 impl Task {
-    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at FROM task";
+    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit FROM task";
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let deps: String = row.get(9)?;
@@ -137,6 +148,13 @@ impl Task {
             position: row.get(13)?,
             created_at: row.get(14)?,
             updated_at: row.get(15)?,
+            result_md: row.get(16)?,
+            files_changed: row
+                .get::<_, Option<String>>(17)?
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
+            result_run_id: row.get(18)?,
+            base_commit: row.get(19)?,
         })
     }
 }
@@ -641,12 +659,13 @@ impl Store {
         task_id: &str,
         run_id: &str,
         worktree_path: Option<&str>,
+        base_commit: Option<&str>,
     ) -> Result<bool> {
         let mut conn = self.conn.lock().expect("store mutex");
         let tx = conn.transaction()?;
         let changed = tx.execute(
-            "UPDATE task SET status = 'running', lock_run_id = ?2, worktree_path = COALESCE(?3, worktree_path), updated_at = ?4 WHERE id = ?1 AND status = 'ready'",
-            params![task_id, run_id, worktree_path, now()],
+            "UPDATE task SET status = 'running', lock_run_id = ?2, worktree_path = COALESCE(?3, worktree_path), base_commit = COALESCE(?5, base_commit), updated_at = ?4 WHERE id = ?1 AND status = 'ready'",
+            params![task_id, run_id, worktree_path, now(), base_commit],
         )?;
         if changed > 0 {
             let stage: String = tx.query_row(
@@ -730,7 +749,7 @@ impl Store {
             text.push_str(note);
             text.push('\n');
         }
-        text.push_str("\nAo terminar, chame a tool task_update com status \"done\" (concluiu este estágio), \"review\" (precisa de revisão) ou \"blocked\" (não consegue prosseguir) e uma nota curta.");
+        text.push_str("\nAo terminar, chame a tool task_update com status \"done\" (concluiu este estágio), \"review\" (precisa de revisão) ou \"blocked\" (não consegue prosseguir), uma nota curta e, em `result`, o resumo da entrega em markdown: o que mudou, onde, e como verificar.");
         text
     }
 
@@ -792,6 +811,7 @@ impl Store {
         run_id: &str,
         status: TaskStatusUpdate,
         note: Option<&str>,
+        result: Option<&str>,
     ) -> Result<()> {
         let task_id: Option<String> = tx
             .query_row(
@@ -810,8 +830,8 @@ impl Store {
             TaskStatusUpdate::Blocked => "blocked",
         };
         tx.execute(
-            "UPDATE task SET last_note = COALESCE(?2, last_note), updated_at = ?3 WHERE id = ?1",
-            params![task_id, note, now()],
+            "UPDATE task SET last_note = COALESCE(?2, last_note), result_md = COALESCE(?4, result_md), updated_at = ?3 WHERE id = ?1",
+            params![task_id, note, now(), result.map(str::trim).filter(|r| !r.is_empty())],
         )?;
         insert_event(
             tx,
@@ -864,11 +884,12 @@ impl Store {
         Ok(Some(task_id))
     }
 
+    /// `summary` é o texto final do run (sucesso) ou a mensagem de erro (falha).
     pub(crate) fn finish_task_run(
         tx: &Transaction<'_>,
         run_id: &str,
         success: bool,
-        error: Option<&str>,
+        summary: Option<&str>,
     ) -> Result<()> {
         let task_id: Option<String> = tx
             .query_row(
@@ -914,7 +935,7 @@ impl Store {
             .as_deref()
             .map(|n| n.split(':').next().unwrap_or("").trim().to_string());
         if !success {
-            let note = error.unwrap_or("run falhou");
+            let note = summary.unwrap_or("run falhou");
             tx.execute(
                 "UPDATE task SET status = 'failed', lock_run_id = NULL, last_note = ?2, updated_at = ?3 WHERE id = ?1",
                 params![task.id, note, now()],
@@ -931,6 +952,29 @@ impl Store {
             )?;
             return Ok(());
         }
+        // Entrega: o resumo do agente (task_update.result) vence; senão o texto final do run.
+        let project_path: String = tx
+            .query_row(
+                "SELECT path FROM project WHERE id = ?1",
+                params![task.project_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        let roots = [task.worktree_path.as_deref().unwrap_or(""), &project_path];
+        let files: Vec<String> = super::memory::files_touched_in(tx, run_id)?
+            .into_iter()
+            .map(|f| super::task_diff::relativize(&f, &roots))
+            .collect();
+        tx.execute(
+            "UPDATE task SET result_md = COALESCE(result_md, ?2), files_changed_json = ?3, result_run_id = ?4 WHERE id = ?1",
+            params![
+                task.id,
+                summary.map(str::trim).filter(|s| !s.is_empty()),
+                serde_json::to_string(&files)?,
+                run_id
+            ],
+        )?;
         match requested.as_deref() {
             Some("blocked") => {
                 tx.execute(
@@ -1105,6 +1149,120 @@ mod tests {
     }
 
     #[test]
+    fn finish_task_run_fills_result_files_and_run() {
+        use crate::protocol::ObservationKind;
+        let (s, project, wf) = setup();
+        let path = s.get_project(&project).unwrap().unwrap().path;
+        let t = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Entrega".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run = s
+            .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t.id))
+            .unwrap();
+        assert!(s.claim_task(&t.id, &run.id, None, Some("abc123")).unwrap());
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().base_commit.as_deref(),
+            Some("abc123")
+        );
+        // O agente escreve dois arquivos (um deles duas vezes) e entrega com resumo.
+        for (seq, file) in ["src/a.rs", "src/b.rs", "src/a.rs"].iter().enumerate() {
+            s.record_run_event(
+                &run.id,
+                seq as u64,
+                "t",
+                &RunEvent::Observation {
+                    kind: ObservationKind::ToolUse,
+                    title: format!("Write {path}/{file}"),
+                    body: String::new(),
+                    tool_name: Some("Write".into()),
+                    tool_use_id: None,
+                    parent_tool_use_id: None,
+                    agent_id: None,
+                },
+            )
+            .unwrap();
+        }
+        s.record_run_event(
+            &run.id,
+            10,
+            "t",
+            &RunEvent::TaskUpdate {
+                task_id: t.id.clone(),
+                status: TaskStatusUpdate::Done,
+                note: Some("feito".into()),
+                result: Some("## Entrega\n\n- a.rs e b.rs".into()),
+            },
+        )
+        .unwrap();
+        // O resumo fica visível já na chamada, antes de o run terminar.
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().result_md.as_deref(),
+            Some("## Entrega\n\n- a.rs e b.rs")
+        );
+        s.record_run_event(&run.id, 11, "t", &result_event(true))
+            .unwrap();
+        let done = s.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(
+            done.result_md.as_deref(),
+            Some("## Entrega\n\n- a.rs e b.rs")
+        );
+        assert_eq!(done.files_changed, vec!["src/a.rs", "src/b.rs"]);
+        assert_eq!(done.result_run_id.as_deref(), Some(run.id.as_str()));
+
+        // Sem task_update: o texto final do run vira o resumo; run falho não grava entrega.
+        let t2 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Sem resumo".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run2 = s
+            .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t2.id))
+            .unwrap();
+        assert!(s.claim_task(&t2.id, &run2.id, None, None).unwrap());
+        let mut ev = result_event(true);
+        if let RunEvent::Result { result_text, .. } = &mut ev {
+            *result_text = Some("  Terminei o plano.  ".into());
+        }
+        s.record_run_event(&run2.id, 0, "t", &ev).unwrap();
+        let t2_now = s.get_task(&t2.id).unwrap().unwrap();
+        assert_eq!(t2_now.result_md.as_deref(), Some("Terminei o plano."));
+        assert!(t2_now.files_changed.is_empty());
+
+        let t3 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Falha".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run3 = s
+            .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t3.id))
+            .unwrap();
+        assert!(s.claim_task(&t3.id, &run3.id, None, None).unwrap());
+        s.record_run_event(&run3.id, 0, "t", &result_event(false))
+            .unwrap();
+        let t3_now = s.get_task(&t3.id).unwrap().unwrap();
+        assert_eq!(t3_now.status, TaskStatus::Failed);
+        assert!(t3_now.result_md.is_none());
+        assert!(t3_now.result_run_id.is_none());
+    }
+
+    #[test]
     fn template_assigns_team_members_by_role() {
         let (s, project, wf) = setup();
         assert_eq!(wf.stages.len(), 4);
@@ -1181,8 +1339,8 @@ mod tests {
                 Some(&t1.id),
             )
             .unwrap();
-        assert!(s.claim_task(&t1.id, &run.id, None).unwrap());
-        assert!(!s.claim_task(&t1.id, "outro", None).unwrap());
+        assert!(s.claim_task(&t1.id, &run.id, None, None).unwrap());
+        assert!(!s.claim_task(&t1.id, "outro", None, None).unwrap());
         assert_eq!(
             s.get_task(&t1.id).unwrap().unwrap().status,
             TaskStatus::Running
@@ -1201,6 +1359,7 @@ mod tests {
                 task_id: t1.id.clone(),
                 status: TaskStatusUpdate::Done,
                 note: Some("plano pronto".into()),
+                result: None,
             },
         )
         .unwrap();
@@ -1216,7 +1375,7 @@ mod tests {
         let run2 = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t1.id))
             .unwrap();
-        assert!(s.claim_task(&t1.id, &run2.id, None).unwrap());
+        assert!(s.claim_task(&t1.id, &run2.id, None, None).unwrap());
         s.record_run_event(
             &run2.id,
             0,
@@ -1225,6 +1384,7 @@ mod tests {
                 task_id: t1.id.clone(),
                 status: TaskStatusUpdate::Review,
                 note: Some("olhem o diff".into()),
+                result: None,
             },
         )
         .unwrap();
@@ -1243,7 +1403,7 @@ mod tests {
         let run3 = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t1.id))
             .unwrap();
-        assert!(s.claim_task(&t1.id, &run3.id, None).unwrap());
+        assert!(s.claim_task(&t1.id, &run3.id, None, None).unwrap());
         s.record_run_event(&run3.id, 0, "t", &result_event(true))
             .unwrap();
         let t1_now = s.get_task(&t1.id).unwrap().unwrap();
@@ -1307,7 +1467,7 @@ mod tests {
         let run = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t.id))
             .unwrap();
-        assert!(s.claim_task(&t.id, &run.id, None).unwrap());
+        assert!(s.claim_task(&t.id, &run.id, None, None).unwrap());
         s.record_run_event(
             &run.id,
             0,
@@ -1332,7 +1492,7 @@ mod tests {
         let run2 = s
             .create_run_full(&project, "x", &RunOptions::default(), None, Some(&t.id))
             .unwrap();
-        assert!(s.claim_task(&t.id, &run2.id, None).unwrap());
+        assert!(s.claim_task(&t.id, &run2.id, None, None).unwrap());
         s.record_run_event(
             &run2.id,
             0,
@@ -1341,6 +1501,7 @@ mod tests {
                 task_id: t.id.clone(),
                 status: TaskStatusUpdate::Blocked,
                 note: Some("falta acesso".into()),
+                result: None,
             },
         )
         .unwrap();

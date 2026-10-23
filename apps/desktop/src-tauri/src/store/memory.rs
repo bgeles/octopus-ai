@@ -770,37 +770,8 @@ impl Store {
                 .optional()?,
             None => None,
         };
-        let mut files: Vec<String> = Vec::new();
-        let mut turn_notes: Vec<String> = Vec::new();
-        {
-            let mut stmt = tx.prepare(
-                "SELECT kind, title, body, tool_name FROM memory_observation WHERE run_id = ?1 ORDER BY created_at, rowid",
-            )?;
-            let rows = stmt.query_map(params![run_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (kind, title, body, tool_name) = row?;
-                match (kind.as_str(), tool_name.as_deref()) {
-                    ("tool_use", Some("Write" | "Edit" | "MultiEdit" | "NotebookEdit")) => {
-                        if let Some(path) = title.split_whitespace().nth(1) {
-                            if !files.iter().any(|f| f == path) {
-                                files.push(path.to_string());
-                            }
-                        }
-                    }
-                    ("turn_end" | "subagent_end", _) if !body.trim().is_empty() => {
-                        turn_notes.push(first_chars(body.trim(), 400));
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let files: Vec<String> = files_touched_in(tx, run_id)?;
+        let turn_notes: Vec<String> = agent_notes_in(tx, run_id)?;
         let month = started_at.get(..7).unwrap_or("0000-00").to_string();
         let when = started_at
             .get(..16)
@@ -1492,6 +1463,38 @@ Use a tool memory_search para mais contexto, memory_write para registrar decisõ
         }
         Ok(())
     }
+}
+
+/// Arquivos que o run escreveu/editou, pelas observações de ferramenta (Write, Edit, MultiEdit, NotebookEdit).
+pub(crate) fn files_touched_in(tx: &Transaction<'_>, run_id: &str) -> Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        "SELECT title FROM memory_observation WHERE run_id = ?1 AND kind = 'tool_use' AND tool_name IN ('Write', 'Edit', 'MultiEdit', 'NotebookEdit') ORDER BY created_at, rowid",
+    )?;
+    let mut files: Vec<String> = Vec::new();
+    for title in stmt.query_map(params![run_id], |r| r.get::<_, String>(0))? {
+        let title = title?;
+        if let Some(path) = title.split_whitespace().nth(1) {
+            if !files.iter().any(|f| f == path) {
+                files.push(path.to_string());
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Resumos de turno e de subagentes do run (até 400 caracteres cada).
+pub(crate) fn agent_notes_in(tx: &Transaction<'_>, run_id: &str) -> Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        "SELECT body FROM memory_observation WHERE run_id = ?1 AND kind IN ('turn_end', 'subagent_end') ORDER BY created_at, rowid",
+    )?;
+    let mut notes = Vec::new();
+    for body in stmt.query_map(params![run_id], |r| r.get::<_, String>(0))? {
+        let body = body?;
+        if !body.trim().is_empty() {
+            notes.push(first_chars(body.trim(), 400));
+        }
+    }
+    Ok(notes)
 }
 
 fn first_chars(s: &str, n: usize) -> String {

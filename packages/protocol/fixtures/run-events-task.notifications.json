@@ -54,7 +54,8 @@
         "name": "mcp__octopus__task_update",
         "input": {
           "status": "review",
-          "note": "V12 criada; LeadRepositoryIT verde."
+          "note": "V12 criada; LeadRepositoryIT verde.",
+          "result": "## Entrega\n\n- Criada a migração V12."
         },
         "parentToolUseId": null
       }
@@ -71,7 +72,8 @@
         "type": "task_update",
         "taskId": "task_01",
         "status": "review",
-        "note": "V12 criada; LeadRepositoryIT verde."
+        "note": "V12 criada; LeadRepositoryIT verde.",
+        "result": "## Entrega\n\n- Criada a migração `V12__add_triage_status.sql` com a coluna `status`.\n- `MigrationIT` cobre a V12.\n\n**Como verificar:** `./mvnw -q test`."
       }
     }
   },

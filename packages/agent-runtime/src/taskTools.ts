@@ -10,23 +10,31 @@ type ToolFn = (name: string, description: string, schema: Record<string, unknown
 type CreateServerFn = (options: { name: string; version?: string; instructions?: string; tools: unknown[] }) => unknown;
 
 export function taskUpdateDescription(ctx: TaskContext): string {
-  return `Atualiza o estado da task "${ctx.title}" (estágio ${ctx.stage}) no board do Octopus. Chame ao terminar o trabalho: status "done" quando concluiu tudo, "review" quando precisa de revisão humana ou de outro membro, "blocked" quando não consegue prosseguir. Inclua uma nota curta com o que foi feito ou o que bloqueia.`;
+  return `Atualiza o estado da task "${ctx.title}" (estágio ${ctx.stage}) no board do Octopus. Chame ao terminar o trabalho: status "done" quando concluiu tudo, "review" quando precisa de revisão humana ou de outro membro, "blocked" quando não consegue prosseguir. Inclua uma nota curta com o que foi feito ou o que bloqueia e, em "result", o resumo da entrega em markdown: o que mudou, em quais arquivos, e como verificar.`;
 }
 
-export function buildTaskUpdateHandler(ctx: TaskContext, onUpdate: (status: TaskStatusUpdate, note: string | null) => void) {
-  return async (args: { status: string; note?: string }): Promise<ToolResult> => {
+export const MAX_RESULT_CHARS = 20_000;
+
+export type TaskUpdateFn = (status: TaskStatusUpdate, note: string | null, result: string | null) => void;
+
+export function buildTaskUpdateHandler(ctx: TaskContext, onUpdate: TaskUpdateFn) {
+  return async (args: { status: string; note?: string; result?: string }): Promise<ToolResult> => {
     const status = args.status as TaskStatusUpdate;
     if (!ctx.allowedStatuses.includes(status)) {
       return { content: [{ type: "text", text: `Status "${args.status}" não permitido para esta task. Use: ${ctx.allowedStatuses.join(", ")}.` }], isError: true };
     }
     const note = args.note?.trim() ? args.note.trim() : null;
-    onUpdate(status, note);
-    return { content: [{ type: "text", text: `Task ${ctx.taskId} marcada como ${status}.` }] };
+    const raw = args.result?.trim() ?? "";
+    const result = raw ? (raw.length > MAX_RESULT_CHARS ? `${raw.slice(0, MAX_RESULT_CHARS)}\n\n… [resumo truncado em ${MAX_RESULT_CHARS} caracteres]` : raw) : null;
+    onUpdate(status, note, result);
+    return { content: [{ type: "text", text: `Task ${ctx.taskId} marcada como ${status}${result ? " com o resumo da entrega" : ""}.` }] };
   };
 }
 
+export const TASK_UPDATE_SCHEMA_EXTRA = { result: z.string().optional() };
+
 export function createTaskToolsFactory(createServer: CreateServerFn, tool: ToolFn) {
-  return (ctx: TaskContext, onUpdate: (status: TaskStatusUpdate, note: string | null) => void): unknown =>
+  return (ctx: TaskContext, onUpdate: TaskUpdateFn): unknown =>
     createServer({
       name: "octopus",
       version: "0.1.0",
@@ -35,7 +43,7 @@ export function createTaskToolsFactory(createServer: CreateServerFn, tool: ToolF
         tool(
           "task_update",
           taskUpdateDescription(ctx),
-          { status: z.enum(ctx.allowedStatuses as [TaskStatusUpdate, ...TaskStatusUpdate[]]), note: z.string().optional() },
+          { status: z.enum(ctx.allowedStatuses as [TaskStatusUpdate, ...TaskStatusUpdate[]]), note: z.string().optional(), ...TASK_UPDATE_SCHEMA_EXTRA },
           buildTaskUpdateHandler(ctx, onUpdate) as never,
         ),
       ],

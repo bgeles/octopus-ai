@@ -79,8 +79,22 @@ export function subagentRunEvents(): RunEventNotification[] {
 
 /** Roteiro de um run de task: o agente chama task_update(review) e termina. */
 export function taskRunEvents(): RunEventNotification[] {
-  return (taskEvents as FixtureNotification[]).map((n) => n.params);
+  const base = (taskEvents as FixtureNotification[]).map((n) => n.params);
+  // Antes de avisar o board, o agente escreve a migração: assim a entrega tem arquivos e diff no mock.
+  const at = base[0]?.at ?? new Date().toISOString();
+  const write: RunEventNotification[] = [
+    { runId: base[0]!.runId, seq: 0, at, event: { type: "tool_use", toolUseId: "toolu_write_v12", name: "Write", input: { file_path: MOCK_DELIVERY_FILE, content: MOCK_DELIVERY_AFTER }, parentToolUseId: null } },
+    { runId: base[0]!.runId, seq: 0, at, event: { type: "tool_result", toolUseId: "toolu_write_v12", content: `Arquivo ${MOCK_DELIVERY_FILE} criado.`, isError: false, parentToolUseId: null } },
+  ];
+  const first = base.findIndex((n) => n.event.type === "tool_use");
+  return first === -1 ? [...base, ...write] : [...base.slice(0, first), ...write, ...base.slice(first)];
 }
+
+export const MOCK_DELIVERY_FILE = "src/main/resources/db/migration/V12__add_triage_status.sql";
+export const MOCK_DELIVERY_AFTER = "ALTER TABLE leads ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'NEW';\nCREATE INDEX idx_leads_status ON leads (status) WHERE status <> 'DONE';\n";
+const MOCK_REPO_FILE = "src/main/java/br/com/chatcore/lead/LeadRepository.java";
+const MOCK_REPO_BEFORE = "public interface LeadRepository extends JpaRepository<Lead, Long> {\n  @Query(\"select l from Lead l\")\n  List<Lead> findAll();\n}\n";
+const MOCK_REPO_AFTER = "public interface LeadRepository extends JpaRepository<Lead, Long> {\n  @Query(\"select l from Lead l where l.status = :status\")\n  List<Lead> findByStatus(@Param(\"status\") TriageStatus status);\n}\n";
 
 export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
@@ -243,6 +257,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     taskEventsLog.push({ id: `tev_${++tevCounter}`, taskId, at: new Date().toISOString(), kind, fromStage: from, toStage: to, runId, actor, note });
   };
   const requestedByRun = new Map<string, string>();
+  const resultByRun = new Map<string, string>();
   const advanceTask = (task: Task, workflow: Workflow, actor: string, note: string | null, human: boolean) => {
     const index = workflow.stages.findIndex((s) => s.id === task.stageId);
     const next = workflow.stages[index + 1];
@@ -257,13 +272,25 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     task.updatedAt = new Date().toISOString();
     pushTaskEvent(task.id, human ? "approved" : task.status === "done" ? "completed" : "advanced", from, task.stageId, null, actor, note);
   };
-  const finishTaskRun = (run: Run, success: boolean, error: string | null) => {
+  const finishTaskRun = (run: Run, success: boolean, summary: string | null) => {
     if (!run.taskId) return;
     const task = tasks.find((t) => t.id === run.taskId);
     if (!task || task.lockRunId !== run.id) return;
     const workflow = workflows.find((w) => w.id === task.workflowId);
     if (!workflow) return;
     const requested = requestedByRun.get(run.id);
+    if (success) {
+      // Como o core: o resumo do task_update vence; sem ele, fica o texto final do run.
+      task.resultMd = resultByRun.get(run.id) ?? task.resultMd ?? (summary?.trim() || null);
+      const touched = (events.get(run.id) ?? [])
+        .map((e) => e.event)
+        .filter((e): e is Extract<typeof e, { type: "tool_use" }> => e.type === "tool_use" && ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(e.name))
+        .map((e) => String((e.input as { file_path?: unknown }).file_path ?? ""))
+        .filter(Boolean);
+      task.filesChanged = [...new Set(touched)];
+      task.resultRunId = run.id;
+    }
+    const error = success ? null : summary;
     if (!success) {
       task.status = "failed";
       task.lockRunId = null;
@@ -818,6 +845,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (task) {
         requestedByRun.set(run.id, ev.status);
         if (ev.note) task.lastNote = ev.note;
+        if (ev.result) {
+          resultByRun.set(run.id, ev.result);
+          task.resultMd = ev.result;
+        }
         pushTaskEvent(task.id, "agent_update", null, null, run.id, "agente", `${ev.status}${ev.note ? `: ${ev.note}` : ""}`);
       }
     } else if (ev.type === "permission_request") {
@@ -1216,7 +1247,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!wf.stages.some((s) => s.id === stageId)) throw new Error(`Estágio ${stageId} não existe neste workflow`);
       for (const dep of input.dependsOn ?? []) if (!tasks.some((t) => t.id === dep)) throw new Error(`Dependência ${dep} não encontrada`);
       const at = new Date().toISOString();
-      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at };
+      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null };
       tasks.push(task);
       pushTaskEvent(task.id, "created", null, stageId, null, "você", null);
       return { ...task };
@@ -1265,6 +1296,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return { ...task };
     },
     list_task_events: async ({ taskId }) => taskEventsLog.filter((e) => e.taskId === taskId).map((e) => ({ ...e })),
+    task_diff: async ({ taskId }) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} não encontrada`);
+      if (!task.baseCommit) return { available: false, reason: "A task ainda não começou: não há commit base para comparar.", base: null, scope: "project", files: [] };
+      const files = task.filesChanged.map((path) => (path === MOCK_DELIVERY_FILE ? { path, status: "added" as const, before: "", after: MOCK_DELIVERY_AFTER, truncated: false } : { path, status: "modified" as const, before: MOCK_REPO_BEFORE, after: MOCK_REPO_AFTER, truncated: false }));
+      if (task.resultRunId && !files.some((f) => f.path === MOCK_REPO_FILE)) files.push({ path: MOCK_REPO_FILE, status: "modified", before: MOCK_REPO_BEFORE, after: MOCK_REPO_AFTER, truncated: false });
+      return { available: true, reason: null, base: task.baseCommit, scope: task.worktreePath ? "worktree" : "project", files };
+    },
     scheduler_tick: async () => {
       const report: TickReport = { started: [], failed: [], parked: 0, paused: settings["scheduler.paused"] === true };
       if (report.paused) return report;
@@ -1309,6 +1348,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           scriptByRun.set(run.id, taskBrief ? [briefEvent(run.id, taskBrief), ...taskRunEvents()] : taskRunEvents());
           task.status = "running";
           task.lockRunId = run.id;
+          task.baseCommit = task.baseCommit ?? "9c1f2e0a7b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f";
+          if (workflow.useWorktrees && !task.worktreePath) task.worktreePath = `${project.path}/.octopus/worktrees/${task.id}`;
           task.updatedAt = run.startedAt;
           pushTaskEvent(task.id, "run_started", task.stageId, task.stageId, run.id, "scheduler", null);
           schedule(run.id, 0);

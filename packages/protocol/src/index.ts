@@ -440,6 +440,8 @@ export const RunEventSchema = z.discriminatedUnion("type", [
     taskId: z.string(),
     status: TaskStatusUpdateSchema,
     note: z.string().nullable().default(null),
+    /** Resumo da entrega em markdown (o que mudou, onde, como verificar). */
+    result: z.string().nullable().default(null),
   }),
   /** Observação capturada por hook para a memória do projeto (sanitizada pelo core antes de gravar). */
   z.object({
