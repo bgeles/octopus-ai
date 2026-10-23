@@ -69,6 +69,23 @@ describe("Configurações e backup local", () => {
     expect(await screen.findByTestId("onboarding")).toBeInTheDocument();
   });
 
+  it("os limites do board são editados e gravados nas preferências (padrão = null)", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Configurações" }));
+    const prefs = await screen.findByTestId("board-prefs");
+    const returns = within(prefs).getByLabelText("Devoluções por agentes antes de subir para você") as HTMLInputElement;
+    expect(returns.value).toBe("2");
+    await user.clear(returns);
+    await user.type(returns, "4");
+    await user.tab();
+    await waitFor(async () => expect((await transport.invoke("get_settings", {}))["board.maxAgentReturns"]).toBe(4));
+    await user.clear(returns);
+    await user.type(returns, "2");
+    await user.tab();
+    await waitFor(async () => expect((await transport.invoke("get_settings", {}))["board.maxAgentReturns"]).toBeUndefined());
+  });
+
   it("formata tamanhos", () => {
     expect(formatBytes(512)).toBe("512 B");
     expect(formatBytes(18_000)).toBe("18 KB");
