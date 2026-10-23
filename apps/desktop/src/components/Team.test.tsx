@@ -56,6 +56,41 @@ describe("Time", () => {
     expect(teoCard).toHaveTextContent("reporta a Ana");
   });
 
+  it("a confiança é editada por membro, herda do cargo e aparece como badge no card", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    await screen.findByTestId("team-view");
+    // Cargo "Gestor de produto" já vem autônomo, delega e aprova: o card mostra sem override.
+    await addMember(user, "Gabi", "Gestor de produto");
+    const gabi = screen.getByRole("article", { name: "Membro do time: Gabi" });
+    expect(within(gabi).getAllByTestId("trust-badge").map((b) => b.textContent)).toEqual(["autônomo", "delega", "aprova"]);
+
+    // Rui: revisor (supervisionado por padrão) → vira gerenciado e aprovador pelo diálogo.
+    await addMember(user, "Rui", "Revisor", "Gabi");
+    const rui = screen.getByRole("article", { name: "Membro do time: Rui" });
+    expect(within(rui).queryAllByTestId("trust-badge")).toHaveLength(0);
+    await user.click(within(rui).getByRole("button", { name: "Ver ficha" }));
+    await user.click(within(await screen.findByTestId("member-sheet")).getByRole("button", { name: "Editar membro" }));
+    const dialog = await screen.findByRole("dialog");
+    const fieldset = within(dialog).getByTestId("trust-fieldset");
+    expect(within(fieldset).getByRole("radio", { name: /Padrão do cargo · supervisionado/ })).toBeChecked();
+    await user.click(within(fieldset).getByRole("radio", { name: "Gerenciado" }));
+    expect(fieldset).toHaveTextContent("sobe o organograma (Gabi)");
+    await user.click(within(fieldset).getByRole("checkbox", { name: /Aprova o trabalho/ }));
+    await user.click(within(dialog).getByRole("button", { name: "Salvar" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const team = await transport.invoke("list_team", { projectId: "proj_demo" });
+    const ruiNow = team.find((m) => m.profile.name === "Rui")!;
+    expect(ruiNow.profile.autonomy).toBe("managed");
+    expect(ruiNow.profile.canApprove).toBe(true);
+    expect(ruiNow.profile.canAssignTasks).toBeNull();
+    expect(ruiNow.trust).toEqual({ autonomy: "managed", canAssignTasks: false, canApprove: true });
+    expect(screen.getByTestId("member-sheet")).toHaveTextContent("gerenciado · aprova quem reporta a ele");
+    await user.click(within(screen.getByTestId("member-sheet")).getByRole("button", { name: "Time" }));
+    expect(within(screen.getByRole("article", { name: "Membro do time: Rui" })).getAllByTestId("trust-badge").map((b) => b.textContent)).toEqual(["gerenciado", "aprova"]);
+  });
+
   it("a ficha mostra responsabilidades, como trabalha, delegação e permite editar", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");

@@ -652,7 +652,8 @@ export function App({ transport }: AppProps) {
   const schedulerPaused = settings?.["scheduler.paused"] === true;
   const selectedWorkflow = workflows?.find((w) => w.id === selectedWorkflowId) ?? workflows?.[0] ?? null;
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
-  const pendingGates = tasks.filter((t) => t.status === "waiting_approval" || t.status === "review").length;
+  // Só o que espera você: revisões por agentes não contam.
+  const pendingGates = tasks.filter((t) => t.status === "waiting_approval").length;
 
   const tick = async () => {
     try {
@@ -899,6 +900,14 @@ export function App({ transport }: AppProps) {
           onNewTask={() => setTaskDialogOpen(true)}
           onOpenTask={(task) => setSelectedTaskId(task.id)}
           onLoadDiff={(task) => transport.invoke("task_diff", { taskId: task.id })}
+          onSetGateApprover={async (workflow, stage, approver) => {
+            try {
+              await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages.map((s) => (s.id === stage.id ? { ...s, approver } : s)), useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel } });
+              await afterTaskChange();
+            } catch (e) {
+              setToast(`Falha ao mudar o gate: ${messageOf(e)}`);
+            }
+          }}
           schedulerPaused={schedulerPaused}
           onTogglePaused={() => void setSetting("scheduler.paused", schedulerPaused ? null : true).catch((e) => setToast(messageOf(e)))}
           onTick={() => void tick()}

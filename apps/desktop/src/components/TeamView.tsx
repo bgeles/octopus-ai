@@ -1,5 +1,5 @@
 import { Plus } from "lucide-react";
-import type { AgentTotals, Project, Role, TeamMember } from "../lib/types";
+import { AUTONOMY_LABELS, type AgentTotals, type Project, type Role, type TeamMember, type TrustPolicy } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { formatUsd } from "./RunSidebar";
 
@@ -148,7 +148,10 @@ function MemberCard({ member, status, totals, boss, onOpen, onRunAs }: { member:
           </span>
         </div>
       </div>
-      <StatusBadge status={status} />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <StatusBadge status={status} />
+        <TrustBadges trust={member.trust} />
+      </div>
       <p className="m-0 line-clamp-3 text-[13px] whitespace-pre-line text-ink">{member.role.responsibilitiesMd.replace(/^- /gm, "")}</p>
       <div className="flex flex-wrap gap-1.5">
         {tools.map((t) => (
@@ -181,6 +184,21 @@ function MemberCard({ member, status, totals, boss, onOpen, onRunAs }: { member:
         </button>
       </div>
     </article>
+  );
+}
+
+/** Confiança resumida: autonomia (quando não é a padrão), delega, aprova. */
+export function TrustBadges({ trust }: { trust: TrustPolicy }) {
+  const items = [trust.autonomy !== "supervised" ? AUTONOMY_LABELS[trust.autonomy] : null, trust.canAssignTasks ? "delega" : null, trust.canApprove ? "aprova" : null].filter((x): x is string => Boolean(x));
+  if (items.length === 0) return null;
+  return (
+    <>
+      {items.map((item) => (
+        <span key={item} className="rounded-full bg-paper px-2 py-0.5 text-[11px] font-medium text-ink" data-testid="trust-badge">
+          {item}
+        </span>
+      ))}
+    </>
   );
 }
 

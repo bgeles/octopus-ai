@@ -54,7 +54,10 @@ export const AgentDefinitionSchema = z.object({
 });
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 
-export const TaskStatusUpdateSchema = z.enum(["done", "review", "blocked"]);
+/** `approved`/`returned` só valem em runs de revisão (`TaskContext.mode = "review"`). */
+export const TaskStatusUpdateSchema = z.enum(["done", "review", "blocked", "approved", "returned"]);
+export const TaskModeSchema = z.enum(["work", "review"]);
+export type TaskMode = z.infer<typeof TaskModeSchema>;
 export type TaskStatusUpdate = z.infer<typeof TaskStatusUpdateSchema>;
 
 export const TaskContextSchema = z.object({
@@ -63,6 +66,8 @@ export const TaskContextSchema = z.object({
   stage: z.string(),
   /** Estados que o agente pode pedir via `task_update`. */
   allowedStatuses: z.array(TaskStatusUpdateSchema).default(["done", "review", "blocked"]),
+  /** Trabalho na task (padrão) ou revisão do trabalho de outro membro. */
+  mode: TaskModeSchema.default("work"),
 });
 export type TaskContext = z.infer<typeof TaskContextSchema>;
 

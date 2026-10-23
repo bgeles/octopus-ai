@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { EFFORT_LABELS, EFFORT_LEVELS } from "../lib/effort";
-import type { EffortLevel, McpServer, PermissionMode, Role, Skill, TeamMember, TeamMemberInput } from "../lib/types";
+import { AUTONOMY_LABELS, type Autonomy, type EffortLevel, type McpServer, type PermissionMode, type Role, type Skill, type TeamMember, type TeamMemberInput } from "../lib/types";
 
 type MemberDialogProps = {
   open: boolean;
@@ -33,6 +33,10 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
   const [permissionMode, setPermissionMode] = useState<"" | PermissionMode>("");
   const [maxBudget, setMaxBudget] = useState("");
   const [effort, setEffort] = useState<"" | EffortLevel>("");
+  /** Confiança: "" = padrão do cargo; caixas refletem o valor efetivo e só viram override se diferirem do cargo. */
+  const [autonomy, setAutonomy] = useState<"" | Autonomy>("");
+  const [canAssign, setCanAssign] = useState<boolean | null>(null);
+  const [canApprove, setCanApprove] = useState<boolean | null>(null);
   /** `null` = todos os ativos; lista = subconjunto escolhido. */
   const [mcpSel, setMcpSel] = useState<string[] | null>(null);
   const [skillSel, setSkillSel] = useState<string[] | null>(null);
@@ -58,10 +62,24 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
     setPermissionMode(member?.profile.permissionMode ?? "");
     setMaxBudget(member?.profile.maxBudgetUsd != null ? String(member.profile.maxBudgetUsd) : "");
     setEffort(member?.profile.effort ?? "");
+    setAutonomy(member?.profile.autonomy ?? "");
+    setCanAssign(member?.profile.canAssignTasks ?? null);
+    setCanApprove(member?.profile.canApprove ?? null);
   }, [open, member, roles]);
 
   const role = roles.find((r) => r.id === roleId) ?? null;
   const candidates = team.filter((m) => m.profile.id !== member?.profile.id);
+  const roleAutonomy: Autonomy = role?.defaultAutonomy ?? "supervised";
+  const roleAssign = role?.defaultCanAssignTasks ?? false;
+  const roleApprove = role?.defaultCanApprove ?? false;
+  const effectiveAssign = canAssign ?? roleAssign;
+  const effectiveApprove = canApprove ?? roleApprove;
+  const bossName = reportsTo ? (team.find((m) => m.profile.id === reportsTo)?.profile.name ?? null) : null;
+  const AUTONOMY_HINTS: Record<Autonomy, string> = {
+    supervised: "você aprova cada gate e cada pedido de revisão",
+    managed: `sobe o organograma${bossName ? ` (${bossName})` : ""}; se a cadeia termina em você, você aprova`,
+    autonomous: `sobe o organograma${bossName ? ` (${bossName})` : ""}; se a cadeia termina em você, aprova sozinho e registra`,
+  };
 
   const submit = async () => {
     setError(null);
@@ -80,7 +98,7 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
     }
     setSaving(true);
     try {
-      await onSave({ name: name.trim(), roleId, reportsToAgentId: reportsTo || null, instructionsMd: instructions.trim() || null, permissionMode: permissionMode || null, maxBudgetUsd: budget, effort: effort || null, mcpServerIds: mcpSel, skillIds: skillSel });
+      await onSave({ name: name.trim(), roleId, reportsToAgentId: reportsTo || null, instructionsMd: instructions.trim() || null, permissionMode: permissionMode || null, maxBudgetUsd: budget, effort: effort || null, mcpServerIds: mcpSel, skillIds: skillSel, autonomy: autonomy || null, canAssignTasks: canAssign !== null && canAssign !== roleAssign ? canAssign : null, canApprove: canApprove !== null && canApprove !== roleApprove ? canApprove : null });
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -149,6 +167,41 @@ export function MemberDialog({ open, roles, team, member = null, onClose, onSave
           </select>
         </label>
         <span className="-mt-3 text-xs text-slate">Quem reporta a um membro vira subagente dele: o chefe pode delegar tarefas.</span>
+
+        <fieldset className="m-0 flex flex-col gap-2.5 rounded-md border hairline p-3" data-testid="trust-fieldset">
+          <legend className="px-1 text-[13px] font-medium text-slate">Confiança</legend>
+          <div role="radiogroup" aria-label="Autonomia" className="flex flex-col gap-1.5">
+            {(["", "supervised", "managed", "autonomous"] as const).map((value) => {
+              const checked = autonomy === value;
+              const label = value === "" ? `Padrão do cargo · ${AUTONOMY_LABELS[roleAutonomy]}` : AUTONOMY_LABELS[value].replace(/^./, (c) => c.toUpperCase());
+              const hint = AUTONOMY_HINTS[value === "" ? roleAutonomy : value];
+              return (
+                <label key={value || "role"} className={["flex cursor-pointer gap-2.5 rounded-md border px-3 py-2 text-[13px]", checked ? "border-brand bg-brand-soft" : "hairline"].join(" ")}>
+                  <input type="radio" name="autonomy" value={value} checked={checked} onChange={() => setAutonomy(value)} aria-label={label} className="mt-0.5 accent-brand" />
+                  <span className="flex flex-col">
+                    <span className="font-semibold">{label}</span>
+                    <span className="text-xs text-slate">{hint}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <label className="flex cursor-pointer items-start gap-2.5 text-[13px]">
+            <input type="checkbox" checked={effectiveAssign} onChange={(e) => setCanAssign(e.target.checked)} aria-label="Pode criar e atribuir tasks" className="mt-0.5 accent-ink" />
+            <span className="flex flex-col">
+              <span className="font-semibold">Pode criar e atribuir tasks</span>
+              <span className="text-xs text-slate">só para quem reporta a ele; ganha as tools team_list, task_create e task_assign</span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-2.5 text-[13px]">
+            <input type="checkbox" checked={effectiveApprove} onChange={(e) => setCanApprove(e.target.checked)} aria-label="Aprova o trabalho de quem reporta a ele" className="mt-0.5 accent-ink" />
+            <span className="flex flex-col">
+              <span className="font-semibold">Aprova o trabalho de quem reporta a ele</span>
+              <span className="text-xs text-slate">runs de revisão curtos, sem editar; aprova ou devolve com nota</span>
+            </span>
+          </label>
+          <p className="m-0 text-xs text-slate">Gates marcados "por política" e pedidos de revisão do agente seguem esta cadeia; gates humanos continuam esperando você. Você pode aprovar qualquer task por cima.</p>
+        </fieldset>
 
         <label className="flex flex-col gap-1 text-[13px] font-medium text-slate">
           Instruções específicas (opcional)

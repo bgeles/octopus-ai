@@ -86,6 +86,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0019_task_result",
         include_str!("migrations/0019_task_result.sql"),
     ),
+    ("0020_trust", include_str!("migrations/0020_trust.sql")),
 ];
 
 pub struct Store {
@@ -266,6 +267,44 @@ impl Store {
         agent_profile_id: Option<&str>,
         task_id: Option<&str>,
     ) -> Result<Run> {
+        self.create_run_kind(
+            project_id,
+            prompt,
+            options,
+            agent_profile_id,
+            task_id,
+            "agent",
+        )
+    }
+
+    /// Run de revisão: o aprovador (membro) revisa a task de outro membro; `kind = review`.
+    pub fn create_review_run(
+        &self,
+        project_id: &str,
+        prompt: &str,
+        options: &RunOptions,
+        reviewer_agent_id: &str,
+        task_id: &str,
+    ) -> Result<Run> {
+        self.create_run_kind(
+            project_id,
+            prompt,
+            options,
+            Some(reviewer_agent_id),
+            Some(task_id),
+            "review",
+        )
+    }
+
+    fn create_run_kind(
+        &self,
+        project_id: &str,
+        prompt: &str,
+        options: &RunOptions,
+        agent_profile_id: Option<&str>,
+        task_id: Option<&str>,
+        kind: &str,
+    ) -> Result<Run> {
         let run = Run {
             id: new_id("run"),
             project_id: project_id.to_string(),
@@ -286,7 +325,7 @@ impl Store {
             error_message: None,
             agent_profile_id: agent_profile_id.map(str::to_string),
             task_id: task_id.map(str::to_string),
-            kind: "agent".into(),
+            kind: kind.into(),
             est_cost_usd: 0.0,
             stop_cause: None,
         };
@@ -832,11 +871,12 @@ mod tests {
                 "0017_custom_hooks".to_string(),
                 "0018_usage_cost".to_string(),
                 "0019_task_result".to_string(),
+                "0020_trust".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 19);
+        assert_eq!(s.applied_migrations().unwrap().len(), 20);
     }
 
     #[test]

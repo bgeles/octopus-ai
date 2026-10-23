@@ -218,7 +218,7 @@ impl Store {
 
     fn all_roles(&self) -> Result<Vec<Role>> {
         let conn = self.conn.lock().expect("store mutex");
-        let mut stmt = conn.prepare("SELECT id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at FROM role ORDER BY position, title")?;
+        let mut stmt = conn.prepare("SELECT id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at, default_autonomy, default_can_assign_tasks, default_can_approve FROM role ORDER BY position, title")?;
         let rows = stmt
             .query_map([], Role::from_row_pub)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -227,7 +227,7 @@ impl Store {
 
     fn all_agent_profiles(&self) -> Result<Vec<AgentProfile>> {
         let conn = self.conn.lock().expect("store mutex");
-        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort FROM agent_profile ORDER BY created_at")?;
+        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort, autonomy, can_assign_tasks, can_approve FROM agent_profile ORDER BY created_at")?;
         let rows = stmt
             .query_map([], AgentProfile::from_row_pub)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -368,14 +368,15 @@ impl Store {
                     .map(serde_json::to_string)
                     .transpose()?;
                 let sql = if replace {
-                    "INSERT INTO role (id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    "INSERT INTO role (id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at, default_autonomy, default_can_assign_tasks, default_can_approve)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                      ON CONFLICT(id) DO UPDATE SET scope = excluded.scope, project_id = excluded.project_id, title = excluded.title, specialty = excluded.specialty,
                         responsibilities_md = excluded.responsibilities_md, default_model = excluded.default_model, default_permission_mode = excluded.default_permission_mode,
-                        default_tools_json = excluded.default_tools_json, icon = excluded.icon, position = excluded.position, updated_at = excluded.updated_at"
+                        default_tools_json = excluded.default_tools_json, icon = excluded.icon, position = excluded.position, updated_at = excluded.updated_at,
+                        default_autonomy = excluded.default_autonomy, default_can_assign_tasks = excluded.default_can_assign_tasks, default_can_approve = excluded.default_can_approve"
                 } else {
-                    "INSERT OR IGNORE INTO role (id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                    "INSERT OR IGNORE INTO role (id, scope, project_id, title, specialty, responsibilities_md, default_model, default_permission_mode, default_tools_json, icon, position, created_at, updated_at, default_autonomy, default_can_assign_tasks, default_can_approve)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
                 };
                 Ok(tx.execute(
                     sql,
@@ -392,7 +393,10 @@ impl Store {
                         r.icon,
                         r.position,
                         r.created_at,
-                        r.updated_at
+                        r.updated_at,
+                        r.default_autonomy.map(|a| a.as_str()),
+                        r.default_can_assign_tasks.map(i64::from),
+                        r.default_can_approve.map(i64::from)
                     ],
                 )?)
             };
@@ -438,14 +442,15 @@ impl Store {
                     .map(serde_json::to_string)
                     .transpose()?;
                 let sql = if replace {
-                    "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, effort)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    "INSERT INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, effort, autonomy, can_assign_tasks, can_approve)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                      ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, role_id = excluded.role_id, name = excluded.name, avatar_seed = excluded.avatar_seed,
                         instructions_md = excluded.instructions_md, model = excluded.model, permission_mode = excluded.permission_mode, allowed_tools_json = excluded.allowed_tools_json,
-                        max_turns = excluded.max_turns, max_budget_usd = excluded.max_budget_usd, effort = excluded.effort"
+                        max_turns = excluded.max_turns, max_budget_usd = excluded.max_budget_usd, effort = excluded.effort,
+                        autonomy = excluded.autonomy, can_assign_tasks = excluded.can_assign_tasks, can_approve = excluded.can_approve"
                 } else {
-                    "INSERT OR IGNORE INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, effort)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                    "INSERT OR IGNORE INTO agent_profile (id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, effort, autonomy, can_assign_tasks, can_approve)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
                 };
                 tx.execute(
                     sql,
@@ -462,7 +467,10 @@ impl Store {
                         profile.max_turns.map(|n| n as i64),
                         profile.max_budget_usd,
                         profile.created_at,
-                        profile.effort.map(|e| e.as_str())
+                        profile.effort.map(|e| e.as_str()),
+                        profile.autonomy.map(|a| a.as_str()),
+                        profile.can_assign_tasks.map(i64::from),
+                        profile.can_approve.map(i64::from)
                     ],
                 )?;
             }
@@ -836,7 +844,7 @@ mod tests {
         let export = a.export_config("0.1.0").unwrap();
         assert_eq!(export.schema_version, CONFIG_SCHEMA_VERSION);
         assert_eq!(export.projects.len(), 2);
-        assert_eq!(export.roles.len(), 7);
+        assert_eq!(export.roles.len(), 8);
         assert_eq!(export.agent_profiles.len(), 1);
         assert_eq!(export.team_members.len(), 1);
         // Roundtrip JSON (é o que vai para o arquivo).
