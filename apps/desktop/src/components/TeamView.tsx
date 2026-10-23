@@ -1,5 +1,5 @@
 import { Plus } from "lucide-react";
-import { AUTONOMY_LABELS, type AgentTotals, type Project, type Role, type TeamMember, type TrustPolicy } from "../lib/types";
+import { AUTONOMY_LABELS, type AgentTotals, type Project, type Role, type TeamMember, type TrustPolicy, type Task } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { formatUsd } from "./RunSidebar";
 
@@ -12,12 +12,22 @@ type TeamViewProps = {
   totals: AgentTotals[];
   statusOf: (agentProfileId: string) => MemberStatus;
   monthlyCost: number;
+  /** Tasks do projeto: carga (abertas) e quantas cada membro criou pelo board. */
+  tasks?: Task[];
   onAddMember: () => void;
   onOpenMember: (member: TeamMember) => void;
   onRunAs: (member: TeamMember) => void;
 };
 
-export function TeamView({ project, members, totals, statusOf, monthlyCost, onAddMember, onOpenMember, onRunAs }: TeamViewProps) {
+/** Carga e delegação de um membro a partir das tasks do board. */
+export function taskLoad(tasks: Task[], agentProfileId: string): { open: number; created: number } {
+  return {
+    open: tasks.filter((t) => t.assignedAgentId === agentProfileId && t.status !== "done").length,
+    created: tasks.filter((t) => t.createdByAgentId === agentProfileId).length,
+  };
+}
+
+export function TeamView({ project, members, totals, statusOf, monthlyCost, tasks = [], onAddMember, onOpenMember, onRunAs }: TeamViewProps) {
   const list = members ?? [];
   const totalsById = new Map(totals.map((t) => [t.agentProfileId, t]));
   const active = list.filter((m) => statusOf(m.profile.id) === "active").length;
@@ -79,7 +89,7 @@ export function TeamView({ project, members, totals, statusOf, monthlyCost, onAd
 
       <section aria-label="Membros do time" className="grid grid-cols-[repeat(auto-fit,minmax(min(300px,100%),1fr))] gap-4">
         {list.map((member) => (
-          <MemberCard key={member.id} member={member} status={statusOf(member.profile.id)} totals={totalsById.get(member.profile.id) ?? null} boss={list.find((m) => m.profile.id === member.reportsToAgentId) ?? null} onOpen={() => onOpenMember(member)} onRunAs={() => onRunAs(member)} />
+          <MemberCard key={member.id} member={member} status={statusOf(member.profile.id)} totals={totalsById.get(member.profile.id) ?? null} load={taskLoad(tasks, member.profile.id)} boss={list.find((m) => m.profile.id === member.reportsToAgentId) ?? null} onOpen={() => onOpenMember(member)} onRunAs={() => onRunAs(member)} />
         ))}
       </section>
     </div>
@@ -130,7 +140,7 @@ function OrgNode({ initials, title, subtitle, manager = false, active = false, o
   );
 }
 
-function MemberCard({ member, status, totals, boss, onOpen, onRunAs }: { member: TeamMember; status: MemberStatus; totals: AgentTotals | null; boss: TeamMember | null; onOpen: () => void; onRunAs: () => void }) {
+function MemberCard({ member, status, totals, load, boss, onOpen, onRunAs }: { member: TeamMember; status: MemberStatus; totals: AgentTotals | null; load: { open: number; created: number }; boss: TeamMember | null; onOpen: () => void; onRunAs: () => void }) {
   const budget = member.profile.maxBudgetUsd;
   const cost = totals?.costUsd ?? 0;
   const pct = budget ? Math.min(100, Math.round((cost / budget) * 100)) : 0;
@@ -151,6 +161,13 @@ function MemberCard({ member, status, totals, boss, onOpen, onRunAs }: { member:
       <div className="flex flex-wrap items-center gap-1.5">
         <StatusBadge status={status} />
         <TrustBadges trust={member.trust} />
+        {(load.open > 0 || load.created > 0) && (
+          <span className="text-[11px] text-slate" data-testid="task-load">
+            {load.open > 0 ? `${load.open} ${load.open === 1 ? "task aberta" : "tasks abertas"}` : ""}
+            {load.open > 0 && load.created > 0 ? " · " : ""}
+            {load.created > 0 ? `criou ${load.created}` : ""}
+          </span>
+        )}
       </div>
       <p className="m-0 line-clamp-3 text-[13px] whitespace-pre-line text-ink">{member.role.responsibilitiesMd.replace(/^- /gm, "")}</p>
       <div className="flex flex-wrap gap-1.5">

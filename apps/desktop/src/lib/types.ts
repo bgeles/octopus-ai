@@ -116,6 +116,8 @@ export type Task = {
   /** Devoluções por agentes nesta rodada; acima do limite, sobe para você. */
   returnCount: number;
   reviewAttempts: number;
+  /** Membro (agente) que criou a task pelas tools de delegação; null = você. */
+  createdByAgentId: string | null;
 };
 
 export type FileDiff = { path: string; status: "added" | "modified" | "deleted" | "renamed"; before: string; after: string; truncated: boolean };

@@ -181,6 +181,8 @@ export const RunOptionsSchema = z.object({
   sandbox: SandboxSettingsSchema.optional(),
   /** Captura de memória por hooks; o core sanitiza e guarda as observações. */
   memory: MemoryOptionsSchema.optional(),
+  /** Expõe as tools MCP de delegação (`team_list`, `task_list`, `task_create`, `task_assign`), respondidas pelo core via `run.board_call`/`board.result`. Só para membros com "pode criar e atribuir tasks". */
+  boardTools: z.boolean().optional(),
   /** MCP servers externos por nome (o sidecar acrescenta o `octopus` in-process). */
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
   /** Plugins locais do Claude Code (o Octopus monta um com as skills ativas do membro/projeto). */
@@ -296,6 +298,26 @@ export const MemoryResultParamsSchema = z.object({
 export type MemoryResultParams = z.infer<typeof MemoryResultParamsSchema>;
 export const MemoryResultResultSchema = z.object({ applied: z.boolean() });
 
+/** Chamada de tool de delegação feita pelo agente (board); o core valida e responde com `board.result`. */
+export const BoardOpSchema = z.enum(["team_list", "task_list", "task_create", "task_assign"]);
+export type BoardOp = z.infer<typeof BoardOpSchema>;
+export const RunBoardCallNotificationSchema = z.object({
+  runId: z.string(),
+  callId: z.string(),
+  op: BoardOpSchema,
+  args: z.record(z.string(), z.unknown()),
+});
+export type RunBoardCallNotification = z.infer<typeof RunBoardCallNotificationSchema>;
+export const BoardCallResultSchema = z.object({ ok: z.boolean(), content: z.string() });
+export type BoardCallResult = z.infer<typeof BoardCallResultSchema>;
+export const BoardResultParamsSchema = z.object({
+  runId: z.string(),
+  callId: z.string(),
+  result: BoardCallResultSchema,
+});
+export type BoardResultParams = z.infer<typeof BoardResultParamsSchema>;
+export const BoardResultResultSchema = z.object({ applied: z.boolean() });
+
 /** Teste de conexão de um MCP server: handshake + lista de tools. */
 export const McpCheckParamsSchema = z.object({ name: z.string(), config: McpServerConfigSchema });
 export type McpCheckParams = z.infer<typeof McpCheckParamsSchema>;
@@ -340,6 +362,7 @@ export const RequestMethodSchema = z.enum([
   "sessions.tag",
   "hook.decide",
   "memory.result",
+  "board.result",
   "mcp.check",
   "hooks.test",
 ]);
@@ -355,6 +378,7 @@ export const REQUEST_SCHEMAS = {
   "sessions.tag": { params: SessionsTagParamsSchema, result: SessionMutationResultSchema },
   "hook.decide": { params: HookDecideParamsSchema, result: HookDecideResultSchema },
   "memory.result": { params: MemoryResultParamsSchema, result: MemoryResultResultSchema },
+  "board.result": { params: BoardResultParamsSchema, result: BoardResultResultSchema },
   "mcp.check": { params: McpCheckParamsSchema, result: McpCheckResultSchema },
   "hooks.test": { params: HooksTestParamsSchema, result: HookRunResultSchema },
 } as const;
@@ -521,7 +545,7 @@ export const RunHookNotificationSchema = z.object({
 });
 export type RunHookNotification = z.infer<typeof RunHookNotificationSchema>;
 
-export const NotificationMethodSchema = z.enum(["run.event", "runtime.log", "run.hook", "run.memory_call"]);
+export const NotificationMethodSchema = z.enum(["run.event", "runtime.log", "run.hook", "run.memory_call", "run.board_call"]);
 export type NotificationMethod = z.infer<typeof NotificationMethodSchema>;
 
 export const NOTIFICATION_SCHEMAS = {
@@ -529,6 +553,7 @@ export const NOTIFICATION_SCHEMAS = {
   "runtime.log": RuntimeLogSchema,
   "run.hook": RunHookNotificationSchema,
   "run.memory_call": RunMemoryCallNotificationSchema,
+  "run.board_call": RunBoardCallNotificationSchema,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -592,6 +617,7 @@ export const JsonRpcErrorCode = {
   PermissionRequestNotFound: -32003,
   HookNotFound: -32004,
   MemoryCallNotFound: -32005,
+  BoardCallNotFound: -32006,
 } as const;
 
 // ---------------------------------------------------------------------------

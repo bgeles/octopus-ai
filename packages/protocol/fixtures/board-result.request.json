@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "method": "board.result",
+  "params": {
+    "runId": "run_board_01",
+    "callId": "board_2",
+    "result": {
+      "ok": true,
+      "content": "Task task_24 criada no estágio Pesquisar, atribuída a Dani, pronta para o scheduler."
+    }
+  }
+}

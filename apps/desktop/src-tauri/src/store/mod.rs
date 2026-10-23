@@ -6,6 +6,7 @@
 
 pub mod attention;
 pub mod audit;
+pub mod board_calls;
 pub mod config;
 pub mod harness;
 pub mod hooks;
@@ -87,6 +88,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0019_task_result.sql"),
     ),
     ("0020_trust", include_str!("migrations/0020_trust.sql")),
+    (
+        "0021_delegation",
+        include_str!("migrations/0021_delegation.sql"),
+    ),
 ];
 
 pub struct Store {
@@ -872,11 +877,12 @@ mod tests {
                 "0018_usage_cost".to_string(),
                 "0019_task_result".to_string(),
                 "0020_trust".to_string(),
+                "0021_delegation".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 20);
+        assert_eq!(s.applied_migrations().unwrap().len(), 21);
     }
 
     #[test]

@@ -5,6 +5,7 @@
  */
 import editApprovalEvents from "@octopus/protocol/fixtures/run-events-edit-approval.notifications.json";
 import subagentEvents from "@octopus/protocol/fixtures/run-events-subagent.notifications.json";
+import delegationEvents from "@octopus/protocol/fixtures/run-events-delegation.notifications.json";
 import reviewEvents from "@octopus/protocol/fixtures/run-events-review.notifications.json";
 import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications.json";
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
@@ -80,6 +81,11 @@ export function subagentRunEvents(): RunEventNotification[] {
 }
 
 /** Roteiro de um run de task: o agente chama task_update(review) e termina. */
+/** Roteiro de um run de quem delega: team_list e task_create para um subordinado. */
+export function delegationRunEvents(): RunEventNotification[] {
+  return (delegationEvents as FixtureNotification[]).map((n) => n.params);
+}
+
 /** Roteiro de um run de revisão: o revisor lê e aprova com task_update(approved). */
 export function reviewRunEvents(): RunEventNotification[] {
   return (reviewEvents as FixtureNotification[]).map((n) => n.params);
@@ -936,6 +942,37 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       finishTaskRun(run, !ev.isError, ev.resultText);
       audit("sistema", "run.finished", run.projectId, { runId, status: run.status, costUsd: ev.costUsd, numTurns: ev.numTurns });
       consolidateRunMock(run);
+    } else if (ev.type === "tool_use" && (ev.name === "mcp__octopus__task_create" || ev.name === "mcp__octopus__task_assign") && run.agentProfileId) {
+      // Como `handle_board_call` no core: só para quem reporta ao membro do run; o responsável pode vir por nome.
+      const me = findMember(run.agentProfileId);
+      const reports: TeamMember[] = [];
+      const frontier = me ? [me.profile.id] : [];
+      while (frontier.length) {
+        const current = frontier.pop()!;
+        for (const m of members) if (m.reportsToAgentId === current && !reports.includes(m)) (reports.push(m), frontier.push(m.profile.id));
+      }
+      const input = ev.input as { title?: string; description?: string; acceptance?: string; assignee?: string; dependsOn?: string[]; ready?: boolean; taskId?: string };
+      const assignee = reports.find((m) => m.profile.id === input.assignee || m.profile.name.toLowerCase() === String(input.assignee ?? "").toLowerCase());
+      if (me?.trust.canAssignTasks && assignee) {
+        if (ev.name === "mcp__octopus__task_create" && input.title) {
+          const wf = workflows.find((w) => w.projectId === run.projectId);
+          if (wf) {
+            const at = new Date().toISOString();
+            const task: Task = { id: `task_${++taskCounter}`, projectId: run.projectId, workflowId: wf.id, stageId: wf.stages[0]!.id, title: input.title.trim(), descriptionMd: input.description?.trim() ?? "", acceptanceMd: input.acceptance?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: assignee.profile.id, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: me.profile.id };
+            tasks.push(task);
+            pushTaskEvent(task.id, "created_by_agent", null, task.stageId, run.id, `agente ${me.profile.name}`, null);
+            audit(`agente ${me.profile.name}`, "board.task.created_by_agent", run.projectId, { taskId: task.id, title: task.title, assignee: assignee.profile.name, runId: run.id });
+            emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+          }
+        } else if (ev.name === "mcp__octopus__task_assign" && input.taskId) {
+          const task = tasks.find((t) => t.id === input.taskId);
+          if (task && task.status !== "running") {
+            task.assignedAgentId = assignee.profile.id;
+            pushTaskEvent(task.id, "assigned", task.stageId, task.stageId, run.id, `agente ${me.profile.name}`, `atribuída a ${assignee.profile.name}`);
+            emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+          }
+        }
+      }
     } else if (ev.type === "tool_use" && ev.name === "mcp__octopus__memory_write" && run.kind === "consolidation") {
       const input = ev.input as { kind: MemoryPageKind; title: string; body: string; source?: string };
       const existing = pages.find((p) => p.projectId === run.projectId && !p.archivedAt && p.slug === slugifyMock(input.title));
@@ -1127,8 +1164,11 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       };
       runs.set(run.id, run);
       events.set(run.id, []);
+      // Quem pode criar e atribuir tasks ganha as tools do board e, no mock, um roteiro que delega.
+      const memberScript = member?.trust.canAssignTasks ? delegationRunEvents() : script;
+      if (member?.trust.canAssignTasks) run.options = { ...run.options, boardTools: true };
       const brief = buildBriefMock(run.projectId, null, run.prompt, run.id);
-      if (brief) scriptByRun.set(run.id, [briefEvent(run.id, brief), ...script]);
+      scriptByRun.set(run.id, brief ? [briefEvent(run.id, brief), ...memberScript] : memberScript);
       schedule(run.id, 0);
       return { ...run };
     },
@@ -1365,7 +1405,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!wf.stages.some((s) => s.id === stageId)) throw new Error(`Estágio ${stageId} não existe neste workflow`);
       for (const dep of input.dependsOn ?? []) if (!tasks.some((t) => t.id === dep)) throw new Error(`Dependência ${dep} não encontrada`);
       const at = new Date().toISOString();
-      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0 };
+      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: null };
       tasks.push(task);
       pushTaskEvent(task.id, "created", null, stageId, null, "você", null);
       return { ...task };
@@ -1451,7 +1491,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           }
         }
         for (const { task, workflow, stage } of runnableTasks(project.id)) {
-          const agentId = stage.agentProfileId ?? task.assignedAgentId;
+          // Quem foi atribuído (por você ou por um gestor delegando) vence o padrão do estágio.
+          const agentId = task.assignedAgentId ?? stage.agentProfileId;
           const member = agentId ? findMember(agentId) : undefined;
           const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}`;
           const run: Run = {

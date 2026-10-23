@@ -856,6 +856,7 @@ export function App({ transport }: AppProps) {
           team={team ?? []}
           status={memberStatus(openMember.profile.id)}
           totals={teamTotals.find((t) => t.agentProfileId === openMember.profile.id) ?? null}
+          tasks={tasks}
           runs={runs}
           onBack={() => setOpenMemberId(null)}
           onEdit={() => setMemberDialog({ open: true, member: openMember })}
@@ -869,6 +870,7 @@ export function App({ transport }: AppProps) {
           members={team}
           roles={roles}
           totals={teamTotals}
+          tasks={tasks}
           statusOf={memberStatus}
           monthlyCost={monthlyTeamCost}
           onAddMember={() => setMemberDialog({ open: true, member: null })}

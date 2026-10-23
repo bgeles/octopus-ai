@@ -91,6 +91,46 @@ describe("Time", () => {
     expect(within(screen.getByRole("article", { name: "Membro do time: Rui" })).getAllByTestId("trust-badge").map((b) => b.textContent)).toEqual(["gerenciado", "aprova"]);
   });
 
+  it("quem pode delegar vê o time e cria uma task para quem reporta a ele; a task mostra quem a criou", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    const gabi = await transport.invoke("add_team_member", { projectId: "proj_demo", input: { name: "Gabi", roleId: "role_gestor_produto" } });
+    const dani = await transport.invoke("add_team_member", { projectId: "proj_demo", input: { name: "Dani", roleId: "role_pesquisador", reportsToAgentId: gabi.profile.id } });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: true });
+    await transport.invoke("create_workflow_from_template", { input: { projectId: "proj_demo", templateId: "research-synthesis" } });
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    await screen.findByTestId("team-view");
+
+    // "Dar uma tarefa" à Gabi: o run nasce com as tools do board e o roteiro delega para a Dani.
+    await user.click(within(screen.getByRole("article", { name: "Membro do time: Gabi" })).getByRole("button", { name: "Dar uma tarefa" }));
+    await user.type(await screen.findByLabelText("Instrução para Gabi"), "Quebre o objetivo do trimestre em tasks para o time");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    await waitFor(async () => {
+      const tasks = await transport.invoke("list_tasks", { projectId: "proj_demo" });
+      expect(tasks).toHaveLength(1);
+    }, { timeout: 3000 });
+    const [task] = await transport.invoke("list_tasks", { projectId: "proj_demo" });
+    expect(task?.title).toBe("Inventário de integrações externas");
+    expect(task?.assignedAgentId).toBe(dani.profile.id);
+    expect(task?.createdByAgentId).toBe(gabi.profile.id);
+    const runs = await transport.invoke("list_runs", { projectId: "proj_demo" });
+    expect(runs[0]?.options.boardTools).toBe(true);
+    // Transcript: chamadas de delegação legíveis.
+    const toolCalls = await screen.findAllByTestId("tool-call");
+    expect(toolCalls.map((t) => t.textContent)).toEqual(expect.arrayContaining([expect.stringContaining("quem está no time"), expect.stringContaining("Inventário de integrações externas → Dani")]));
+
+    // Board: card "criada por Gabi"; Time: Gabi criou 1, Dani tem 1 aberta.
+    await user.click(screen.getByRole("button", { name: /^Board/ }));
+    const card = await screen.findByTestId("task-card");
+    expect(within(card).getByTestId("created-by")).toHaveTextContent("criada por Gabi");
+    expect(card).toHaveTextContent("Dani");
+    await user.click(card);
+    expect(within(await screen.findByTestId("task-detail")).getByTestId("task-history")).toHaveTextContent("agente Gabi · criou em Pesquisar pelo board");
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    expect(within(screen.getByRole("article", { name: "Membro do time: Gabi" })).getByTestId("task-load")).toHaveTextContent("criou 1");
+    expect(within(screen.getByRole("article", { name: "Membro do time: Dani" })).getByTestId("task-load")).toHaveTextContent("1 task aberta");
+  });
+
   it("a ficha mostra responsabilidades, como trabalha, delegação e permite editar", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");

@@ -85,10 +85,11 @@ pub async fn tick(
     for project in store.list_projects()? {
         report.parked += store.park_gate_tasks(&project.id)?;
         for (task, workflow, stage) in store.runnable_tasks(&project.id)? {
-            let agent_id = stage
-                .agent_profile_id
+            // Quem foi atribuído à task (por você ou por um gestor delegando) vence o padrão do estágio.
+            let agent_id = task
+                .assigned_agent_id
                 .clone()
-                .or_else(|| task.assigned_agent_id.clone());
+                .or_else(|| stage.agent_profile_id.clone());
             let cwd = if workflow.use_worktrees {
                 match Store::ensure_worktree(Path::new(&project.path), &task.id) {
                     Ok(path) => path.to_string_lossy().into_owned(),
@@ -1057,6 +1058,222 @@ mod tests {
             .collect();
         assert!(kinds.contains(&"agent_update".to_string()));
         assert!(kinds.contains(&"advanced".to_string()));
+        sidecar.shutdown().await;
+    }
+
+    /// Verificação da Fase 8 (delegação) com o Claude de verdade: Gabi (gestora, delega) lista o
+    /// time e cria uma task para a Dani pelas tools do board; o próximo tick roda como a Dani.
+    /// Custa dinheiro: `cargo test real_delegation -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "usa o Claude de verdade (custa dinheiro); rode com --ignored"]
+    async fn real_delegation_creates_a_task_for_a_report() {
+        use crate::protocol::{
+            PermissionDecideParams, PermissionDecision, RunEvent, RunStartParams,
+        };
+        use crate::sidecar::command::find_node;
+        use crate::sidecar::SidecarNotification;
+
+        let main_js = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../packages/agent-runtime/dist/main.js")
+            .canonicalize()
+            .expect("sidecar compilado");
+        let (sidecar, mut notifications) = Sidecar::spawn(SidecarCommand::new(
+            find_node(),
+            vec![main_js.to_string_lossy().into_owned()],
+        ))
+        .await
+        .unwrap();
+        sidecar.hello().await.unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = store
+            .create_project("delegacao", dir.path().to_str().unwrap())
+            .unwrap();
+        let gabi = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Gabi".into(),
+                    role_id: "role_gestor_produto".into(),
+                    max_turns: Some(8),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        let dani = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Dani".into(),
+                    role_id: "role_pesquisador".into(),
+                    reports_to_agent_id: Some(gabi.clone()),
+                    max_turns: Some(4),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+
+        // Run avulso como a Gabi (como "Dar uma tarefa" na UI).
+        let prompt = "Use a tool team_list para ver quem está no seu time. Depois crie, com a tool task_create, exatamente UMA task para a Dani com o título \"Inventário de integrações externas\", uma descrição curta e critérios de aceite verificáveis. Não faça mais nada e não crie arquivos. Termine dizendo o id da task criada.";
+        let options = store
+            .agent_run_options(&gabi, &RunOptions::default())
+            .unwrap();
+        assert_eq!(options.board_tools, Some(true));
+        let run = store
+            .create_run_full(&project.id, prompt, &options, Some(&gabi), None)
+            .unwrap();
+        let options =
+            crate::secrets::options_for_sidecar(&project, &options, &MemorySecrets::default())
+                .unwrap();
+        sidecar
+            .start_run(RunStartParams {
+                run_id: run.id.clone(),
+                cwd: project.path.clone(),
+                prompt: prompt.into(),
+                options,
+            })
+            .await
+            .unwrap();
+        store.set_run_status(&run.id, RunStatus::Running).unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+        let mut board_ops = Vec::new();
+        loop {
+            let n = tokio::time::timeout_at(deadline, notifications.recv())
+                .await
+                .expect("timeout esperando o run")
+                .expect("canal fechado");
+            match n {
+                SidecarNotification::BoardCall(call) => {
+                    let result = store
+                        .handle_board_call(&call.run_id, call.op, &call.args)
+                        .unwrap();
+                    eprintln!(
+                        "board {:?} → ok={} · {}",
+                        call.op,
+                        result.ok,
+                        result.content.lines().next().unwrap_or("")
+                    );
+                    board_ops.push((call.op, result.ok));
+                    sidecar
+                        .board_result(crate::protocol::BoardResultParams {
+                            run_id: call.run_id.clone(),
+                            call_id: call.call_id.clone(),
+                            result,
+                        })
+                        .await
+                        .unwrap();
+                }
+                SidecarNotification::MemoryCall(call) => {
+                    let result = store
+                        .handle_memory_call(&call.run_id, call.op, &call.args)
+                        .unwrap();
+                    sidecar
+                        .memory_result(crate::protocol::MemoryResultParams {
+                            run_id: call.run_id.clone(),
+                            call_id: call.call_id.clone(),
+                            result,
+                        })
+                        .await
+                        .unwrap();
+                }
+                SidecarNotification::Hook(hook) => {
+                    let decision = crate::decide_hook(&store, &hook);
+                    sidecar
+                        .decide_hook(crate::protocol::HookDecideParams {
+                            run_id: hook.run_id.clone(),
+                            hook_id: hook.hook_id.clone(),
+                            decision,
+                        })
+                        .await
+                        .unwrap();
+                }
+                SidecarNotification::RunEvent(ev) if ev.run_id == run.id => {
+                    eprintln!("[{}] {}", ev.seq, ev.event.kind());
+                    if let RunEvent::PermissionRequest {
+                        request_id,
+                        tool_name,
+                        ..
+                    } = &ev.event
+                    {
+                        eprintln!("negando {tool_name}: a Gabi só delega");
+                        sidecar
+                            .decide_permission(PermissionDecideParams {
+                                run_id: run.id.clone(),
+                                request_id: request_id.clone(),
+                                decision: PermissionDecision::Deny {
+                                    message: "teste: só as tools do board".into(),
+                                },
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    let terminal = ev.event.is_terminal();
+                    store
+                        .record_run_event(&ev.run_id, ev.seq, &ev.at, &ev.event)
+                        .unwrap();
+                    if terminal {
+                        break;
+                    }
+                }
+                SidecarNotification::Exited(code) => panic!("sidecar saiu: {code:?}"),
+                _ => {}
+            }
+        }
+        let done = store.get_run(&run.id).unwrap().unwrap();
+        eprintln!(
+            "run da Gabi {:?} custo {:?} resultado {:?}",
+            done.status, done.cost_usd, done.result_text
+        );
+        assert_eq!(
+            done.status,
+            RunStatus::Completed,
+            "{:?}",
+            done.error_message
+        );
+        assert!(
+            board_ops
+                .iter()
+                .any(|(op, ok)| *op == crate::protocol::BoardOp::TaskCreate && *ok),
+            "task_create não aconteceu: {board_ops:?}"
+        );
+        let tasks = store.list_tasks(&project.id).unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "exatamente uma task: {:?}",
+            tasks.iter().map(|t| &t.title).collect::<Vec<_>>()
+        );
+        let task = &tasks[0];
+        assert!(
+            task.title.to_lowercase().contains("integra"),
+            "{}",
+            task.title
+        );
+        assert_eq!(task.assigned_agent_id.as_deref(), Some(dani.as_str()));
+        assert_eq!(task.created_by_agent_id.as_deref(), Some(gabi.as_str()));
+        assert_eq!(task.status, TaskStatus::Ready);
+        let events = store.list_task_events(&task.id).unwrap();
+        assert_eq!(events[0].kind, "created_by_agent");
+        assert_eq!(events[0].actor, "agente Gabi");
+
+        // O scheduler pega a task e roda como a Dani (a atribuição vence o estágio): só conferimos o início.
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
+        assert_eq!(report.started.len(), 1, "{report:?}");
+        let dani_run = store.get_run(&report.started[0].run_id).unwrap().unwrap();
+        assert_eq!(dani_run.agent_profile_id.as_deref(), Some(dani.as_str()));
+        assert!(dani_run.prompt.contains("criada por um membro do time"));
+        sidecar.interrupt_run(&dani_run.id).await.ok();
         sidecar.shutdown().await;
     }
 
