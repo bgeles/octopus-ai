@@ -748,7 +748,7 @@ impl Store {
         else {
             return Ok(None);
         };
-        if kind != "agent" {
+        if kind != "agent" && kind != "review" {
             // Runs de consolidação não entram no log de tarefas.
             return Ok(None);
         }
@@ -784,7 +784,8 @@ impl Store {
             other => other,
         };
         let mut entry = format!(
-            "\n## {when} · run {} · {status_label}",
+            "\n## {when} · {} {} · {status_label}",
+            if kind == "review" { "revisão" } else { "run" },
             &run_id[..run_id.len().min(12)]
         );
         if let Some(c) = cost_usd {
@@ -796,6 +797,29 @@ impl Store {
         }
         if let Some(t) = &task_title {
             entry.push_str(&format!("**Task:** {t}\n"));
+        }
+        if kind == "review" {
+            // Decisão do revisor neste run (aprovou, devolveu ou não decidiu).
+            let decision: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT kind, note FROM task_event WHERE run_id = ?1 AND kind IN ('approved', 'returned', 'escalated', 'review_failed') ORDER BY at DESC, rowid DESC LIMIT 1",
+                    params![run_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let label = match decision.as_ref().map(|(k, _)| k.as_str()) {
+                Some("approved") => "aprovado",
+                Some("returned") => "devolvido",
+                Some("escalated") => "escalado para o gestor humano",
+                _ => "sem decisão",
+            };
+            entry.push_str(&format!(
+                "**Revisão:** {label}{}\n",
+                decision
+                    .and_then(|(_, n)| n)
+                    .map(|n| format!(" · {}", first_chars(n.trim(), 300)))
+                    .unwrap_or_default()
+            ));
         }
         entry.push_str(&format!(
             "**Pedido:** {}\n",

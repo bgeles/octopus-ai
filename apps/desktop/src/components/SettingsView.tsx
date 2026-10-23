@@ -31,6 +31,13 @@ type SettingsViewProps = {
 
 type PreviewTarget = { kind: "snapshot"; id: string } | { kind: "file"; path: string };
 
+/** Limites do board (o core lê com estes padrões quando a preferência está vazia). */
+export const BOARD_LIMITS = [
+  { key: "board.maxAgentReturns", label: "Devoluções por agentes antes de subir para você", hint: "um revisor pode devolver a task tantas vezes; depois ela vira sua", min: 0, max: 10, fallback: 2 },
+  { key: "board.maxOpenTasksPerAgent", label: "Tasks abertas por membro", hint: "limite para quem delega criar tasks para a mesma pessoa", min: 1, max: 100, fallback: 10 },
+  { key: "board.reviewMaxTurns", label: "Turnos de um run de revisão", hint: "revisões são curtas: ler, conferir e decidir", min: 3, max: 60, fallback: 15 },
+] as const;
+
 export function SettingsView(props: SettingsViewProps) {
   const { settings, environment, checking, onRecheck, theme, onThemeChange, onSetSetting, snapshots, onRefreshSnapshots, runtimeLabel } = props;
   const [importPath, setImportPath] = useState("");
@@ -151,6 +158,31 @@ export function SettingsView(props: SettingsViewProps) {
             <span className="text-slate">Runtime</span>
             <span className="font-mono text-xs">{runtimeLabel}</span>
           </div>
+        </section>
+
+        <section aria-label="Board e delegação" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="board-prefs">
+          <h2 className="m-0 font-display text-sm font-semibold">Board e delegação</h2>
+          <p className="m-0 text-xs text-slate">Limites da aprovação em cadeia e da delegação entre membros. Valem para todos os projetos.</p>
+          {BOARD_LIMITS.map((limit) => (
+            <label key={limit.key} className="flex items-center justify-between gap-3 text-[13px]">
+              <span className="flex flex-col">
+                <span>{limit.label}</span>
+                <span className="text-xs text-slate">{limit.hint}</span>
+              </span>
+              <input
+                type="number"
+                min={limit.min}
+                max={limit.max}
+                aria-label={limit.label}
+                defaultValue={typeof settings[limit.key] === "number" ? (settings[limit.key] as number) : limit.fallback}
+                onBlur={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isInteger(n) && n >= limit.min && n <= limit.max) void onSetSetting(limit.key, n === limit.fallback ? null : n);
+                }}
+                className="w-20 rounded-sm border hairline-strong bg-surface px-2 py-1 text-right font-mono text-xs"
+              />
+            </label>
+          ))}
         </section>
 
         <section aria-label="Notificações e menu bar" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="notification-prefs">

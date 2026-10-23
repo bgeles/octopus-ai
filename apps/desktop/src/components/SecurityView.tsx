@@ -246,6 +246,12 @@ export function summarize(e: AuditEvent): string {
       return `adicionou ${str("name") ?? ""} (${str("role") ?? ""}) ao time`;
     case "board.task.created":
       return `criou a task ${str("title") ?? ""}`;
+    case "board.task.created_by_agent":
+      return `criou a task ${str("title") ?? ""} para ${str("assignee") ?? "alguém do time"} pelo board`;
+    case "board.review.auto_approved":
+      return `auto-aprovou a task ${String(p.taskId ?? "")} (${str("reason") ?? "política de confiança"})`;
+    case "board.review.escalated":
+      return `escalou a task ${String(p.taskId ?? "")} para você${str("reason") ? ` · ${str("reason")}` : ""}`;
     case "board.task.approved":
       return `aprovou a task ${String(p.taskId ?? "")}${str("note") ? ` · ${str("note")}` : ""}`;
     default:

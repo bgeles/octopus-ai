@@ -1293,6 +1293,12 @@ impl Store {
                             "política",
                             Some("autônomo, sem revisor acima: segue sem aprovação humana"),
                         )?;
+                        audit_review(
+                            tx,
+                            &task,
+                            "board.review.auto_approved",
+                            "pedido de revisão de membro autônomo sem revisor acima",
+                        )?;
                         advance_task(
                             tx,
                             &task,
@@ -1417,6 +1423,15 @@ fn enter_gate(
                 run_id,
                 "política",
                 Some("autônomo, sem revisor acima: gate aprovado sem humano"),
+            )?;
+            audit_review(
+                tx,
+                task,
+                "board.review.auto_approved",
+                &format!(
+                    "gate \"{}\" por política, membro autônomo sem revisor acima",
+                    gate.name
+                ),
             )?;
             let _ = actor;
             advance_task(tx, task, workflow, "política", None, false, worker)?;
@@ -1549,6 +1564,15 @@ fn finish_review_run(
                         limits.max_agent_returns
                     )),
                 )?;
+                audit_review(
+                    tx,
+                    task,
+                    "board.review.escalated",
+                    &format!(
+                        "devolvida {returns} vezes por agentes (limite {})",
+                        limits.max_agent_returns
+                    ),
+                )?;
             } else {
                 // Volta para quem fez o trabalho: o estágio atual se for de trabalho, senão o anterior.
                 let index = workflow
@@ -1595,6 +1619,12 @@ fn finish_review_run(
                     "sistema",
                     Some("a revisão por agente falhou duas vezes; precisa de você"),
                 )?;
+                audit_review(
+                    tx,
+                    task,
+                    "board.review.escalated",
+                    "a revisão por agente falhou duas vezes",
+                )?;
             } else {
                 tx.execute(
                     "UPDATE task SET lock_run_id = NULL, updated_at = ?2 WHERE id = ?1",
@@ -1617,6 +1647,18 @@ fn finish_review_run(
             }
         }
     }
+    Ok(())
+}
+
+/// Auditoria das decisões automáticas da cadeia de aprovação (o que aconteceu sem você).
+fn audit_review(tx: &Transaction<'_>, task: &Task, kind: &str, reason: &str) -> Result<()> {
+    super::Store::audit_in(
+        tx,
+        "política",
+        kind,
+        Some(&task.project_id),
+        serde_json::json!({"taskId": task.id, "title": task.title, "stage": task.stage_id, "reason": reason}),
+    )?;
     Ok(())
 }
 
@@ -2039,6 +2081,21 @@ mod tests {
             .unwrap();
         assert_eq!(approved.actor, "agente Rui");
         assert_eq!(approved.note.as_deref(), Some("ok agora"));
+        // O log de tarefas da memória registra a revisão (consolidação bruta roda ao fim do run).
+        let tasklog = s
+            .list_pages(&project, false)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == "tasklog")
+            .expect("log de tarefas");
+        assert!(
+            tasklog
+                .body_md
+                .contains("**Revisão:** devolvido · falta teste"),
+            "{}",
+            tasklog.body_md
+        );
+        assert!(tasklog.body_md.contains("· revisão run_"));
 
         // Devoluções demais sobem para você (limite padrão 2).
         let t2 = task_for(&s, &project, &wf, "Teimosa", &ana);
@@ -2087,6 +2144,10 @@ mod tests {
         assert_eq!(escalated.status, TaskStatus::WaitingApproval);
         assert_eq!(escalated.return_count, 3);
         assert!(kinds(&s, &t2.id).contains(&"escalated".to_string()));
+        assert!(!s
+            .list_audit_events(Some(&project), Some("board.review.escalated"), 10)
+            .unwrap()
+            .is_empty());
 
         // Você aprova por cima: conclui e limpa a revisão.
         let over = s.approve_task(&t2.id, Some("resolvo eu")).unwrap();
@@ -2135,6 +2196,11 @@ mod tests {
             .find(|e| e.kind == "auto_approved")
             .unwrap();
         assert_eq!(auto.actor, "política");
+        let audited = s
+            .list_audit_events(Some(&project), Some("board.review.auto_approved"), 10)
+            .unwrap();
+        assert!(!audited.is_empty(), "auto-aprovação auditada");
+        assert_eq!(audited[0].actor, "política");
 
         // Pedido de review da Gabi: ninguém acima revisa → segue (auto-aprovado) para o próximo estágio.
         let t2 = task_for(&s, &project, &wf, "Roadmap", &gabi);
