@@ -793,7 +793,7 @@ export function App({ transport }: AppProps) {
                   }}
                 />
               )}
-              <Transcript runId={currentRun?.id ?? null} items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(runId, id, d, note) => void decide(runId, id, d, note)} deciding={deciding} readFile={readProjectFile} />
+              <Transcript runId={currentRun?.id ?? null} items={runState.items} pendingPermissions={runState.pendingPermissions} onDecide={(runId, id, d, note) => void decide(runId, id, d, note)} deciding={deciding} readFile={readProjectFile} result={runState.result} />
             </section>
             <RunSidebar
               state={runState}
@@ -898,6 +898,7 @@ export function App({ transport }: AppProps) {
           }}
           onNewTask={() => setTaskDialogOpen(true)}
           onOpenTask={(task) => setSelectedTaskId(task.id)}
+          onLoadDiff={(task) => transport.invoke("task_diff", { taskId: task.id })}
           schedulerPaused={schedulerPaused}
           onTogglePaused={() => void setSetting("scheduler.paused", schedulerPaused ? null : true).catch((e) => setToast(messageOf(e)))}
           onTick={() => void tick()}

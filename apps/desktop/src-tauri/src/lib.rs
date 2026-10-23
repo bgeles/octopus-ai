@@ -441,6 +441,7 @@ pub fn run() {
             commands_orchestration::return_task,
             commands_orchestration::list_task_events,
             commands_orchestration::scheduler_tick,
+            commands_orchestration::task_diff,
             commands_security::list_audit_events,
             commands_security::verify_audit,
             commands_security::export_audit,

@@ -288,7 +288,7 @@ export class RunManager {
     if ((o.taskContext || wantsMemoryTools) && this.octopusTools) {
       const ctx = o.taskContext;
       const server = this.octopusTools({
-        task: ctx ? { ctx, onUpdate: (status, note) => this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note }) } : undefined,
+        task: ctx ? { ctx, onUpdate: (status, note, result) => this.emit(run.runId, { type: "task_update", taskId: ctx.taskId, status, note, result }) } : undefined,
         memory: wantsMemoryTools ? { call: (op, args) => this.memoryCall(run, op, args) } : undefined,
       });
       options.mcpServers = { ...(options.mcpServers ?? {}), octopus: server as never };

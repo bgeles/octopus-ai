@@ -223,3 +223,12 @@ pub async fn scheduler_tick(app: AppHandle, state: State<'_, AppState>) -> CmdRe
     }
     Ok(report)
 }
+
+/// Diff da entrega da task (worktree contra o commit base; sem worktree, a pasta do projeto).
+#[tauri::command]
+pub fn task_diff(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> CmdResult<crate::store::task_diff::TaskDiff> {
+    state.store.task_diff(&task_id).map_err(err)
+}

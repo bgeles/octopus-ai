@@ -783,6 +783,8 @@ pub enum RunEvent {
         status: TaskStatusUpdate,
         #[serde(default)]
         note: Option<String>,
+        #[serde(default)]
+        result: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Observation {
@@ -1220,11 +1222,13 @@ mod tests {
                     task_id,
                     status,
                     note,
+                    result,
                 } = &n.event
                 {
                     assert_eq!(task_id, "task_01");
                     assert_eq!(*status, TaskStatusUpdate::Review);
                     assert!(note.as_deref().unwrap().contains("V12"));
+                    assert!(result.as_deref().unwrap().contains("Como verificar"));
                 }
                 kinds.push(n.event.kind());
             }

@@ -1,7 +1,9 @@
-import { Plus } from "lucide-react";
-import { useState } from "react";
-import type { Project, Run, Task, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
+import { PackageCheck, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import { copyText, renderMarkdown } from "../lib/markdown";
+import type { Project, Run, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
 import { Avatar } from "./Avatar";
+import { DiffView } from "./DiffView";
 import { formatUsd } from "./RunSidebar";
 import { formatRelative } from "./SessionsView";
 
@@ -17,6 +19,8 @@ type BoardViewProps = {
   onCreateFromTemplate: (templateId: string, useWorktrees: boolean) => Promise<void>;
   onNewTask: () => void;
   onOpenTask: (task: Task) => void;
+  /** Diff do trabalho da task (worktree ou projeto) contra o commit base. */
+  onLoadDiff: (task: Task) => Promise<TaskDiff>;
   schedulerPaused: boolean;
   onTogglePaused: () => void;
   onTick: () => void;
@@ -44,8 +48,10 @@ export function BoardView(props: BoardViewProps) {
   const { project, workflows, templates, tasks, team, runs, selectedWorkflowId, onSelectWorkflow, onNewTask, onOpenTask, schedulerPaused, onTogglePaused, onTick, selectedTask } = props;
   const [useWorktrees, setUseWorktrees] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
+  const [boardView, setBoardView] = useState<"kanban" | "deliveries">("kanban");
   const workflow = workflows?.find((w) => w.id === selectedWorkflowId) ?? workflows?.[0] ?? null;
   const wfTasks = workflow ? tasks.filter((t) => t.workflowId === workflow.id) : [];
+  const deliveries = wfTasks.filter((t) => t.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   const memberOf = (id: string | null) => (id ? (team.find((m) => m.profile.id === id) ?? null) : null);
 
   return (
@@ -55,6 +61,15 @@ export function BoardView(props: BoardViewProps) {
           <div className="eyebrow text-brand">{project?.name ?? ""} · Orquestração</div>
           <h1 className="m-0 font-display text-xl font-bold tracking-tight">{workflow ? `Workflow "${workflow.name}"` : "Board"}</h1>
         </div>
+        {workflow && (
+          <div role="radiogroup" aria-label="Vista" className="flex rounded-lg border hairline-strong p-0.5 text-[13px]">
+            {(["kanban", "deliveries"] as const).map((v) => (
+              <button key={v} type="button" role="radio" aria-checked={boardView === v} onClick={() => setBoardView(v)} className={["rounded-md px-3 py-1.5 font-medium", boardView === v ? "bg-ink text-paper" : "text-slate hover:text-ink"].join(" ")}>
+                {v === "kanban" ? "Kanban" : `Entregas · ${deliveries.length}`}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {workflows && workflows.length > 1 && (
             <select aria-label="Workflow" value={workflow?.id ?? ""} onChange={(e) => onSelectWorkflow(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-2 py-1.5 text-[13px]">
@@ -154,7 +169,41 @@ export function BoardView(props: BoardViewProps) {
           </section>
 
           <div className="flex min-h-0 flex-wrap gap-5">
-            <section aria-label="Tasks por estágio" className="grid min-w-0 flex-1 basis-[640px] grid-cols-[repeat(auto-fit,minmax(min(220px,100%),1fr))] gap-3" data-testid="kanban">
+            {boardView === "deliveries" && (
+              <section aria-label="Entregas" className="flex min-w-0 flex-1 basis-[480px] flex-col gap-2 rounded-xl border hairline bg-surface p-5" data-testid="deliveries">
+                <div className="flex items-baseline gap-3">
+                  <h2 className="m-0 font-display text-sm font-semibold">Entregas</h2>
+                  <span className="text-xs text-slate">tasks concluídas, mais recentes primeiro · resultado deixado pelo agente</span>
+                </div>
+                {deliveries.length === 0 && <p className="m-0 text-[13px] text-slate">Nenhuma task concluída ainda. Quando um run terminar uma task, o resumo da entrega aparece aqui.</p>}
+                <ul className="m-0 flex list-none flex-col p-0">
+                  {deliveries.map((task) => {
+                    const member = memberOf(task.assignedAgentId ?? runs.find((r) => r.id === task.resultRunId)?.agentProfileId ?? null);
+                    const run = runs.find((r) => r.id === task.resultRunId) ?? null;
+                    return (
+                      <li key={task.id} className="border-b hairline last:border-b-0">
+                        <button type="button" onClick={() => onOpenTask(task)} aria-current={selectedTask?.id === task.id ? "true" : undefined} className="grid w-full grid-cols-[64px_minmax(0,1fr)_140px] items-start gap-3.5 py-3 text-left text-[13px] hover:text-brand-hover" data-testid="delivery-row">
+                          <span className="font-mono text-xs text-slate">{shortId(task.id)}</span>
+                          <span className="flex min-w-0 flex-col gap-0.5">
+                            <span className="font-semibold text-ink">{task.title}</span>
+                            <span className="truncate text-slate">{firstLine(task.resultMd) ?? task.lastNote ?? "sem resumo da entrega"}</span>
+                            <span className="text-xs text-slate">
+                              {task.filesChanged.length} {task.filesChanged.length === 1 ? "arquivo" : "arquivos"}
+                              {run?.costUsd != null ? ` · ${formatUsd(run.costUsd)}` : ""}
+                            </span>
+                          </span>
+                          <span className="flex flex-col gap-0.5 text-right text-xs text-slate">
+                            <span className="font-semibold text-ink">{member ? member.profile.name : "run avulso"}</span>
+                            <span>{formatRelative(task.updatedAt)}</span>
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            )}
+            <section aria-label="Tasks por estágio" className={["grid min-w-0 flex-1 basis-[640px] grid-cols-[repeat(auto-fit,minmax(min(220px,100%),1fr))] gap-3", boardView === "deliveries" ? "hidden" : ""].join(" ")} data-testid="kanban" hidden={boardView === "deliveries"}>
               {workflow.stages.map((stage) => {
                 const inStage = wfTasks.filter((t) => t.stageId === stage.id);
                 return (
@@ -173,7 +222,7 @@ export function BoardView(props: BoardViewProps) {
             </section>
 
             {selectedTask && workflow && (
-              <TaskDetail task={selectedTask} workflow={workflow} team={team} runs={runs} events={props.taskEvents} tasks={tasks} onApprove={props.onApprove} onReturn={props.onReturn} onMove={props.onMove} onOpenRun={props.onOpenRun} onClose={props.onCloseTask} />
+              <TaskDetail task={selectedTask} workflow={workflow} team={team} runs={runs} events={props.taskEvents} tasks={tasks} onApprove={props.onApprove} onReturn={props.onReturn} onMove={props.onMove} onOpenRun={props.onOpenRun} onLoadDiff={props.onLoadDiff} onClose={props.onCloseTask} />
             )}
           </div>
         </>
@@ -191,6 +240,7 @@ function TaskCard({ task, member, run, selected, onOpen }: { task: Task; member:
       <div className="flex items-center gap-2">
         <StatusDot status={task.status} />
         <span className="text-[11px] font-semibold text-slate">{STATUS_LABELS[task.status]}</span>
+        {task.resultMd && <PackageCheck size={13} aria-label="com entrega" className="text-success-ink" />}
         <span className="ml-auto font-mono text-[11px] text-slate">{shortId(task.id)}</span>
       </div>
       <span className="text-[13px] font-semibold">{task.title}</span>
@@ -213,7 +263,7 @@ export function shortId(id: string): string {
   return id.replace(/^task_/, "T-").slice(0, 10);
 }
 
-function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onReturn, onMove, onOpenRun, onClose }: { task: Task; workflow: Workflow; team: TeamMember[]; runs: Run[]; events: TaskEvent[]; tasks: Task[]; onApprove: BoardViewProps["onApprove"]; onReturn: BoardViewProps["onReturn"]; onMove: BoardViewProps["onMove"]; onOpenRun: (run: Run) => void; onClose: () => void }) {
+function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onReturn, onMove, onOpenRun, onLoadDiff, onClose }: { task: Task; workflow: Workflow; team: TeamMember[]; runs: Run[]; events: TaskEvent[]; tasks: Task[]; onApprove: BoardViewProps["onApprove"]; onReturn: BoardViewProps["onReturn"]; onMove: BoardViewProps["onMove"]; onOpenRun: (run: Run) => void; onLoadDiff: BoardViewProps["onLoadDiff"]; onClose: () => void }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -251,6 +301,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
           <p className="m-0 whitespace-pre-line">{task.acceptanceMd}</p>
         </div>
       )}
+      {(task.resultMd || task.filesChanged.length > 0 || task.baseCommit) && <Delivery task={task} runs={runs} team={team} onLoadDiff={onLoadDiff} />}
       {task.lastNote && (
         <div className="rounded-md border hairline px-3.5 py-2.5 text-[13px]" data-testid="task-note">
           <div className="mb-0.5 text-xs font-medium text-slate">Última nota</div>
@@ -327,6 +378,107 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
       </div>
     </aside>
   );
+}
+
+/** Entrega da task: resumo do agente, arquivos tocados e o diff contra o commit base. */
+function Delivery({ task, runs, team, onLoadDiff }: { task: Task; runs: Run[]; team: TeamMember[]; onLoadDiff: BoardViewProps["onLoadDiff"] }) {
+  const [copied, setCopied] = useState(false);
+  const [diff, setDiff] = useState<TaskDiff | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setDiff(null);
+    setOpen(false);
+    setError(null);
+  }, [task.id, task.resultRunId]);
+  const run = runs.find((r) => r.id === task.resultRunId) ?? null;
+  const who = team.find((m) => m.profile.id === run?.agentProfileId)?.profile.name ?? null;
+  const toggleDiff = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (diff) return;
+    setLoading(true);
+    setError(null);
+    onLoadDiff(task)
+      .then(setDiff)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false));
+  };
+  const sign = (status: string) => (status === "added" ? "+" : status === "deleted" ? "−" : "~");
+  return (
+    <div className="flex flex-col gap-2.5" data-testid="task-delivery">
+      {task.resultMd && (
+        <section aria-label="Resultado" className="flex flex-col gap-2 rounded-lg border hairline bg-paper px-3.5 py-3" data-testid="task-result">
+          <div className="flex items-center gap-2.5">
+            <span className="eyebrow text-success-ink">Resultado</span>
+            <span className="text-xs text-slate">
+              {who ? `entregue por ${who}` : "entrega"}
+              {run ? ` no run ${run.id.slice(-6)} · ${formatRelative(run.endedAt ?? run.startedAt)}` : ""}
+            </span>
+            <button type="button" onClick={() => void copyText(task.resultMd ?? "").then((ok) => ok && (setCopied(true), setTimeout(() => setCopied(false), 1500)))} className="ml-auto rounded-md border hairline-strong bg-surface px-2.5 py-1 text-xs font-medium hover:border-ink">
+              {copied ? "Copiado" : "Copiar"}
+            </button>
+          </div>
+          <div className="flex flex-col gap-1 text-[13px] leading-relaxed">{renderMarkdown(task.resultMd)}</div>
+        </section>
+      )}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-2.5">
+          <span className="text-xs font-medium text-slate">Arquivos alterados · {task.filesChanged.length}</span>
+          {task.baseCommit && <span className="text-xs text-slate">{task.worktreePath ? "worktree" : "projeto"} vs {task.baseCommit.slice(0, 7)}</span>}
+          {task.baseCommit && (
+            <button type="button" onClick={toggleDiff} aria-expanded={open} className="ml-auto rounded-md border hairline-strong bg-surface px-2.5 py-1 text-xs font-medium hover:border-ink">
+              {open ? "Ocultar diff" : "Ver diff"}
+            </button>
+          )}
+        </div>
+        {task.filesChanged.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 text-xs" data-testid="task-files">
+            {task.filesChanged.map((f) => (
+              <span key={f} className="rounded-full border hairline-strong px-2 py-0.5 font-mono" title={f}>
+                {f.length > 48 ? `…${f.slice(-46)}` : f}
+              </span>
+            ))}
+          </div>
+        )}
+        {open && loading && <span className="text-xs text-slate">Calculando diff…</span>}
+        {open && error && (
+          <div role="alert" className="rounded-md bg-brand-soft px-3 py-2 text-[13px] text-brand-hover">
+            {error}
+          </div>
+        )}
+        {open && diff && !diff.available && <p className="m-0 text-[13px] text-slate">{diff.reason ?? "Diff indisponível."}</p>}
+        {open && diff?.available && diff.files.length === 0 && <p className="m-0 text-[13px] text-slate">Nada mudou em relação a {diff.base?.slice(0, 7) ?? "o commit base"}.</p>}
+        {open && diff?.available && diff.files.length > 0 && (
+          <div className="flex flex-col gap-2" data-testid="task-diff">
+            {diff.scope === "project" && <p className="m-0 text-xs text-warning-ink">Diff da pasta do projeto (a task não tem worktree): pode incluir mudanças de fora dela.</p>}
+            {diff.files.map((f) => (
+              <details key={f.path} open={diff.files.length <= 3} className="flex flex-col gap-1">
+                <summary className="cursor-pointer font-mono text-xs">
+                  <span className={f.status === "added" ? "text-success-ink" : f.status === "deleted" ? "text-brand-hover" : "text-slate"}>{sign(f.status)}</span> {f.path}
+                  {f.truncated ? " · truncado" : ""}
+                </summary>
+                <DiffView before={f.before} after={f.after} />
+              </details>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function firstLine(md: string | null): string | null {
+  if (!md) return null;
+  const line = md
+    .split("\n")
+    .map((l) => l.replace(/^#+\s*/, "").replace(/^[-*]\s+/, "").replace(/[`*]/g, "").trim())
+    .find((l) => l && !/^entrega$/i.test(l));
+  return line ?? null;
 }
 
 function Row({ label, value }: { label: string; value: string }) {

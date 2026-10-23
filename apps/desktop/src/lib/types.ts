@@ -100,6 +100,24 @@ export type Task = {
   position: number;
   createdAt: string;
   updatedAt: string;
+  /** Entrega: resumo em markdown deixado pelo agente (task_update.result) ou o texto final do run. */
+  resultMd: string | null;
+  /** Arquivos tocados (Write/Edit…) no run que entregou. */
+  filesChanged: string[];
+  resultRunId: string | null;
+  /** Commit em que o trabalho começou; base do diff. */
+  baseCommit: string | null;
+};
+
+export type FileDiff = { path: string; status: "added" | "modified" | "deleted" | "renamed"; before: string; after: string; truncated: boolean };
+
+export type TaskDiff = {
+  available: boolean;
+  reason: string | null;
+  base: string | null;
+  /** `worktree` (branch da task) ou `project` (pasta do projeto; pode incluir mudanças de fora). */
+  scope: "worktree" | "project";
+  files: FileDiff[];
 };
 
 export type TaskInput = {
@@ -426,6 +444,7 @@ export type Commands = {
   approve_task: { args: { taskId: string; note?: string | null }; result: Task };
   return_task: { args: { taskId: string; stageId: string; note?: string | null }; result: Task };
   list_task_events: { args: { taskId: string }; result: TaskEvent[] };
+  task_diff: { args: { taskId: string }; result: TaskDiff };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };
