@@ -1,7 +1,7 @@
 import { PackageCheck, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { copyText, renderMarkdown } from "../lib/markdown";
-import type { Project, Run, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
+import type { Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { DiffView } from "./DiffView";
 import { formatUsd } from "./RunSidebar";
@@ -21,6 +21,8 @@ type BoardViewProps = {
   onOpenTask: (task: Task) => void;
   /** Diff do trabalho da task (worktree ou projeto) contra o commit base. */
   onLoadDiff: (task: Task) => Promise<TaskDiff>;
+  /** Quem aprova num estágio gate: você ou a política de confiança do responsável. */
+  onSetGateApprover: (workflow: Workflow, stage: Stage, approver: StageApprover) => Promise<void>;
   schedulerPaused: boolean;
   onTogglePaused: () => void;
   onTick: () => void;
@@ -43,6 +45,15 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   blocked: "bloqueada",
   failed: "falhou",
 };
+
+/** Rótulo do status; em revisão por agente, diz quem está revisando. */
+export function statusLabel(task: Task, team: TeamMember[]): string {
+  if (task.status === "review" && task.approverAgentId) {
+    const reviewer = team.find((m) => m.profile.id === task.approverAgentId);
+    return `em revisão por ${reviewer?.profile.name ?? "um membro"}`;
+  }
+  return STATUS_LABELS[task.status];
+}
 
 export function BoardView(props: BoardViewProps) {
   const { project, workflows, templates, tasks, team, runs, selectedWorkflowId, onSelectWorkflow, onNewTask, onOpenTask, schedulerPaused, onTogglePaused, onTick, selectedTask } = props;
@@ -154,12 +165,22 @@ export function BoardView(props: BoardViewProps) {
                     <div className="flex items-center gap-2">
                       <span className={["size-2 rounded-full", running ? "animate-pulse bg-brand" : waiting ? "bg-warning" : inStage.some((t) => t.status === "done") ? "bg-success" : "bg-mist"].join(" ")} />
                       <span className="font-display text-[13px] font-bold">{stage.name}</span>
-                      {stage.gate && <span className="rounded-full bg-warning-soft px-1.5 text-[10px] font-semibold text-warning-ink">gate humano</span>}
+                      {stage.gate && (
+                        <button
+                          type="button"
+                          onClick={() => void props.onSetGateApprover(workflow, stage, (stage.approver ?? "human") === "human" ? "policy" : "human")}
+                          title={(stage.approver ?? "human") === "human" ? "Gate humano: espera você. Clique para seguir a política de confiança do responsável." : "Gate por política: supervisionado → você; gerenciado → o gestor; autônomo → o gestor ou auto-aprova. Clique para voltar a esperar você."}
+                          className={["rounded-full px-1.5 text-[10px] font-semibold", (stage.approver ?? "human") === "human" ? "bg-warning-soft text-warning-ink" : "bg-success-soft text-success-ink"].join(" ")}
+                          data-testid="gate-approver"
+                        >
+                          {(stage.approver ?? "human") === "human" ? "gate: você" : "gate: por política"}
+                        </button>
+                      )}
                       <span className="ml-auto text-xs text-slate">{inStage.length}</span>
                     </div>
                     <div className="flex items-center gap-1.5 text-xs text-slate">
                       {stage.gate ? <Avatar initials="VC" size={20} manager /> : member ? <Avatar initials={member.profile.avatarSeed} size={20} active={running} /> : null}
-                      <span>{stage.gate ? "Você" : member ? `${member.profile.name} · ${member.role.title}` : "sem responsável (run avulso)"}</span>
+                      <span>{stage.gate ? ((stage.approver ?? "human") === "human" ? "Você" : "você ou o gestor do responsável") : member ? `${member.profile.name} · ${member.role.title}` : "sem responsável (run avulso)"}</span>
                     </div>
                   </div>
                   {i < workflow.stages.length - 1 && <span className="text-slate">→</span>}
@@ -214,7 +235,7 @@ export function BoardView(props: BoardViewProps) {
                     </div>
                     {inStage.length === 0 && <div className="rounded-lg border border-dashed hairline p-3 text-center text-xs text-slate">vazio</div>}
                     {inStage.map((task) => (
-                      <TaskCard key={task.id} task={task} member={memberOf(stage.agentProfileId ?? task.assignedAgentId)} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
+                      <TaskCard key={task.id} task={task} member={memberOf(stage.agentProfileId ?? task.assignedAgentId)} team={team} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
                     ))}
                   </div>
                 );
@@ -233,13 +254,13 @@ export function BoardView(props: BoardViewProps) {
   );
 }
 
-function TaskCard({ task, member, run, selected, onOpen }: { task: Task; member: TeamMember | null; run: Run | null; selected: boolean; onOpen: () => void }) {
+function TaskCard({ task, member, team, run, selected, onOpen }: { task: Task; member: TeamMember | null; team: TeamMember[]; run: Run | null; selected: boolean; onOpen: () => void }) {
   const border = task.status === "running" ? "border-[1.5px] border-brand" : task.status === "waiting_approval" || task.status === "review" ? "border-[1.5px] border-warning" : task.status === "failed" || task.status === "blocked" ? "border-[1.5px] border-brand/50" : selected ? "border-ink" : "hairline";
   return (
     <button type="button" onClick={onOpen} className={["flex flex-col gap-2 rounded-lg border bg-surface px-3.5 py-3 text-left hover:border-ink", border].join(" ")} data-testid="task-card" data-status={task.status} aria-current={selected ? "true" : undefined}>
       <div className="flex items-center gap-2">
         <StatusDot status={task.status} />
-        <span className="text-[11px] font-semibold text-slate">{STATUS_LABELS[task.status]}</span>
+        <span className="text-[11px] font-semibold text-slate">{statusLabel(task, team)}</span>
         {task.resultMd && <PackageCheck size={13} aria-label="com entrega" className="text-success-ink" />}
         <span className="ml-auto font-mono text-[11px] text-slate">{shortId(task.id)}</span>
       </div>
@@ -286,7 +307,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
       <div className="flex items-start gap-3">
         <div className="flex min-w-0 flex-col gap-1">
           <span className="eyebrow text-slate">
-            {shortId(task.id)} · {stage?.name ?? "?"} · {STATUS_LABELS[task.status]}
+            {shortId(task.id)} · {stage?.name ?? "?"} · {statusLabel(task, team)}
           </span>
           <h2 className="m-0 font-display text-lg font-bold tracking-tight">{task.title}</h2>
         </div>
@@ -299,6 +320,22 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
         <div className="rounded-md bg-paper px-3.5 py-3 text-[13px]">
           <div className="mb-1 text-xs font-medium text-slate">Critérios de aceite</div>
           <p className="m-0 whitespace-pre-line">{task.acceptanceMd}</p>
+        </div>
+      )}
+      {task.status === "review" && task.approverAgentId && (
+        <div className="flex items-center gap-2.5 rounded-md bg-warning-soft px-3.5 py-2.5 text-[13px]" data-testid="task-review">
+          {(() => {
+            const reviewer = team.find((m) => m.profile.id === task.approverAgentId);
+            return (
+              <>
+                <Avatar initials={reviewer?.profile.avatarSeed ?? "?"} size={24} active={Boolean(currentRun)} />
+                <span>
+                  <strong>{reviewer?.profile.name ?? "Um membro"}</strong> {currentRun ? "está revisando" : "vai revisar"} esta task (gestor de quem fez o trabalho).
+                  {task.returnCount > 0 ? ` Devolvida ${task.returnCount}× por agentes.` : ""} Você pode aprovar por cima a qualquer momento.
+                </span>
+              </>
+            );
+          })()}
         </div>
       )}
       {(task.resultMd || task.filesChanged.length > 0 || task.baseCommit) && <Delivery task={task} runs={runs} team={team} onLoadDiff={onLoadDiff} />}
@@ -324,7 +361,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
           <div className="flex flex-wrap gap-2">
             {waiting && (
               <button type="button" disabled={busy} onClick={() => act(() => onApprove(task, note.trim() || null))} className="rounded-full bg-brand px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-brand-hover disabled:opacity-50">
-                {stageIndex === workflow.stages.length - 1 ? "Aprovar e concluir" : "Aprovar e seguir"}
+                {task.status === "review" ? "Aprovar mesmo assim" : stageIndex === workflow.stages.length - 1 ? "Aprovar e concluir" : "Aprovar e seguir"}
               </button>
             )}
             {waiting && previous[0] && (
@@ -353,6 +390,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
             <button key={r.id} type="button" onClick={() => onOpenRun(r)} className="flex items-center gap-2 text-left text-[13px] hover:text-brand-hover">
               <StatusDot status={r.status === "running" || r.status === "queued" ? "running" : r.status === "waiting_approval" ? "waiting_approval" : r.status === "completed" ? "done" : "failed"} />
               <span className="truncate">{r.id.slice(-6)}</span>
+              {r.kind === "review" && <span className="rounded-full border hairline-strong px-1.5 text-[10px] text-slate">revisão</span>}
               <span className="ml-auto text-xs text-slate">{formatRelative(r.startedAt)}</span>
               {r.costUsd != null && <span className="font-mono text-xs">{formatUsd(r.costUsd)}</span>}
             </button>
@@ -518,6 +556,16 @@ function eventLabel(e: TaskEvent, workflow: Workflow): string {
     case "run_failed":
     case "failed":
       return "falhou";
+    case "review_requested":
+      return "encaminhou para revisão";
+    case "review_started":
+      return "iniciou run de revisão";
+    case "review_failed":
+      return "revisão não concluiu";
+    case "auto_approved":
+      return "auto-aprovou por política";
+    case "escalated":
+      return "escalou para você";
     default:
       return e.kind;
   }

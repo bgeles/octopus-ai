@@ -10,6 +10,9 @@ type ToolFn = (name: string, description: string, schema: Record<string, unknown
 type CreateServerFn = (options: { name: string; version?: string; instructions?: string; tools: unknown[] }) => unknown;
 
 export function taskUpdateDescription(ctx: TaskContext): string {
+  if (ctx.mode === "review") {
+    return `Você está revisando o trabalho de outro membro na task "${ctx.title}" (estágio ${ctx.stage}) do board do Octopus. Inspecione a entrega sem editar nada e chame esta tool uma vez ao decidir: status "approved" quando a entrega cumpre o pedido e os critérios de aceite, "returned" quando falta algo ou está errado. Em "note", diga objetivamente o motivo (o autor vai ler).`;
+  }
   return `Atualiza o estado da task "${ctx.title}" (estágio ${ctx.stage}) no board do Octopus. Chame ao terminar o trabalho: status "done" quando concluiu tudo, "review" quando precisa de revisão humana ou de outro membro, "blocked" quando não consegue prosseguir. Inclua uma nota curta com o que foi feito ou o que bloqueia e, em "result", o resumo da entrega em markdown: o que mudou, em quais arquivos, e como verificar.`;
 }
 

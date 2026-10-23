@@ -104,6 +104,19 @@ pub enum TaskStatusUpdate {
     Done,
     Review,
     Blocked,
+    /// Só em runs de revisão (`TaskContext.mode = review`): o revisor aprova…
+    Approved,
+    /// …ou devolve com nota.
+    Returned,
+}
+
+/// O que o agente está fazendo com a task: o trabalho em si ou a revisão do trabalho de outro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskMode {
+    #[default]
+    Work,
+    Review,
 }
 
 /// Run que executa uma task do board: o sidecar expõe a tool `task_update` ao agente.
@@ -115,6 +128,8 @@ pub struct TaskContext {
     pub stage: String,
     #[serde(default)]
     pub allowed_statuses: Vec<TaskStatusUpdate>,
+    #[serde(default)]
+    pub mode: TaskMode,
 }
 
 /// Subconjunto do `SandboxSettings` do SDK controlado pelos perfis de sandbox.
@@ -1239,10 +1254,38 @@ mod tests {
             title: "x".into(),
             stage: "Implementar".into(),
             allowed_statuses: vec![TaskStatusUpdate::Done],
+            mode: TaskMode::Work,
         };
         let value = serde_json::to_value(&ctx).unwrap();
         assert_eq!(value["allowedStatuses"][0], "done");
         assert_eq!(value["taskId"], "t");
+        assert_eq!(value["mode"], "work");
+        // Contexto antigo (sem `mode`) continua válido: vira trabalho.
+        let old: TaskContext =
+            serde_json::from_value(serde_json::json!({"taskId": "t", "title": "x", "stage": "s"}))
+                .unwrap();
+        assert_eq!(old.mode, TaskMode::Work);
+        assert_eq!(
+            serde_json::to_value(TaskStatusUpdate::Returned).unwrap(),
+            "returned"
+        );
+    }
+
+    #[test]
+    fn review_fixture_parses_approved_update() {
+        let raw = read_fixture("run-events-review.notifications.json");
+        let mut statuses = Vec::new();
+        for item in raw.as_array().unwrap() {
+            let incoming: IncomingMessage = serde_json::from_value(item.clone()).unwrap();
+            if let IncomingMessage::Notification { params, .. } = incoming {
+                let n: RunEventNotification = serde_json::from_value(params.unwrap()).unwrap();
+                if let RunEvent::TaskUpdate { status, note, .. } = &n.event {
+                    statuses.push(*status);
+                    assert!(note.as_deref().unwrap().contains("MigrationIT"));
+                }
+            }
+        }
+        assert_eq!(statuses, vec![TaskStatusUpdate::Approved]);
     }
 
     #[test]

@@ -31,4 +31,18 @@ test.describe("Time (mock)", () => {
     await page.getByRole("button", { name: "Time" }).click();
     await expect(page.getByRole("article", { name: "Membro do time: Ana" })).toHaveAttribute("data-status", /active|waiting/);
   });
+
+  test("a confiança do membro é editada no diálogo e vira badge", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Time" }).click();
+    const dialog = page.getByRole("dialog");
+    await page.getByRole("button", { name: "Adicionar membro" }).click();
+    await dialog.getByLabel("Nome", { exact: true }).fill("Gabi");
+    await dialog.getByLabel("Cargo", { exact: true }).selectOption({ label: "Gestor de produto · Prioridades e delegação" });
+    await expect(dialog.getByTestId("trust-fieldset")).toContainText("Padrão do cargo · autônomo");
+    await dialog.getByRole("radio", { name: "Gerenciado" }).check();
+    await dialog.getByRole("button", { name: "Adicionar" }).click();
+    const card = page.getByRole("article", { name: "Membro do time: Gabi" });
+    await expect(card.getByTestId("trust-badge")).toHaveText(["gerenciado", "delega", "aprova"]);
+  });
 });

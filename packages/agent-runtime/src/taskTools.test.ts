@@ -25,6 +25,20 @@ describe("task_update", () => {
     expect(long).toContain("[resumo truncado");
   });
 
+  it("no modo revisão a descrição fala em aprovar/devolver e só aceita esses status", async () => {
+    const review = { ...ctx, allowedStatuses: ["approved", "returned"] as ("approved" | "returned")[], mode: "review" as const };
+    expect(taskUpdateDescription(review)).toContain("revisando o trabalho de outro membro");
+    expect(taskUpdateDescription(review)).toContain('"returned"');
+    expect(taskUpdateDescription({ ...ctx, allowedStatuses: [...ctx.allowedStatuses], mode: "work" })).toContain("Atualiza o estado da task");
+    const onUpdate = vi.fn();
+    const handler = buildTaskUpdateHandler(review, onUpdate);
+    const ok = await handler({ status: "returned", note: "falta o teste" });
+    expect(onUpdate).toHaveBeenCalledWith("returned", "falta o teste", null);
+    expect(ok.isError).toBeUndefined();
+    const no = await handler({ status: "done" });
+    expect(no.isError).toBe(true);
+  });
+
   it("recusa status fora da lista permitida", async () => {
     const onUpdate = vi.fn();
     const handler = buildTaskUpdateHandler({ ...ctx, allowedStatuses: ["review"] }, onUpdate);

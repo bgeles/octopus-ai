@@ -1,5 +1,5 @@
 import { ChevronLeft } from "lucide-react";
-import type { AgentTotals, Run, TeamMember } from "../lib/types";
+import { AUTONOMY_LABELS, type AgentTotals, type Run, type TeamMember } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { formatUsd } from "./RunSidebar";
 import { formatRelative, labelFor } from "./SessionsView";
@@ -89,6 +89,7 @@ export function MemberSheet({ member, team, status, totals, runs, onBack, onEdit
           <Row label="Permissões" value={permission ? PERMISSION_LABELS[permission] ?? permission : "padrão do projeto"} />
           <Row label="Ferramentas" value={tools.length ? tools.join(" · ") : "todas"} />
           <Row label="Limites" value={[member.profile.maxTurns ? `${member.profile.maxTurns} turnos` : null, budget ? `${formatUsd(budget)} por run` : null].filter(Boolean).join(" · ") || "sem limites próprios"} />
+          <Row label="Confiança" value={[AUTONOMY_LABELS[member.trust.autonomy], member.trust.canAssignTasks ? "cria e atribui tasks" : null, member.trust.canApprove ? "aprova quem reporta a ele" : null].filter(Boolean).join(" · ")} />
         </section>
 
         <section aria-label="Delegação" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5">
