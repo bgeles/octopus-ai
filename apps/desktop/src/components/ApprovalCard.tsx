@@ -146,6 +146,11 @@ function Preview({ request, input, writePreview }: { request: ApprovalRequest; i
 export function summarizeInput(toolName: string, input: unknown): string {
   if (typeof input !== "object" || input === null) return input === undefined || input === null ? "" : String(input);
   const record = input as Record<string, unknown>;
+  // Tools de delegação do Octopus: resumo legível em vez de chave=valor.
+  if (toolName === "mcp__octopus__team_list") return "quem está no time e para quem posso delegar";
+  if (toolName === "mcp__octopus__task_create" && typeof record.title === "string") return `${record.title}${typeof record.assignee === "string" ? ` → ${record.assignee}` : ""}`;
+  if (toolName === "mcp__octopus__task_assign" && typeof record.taskId === "string") return `${record.taskId} → ${String(record.assignee ?? "")}`;
+  if (toolName === "mcp__octopus__task_list") return typeof record.status === "string" ? `tasks ${record.status}` : "tasks abertas";
   const preferred = ["command", "file_path", "pattern", "path", "query", "url", "prompt", "description"];
   for (const key of preferred) {
     const value = record[key];

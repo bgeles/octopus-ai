@@ -233,6 +233,9 @@ pub struct RunOptions {
     pub sandbox: Option<SandboxSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryOptions>,
+    /// Tools de delegação (`team_list`, `task_list`, `task_create`, `task_assign`); só para membros com "pode criar e atribuir tasks".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_tools: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<std::collections::BTreeMap<String, McpServerConfig>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,6 +511,45 @@ pub struct MemoryResultParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryResultResult {
+    pub applied: bool,
+}
+
+/// Tool de delegação chamada pelo agente (`run.board_call`); o core valida e responde com `board.result`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardOp {
+    TeamList,
+    TaskList,
+    TaskCreate,
+    TaskAssign,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunBoardCallNotification {
+    pub run_id: String,
+    pub call_id: String,
+    pub op: BoardOp,
+    #[serde(default)]
+    pub args: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardCallResult {
+    pub ok: bool,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardResultParams {
+    pub run_id: String,
+    pub call_id: String,
+    pub result: BoardCallResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardResultResult {
     pub applied: bool,
 }
 
@@ -1269,6 +1311,39 @@ mod tests {
             serde_json::to_value(TaskStatusUpdate::Returned).unwrap(),
             "returned"
         );
+    }
+
+    #[test]
+    fn board_call_fixtures_round_trip() {
+        let raw = read_fixture("run-board-call.notifications.json");
+        let mut ops = Vec::new();
+        for item in raw.as_array().unwrap() {
+            let incoming: IncomingMessage = serde_json::from_value(item.clone()).unwrap();
+            if let IncomingMessage::Notification { method, params } = incoming {
+                assert_eq!(method, "run.board_call");
+                let n: RunBoardCallNotification = serde_json::from_value(params.unwrap()).unwrap();
+                ops.push(n.op);
+                if n.op == BoardOp::TaskCreate {
+                    assert_eq!(n.args["assignee"], "Dani");
+                }
+            }
+        }
+        assert_eq!(
+            ops,
+            vec![
+                BoardOp::TeamList,
+                BoardOp::TaskCreate,
+                BoardOp::TaskList,
+                BoardOp::TaskAssign
+            ]
+        );
+        let res = read_fixture("board-result.request.json");
+        let params: BoardResultParams = serde_json::from_value(res["params"].clone()).unwrap();
+        assert!(params.result.ok);
+        assert_eq!(params.call_id, "board_2");
+        let opts: RunOptions =
+            serde_json::from_value(serde_json::json!({"boardTools": true})).unwrap();
+        assert_eq!(opts.board_tools, Some(true));
     }
 
     #[test]

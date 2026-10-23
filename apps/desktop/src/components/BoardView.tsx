@@ -235,7 +235,7 @@ export function BoardView(props: BoardViewProps) {
                     </div>
                     {inStage.length === 0 && <div className="rounded-lg border border-dashed hairline p-3 text-center text-xs text-slate">vazio</div>}
                     {inStage.map((task) => (
-                      <TaskCard key={task.id} task={task} member={memberOf(stage.agentProfileId ?? task.assignedAgentId)} team={team} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
+                      <TaskCard key={task.id} task={task} member={memberOf(task.assignedAgentId ?? stage.agentProfileId)} team={team} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
                     ))}
                   </div>
                 );
@@ -268,6 +268,7 @@ function TaskCard({ task, member, team, run, selected, onOpen }: { task: Task; m
       <div className="flex items-center gap-2 text-xs text-slate">
         {member ? <Avatar initials={member.profile.avatarSeed} size={20} active={task.status === "running"} /> : <Avatar initials="VC" size={20} manager />}
         <span className="truncate">{member ? member.profile.name : "Você"}</span>
+        {task.createdByAgentId && <span className="truncate text-[11px]" data-testid="created-by">· criada por {team.find((m) => m.profile.id === task.createdByAgentId)?.profile.name ?? "agente"}</span>}
         {run?.costUsd != null && <span className="ml-auto font-mono">{formatUsd(run.costUsd)}</span>}
         {task.dependsOn.length > 0 && <span className="ml-auto" title={`Depende de ${task.dependsOn.join(", ")}`}>↳ {task.dependsOn.length}</span>}
       </div>
@@ -290,7 +291,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
   const [error, setError] = useState<string | null>(null);
   const stage = workflow.stages.find((s) => s.id === task.stageId) ?? null;
   const stageIndex = workflow.stages.findIndex((s) => s.id === task.stageId);
-  const member = team.find((m) => m.profile.id === (stage?.agentProfileId ?? task.assignedAgentId)) ?? null;
+  const member = team.find((m) => m.profile.id === (task.assignedAgentId ?? stage?.agentProfileId)) ?? null;
   const taskRuns = runs.filter((r) => r.taskId === task.id);
   const currentRun = taskRuns.find((r) => r.id === task.lockRunId) ?? null;
   const previous = workflow.stages.slice(0, Math.max(0, stageIndex)).reverse();
@@ -347,6 +348,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
       )}
       <div className="flex flex-col text-[13px]">
         <Row label="Responsável" value={stage?.gate ? "Você (gate humano)" : member ? `${member.profile.name} · ${member.role.title}` : "run avulso"} />
+        {task.createdByAgentId && <Row label="Criada por" value={(() => { const c = team.find((m) => m.profile.id === task.createdByAgentId); return c ? `${c.profile.name} · ${c.role.title} (pelo board)` : "um membro do time"; })()} />}
         {task.dependsOn.length > 0 && <Row label="Depende de" value={task.dependsOn.map((id) => tasks.find((t) => t.id === id)?.title ?? id).join(", ")} />}
         {currentRun && <Row label="Run atual" value={`${currentRun.id.slice(-6)} · ${currentRun.status}`} />}
         {task.worktreePath && <Row label="Worktree" value={task.worktreePath} />}
@@ -535,6 +537,10 @@ function eventLabel(e: TaskEvent, workflow: Workflow): string {
   switch (e.kind) {
     case "created":
       return `criou em ${name(e.toStage)}`;
+    case "created_by_agent":
+      return `criou em ${name(e.toStage)} pelo board`;
+    case "assigned":
+      return "reatribuiu";
     case "run_started":
       return `iniciou run em ${name(e.toStage)}`;
     case "agent_update":

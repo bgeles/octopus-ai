@@ -795,8 +795,26 @@ impl Store {
             .with_context(|| format!("Membro {agent_profile_id} não encontrado"))?;
         let team = self.list_team(&member.project_id)?;
         let mut options = requested.clone();
+        let mut base_prompt = member_prompt(&member);
+        if member.trust.can_assign_tasks {
+            let names: Vec<String> = descendants(&team, agent_profile_id)
+                .into_iter()
+                .map(|m| format!("{} ({})", m.profile.name, m.role.title))
+                .collect();
+            base_prompt.push_str(
+                "\n\nDelegação: você pode criar e atribuir tasks no board para quem reporta a você",
+            );
+            if names.is_empty() {
+                base_prompt.push_str(" (ninguém ainda).");
+            } else {
+                base_prompt.push_str(": ");
+                base_prompt.push_str(&names.join(", "));
+                base_prompt.push('.');
+            }
+            base_prompt.push_str(" Use team_list para ver a carga de cada um e task_create para abrir tasks pequenas, com critérios de aceite verificáveis.");
+        }
         options.system_prompt_append = Some(merge_prompt(
-            member_prompt(&member),
+            base_prompt,
             requested.system_prompt_append.as_deref(),
         ));
         if options.model.is_none() {
@@ -827,6 +845,9 @@ impl Store {
         }
         if options.effort.is_none() {
             options.effort = member.profile.effort;
+        }
+        if member.trust.can_assign_tasks && options.board_tools.is_none() {
+            options.board_tools = Some(true);
         }
         let delegates: BTreeMap<String, AgentDefinition> = team
             .iter()
@@ -861,6 +882,24 @@ impl Store {
         }
         Ok(options)
     }
+}
+
+/// Todos que reportam a `boss`, direta ou indiretamente (ordem do time).
+pub fn descendants<'a>(team: &'a [TeamMember], boss: &str) -> Vec<&'a TeamMember> {
+    let mut out: Vec<&TeamMember> = Vec::new();
+    let mut frontier = vec![boss.to_string()];
+    while let Some(current) = frontier.pop() {
+        for m in team
+            .iter()
+            .filter(|m| m.reports_to_agent_id.as_deref() == Some(current.as_str()))
+        {
+            if !out.iter().any(|o| o.profile.id == m.profile.id) {
+                out.push(m);
+                frontier.push(m.profile.id.clone());
+            }
+        }
+    }
+    out
 }
 
 fn reports_chain_contains(team: &[TeamMember], start: &str, target: &str) -> bool {

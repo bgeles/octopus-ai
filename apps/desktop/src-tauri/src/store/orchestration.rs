@@ -142,13 +142,16 @@ pub struct Task {
     /// Runs de revisão já tentados para a revisão atual.
     #[serde(default)]
     pub review_attempts: u32,
+    /// Membro (agente) que criou a task pelas tools de delegação; `None` = você.
+    #[serde(default)]
+    pub created_by_agent_id: Option<String>,
     /// Commit base no claim, para o diff da entrega.
     #[serde(default)]
     pub base_commit: Option<String>,
 }
 
 impl Task {
-    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit, approver_agent_id, return_count, review_attempts FROM task";
+    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit, approver_agent_id, return_count, review_attempts, created_by_agent_id FROM task";
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let deps: String = row.get(9)?;
@@ -179,6 +182,7 @@ impl Task {
             approver_agent_id: row.get(20)?,
             return_count: row.get::<_, i64>(21)? as u32,
             review_attempts: row.get::<_, i64>(22)? as u32,
+            created_by_agent_id: row.get(23)?,
         })
     }
 }
@@ -400,6 +404,20 @@ impl Store {
         workflow_id: &str,
         input: &TaskInput,
     ) -> Result<Task> {
+        self.create_task_as(project_id, workflow_id, input, "você", None, None)
+    }
+
+    /// Cria a task em nome de alguém: você (`actor` "você") ou um membro pelas tools de delegação
+    /// (`created_by` = agente; o evento sai como `created_by_agent`).
+    pub(crate) fn create_task_as(
+        &self,
+        project_id: &str,
+        workflow_id: &str,
+        input: &TaskInput,
+        actor: &str,
+        created_by: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<Task> {
         if input.title.trim().is_empty() {
             anyhow::bail!("Informe o título da task");
         }
@@ -431,8 +449,8 @@ impl Store {
                 |r| r.get(0),
             )?;
             tx.execute(
-                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at, created_by_agent_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
                 params![
                     id,
                     project_id,
@@ -445,17 +463,22 @@ impl Store {
                     input.assigned_agent_id,
                     serde_json::to_string(&input.depends_on)?,
                     position,
-                    ts
+                    ts,
+                    created_by
                 ],
             )?;
             insert_event(
                 &tx,
                 &id,
-                "created",
+                if created_by.is_some() {
+                    "created_by_agent"
+                } else {
+                    "created"
+                },
                 None,
                 Some(&stage_id),
-                None,
-                "você",
+                run_id,
+                actor,
                 None,
             )?;
             tx.commit()?;
@@ -947,6 +970,12 @@ impl Store {
             stage = stage.name,
             title = task.title
         );
+        if task.created_by_agent_id.is_some() {
+            // Só um rótulo: política, sandbox e permissões não mudam por quem criou a task.
+            text.push_str(
+                "(Task criada por um membro do time pelo board; a descrição abaixo veio dele.)\n",
+            );
+        }
         if !task.description_md.trim().is_empty() {
             text.push('\n');
             text.push_str(task.description_md.trim());
