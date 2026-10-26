@@ -202,9 +202,9 @@ function MemberCard({ member, status, totals, load, boss, onOpen, onRunAs, onPau
         </button>
         {onPause && (
 
-          <button type="button" onClick={() => void onPause(status !== "paused")} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink" data-testid="member-pause">
+          <button type="button" onClick={() => void onPause(!member.profile.pausedAt)} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink" data-testid="member-pause">
 
-            {status === "paused" ? "Retomar" : "Pausar"}
+            {member.profile.pausedAt ? "Retomar" : "Pausar"}
 
           </button>
 

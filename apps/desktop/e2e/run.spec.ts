@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test.describe("Run ao vivo (mock)", () => {
   test("inicia um run, aprova a permissão e vê o resultado", async ({ page }) => {
     await page.goto("/");
+    await page.getByRole("button", { name: "Run ao vivo" }).click();
 
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Run ao vivo");
     await expect(page.getByTestId("run-status")).toHaveText("Pronto");
@@ -34,6 +35,7 @@ test.describe("Run ao vivo (mock)", () => {
 
   test("interrompe um run em andamento", async ({ page }) => {
     await page.goto("/");
+    await page.getByRole("button", { name: "Run ao vivo" }).click();
     await page.getByLabel("Instrução para o agente").fill("qualquer coisa");
     await page.getByRole("button", { name: "Enviar" }).click();
     await page.getByRole("button", { name: "Interromper" }).click();

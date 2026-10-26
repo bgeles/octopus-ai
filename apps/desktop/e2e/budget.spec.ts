@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test.describe("Segurança · Sandbox e Orçamentos (mock)", () => {
   test("troca o perfil de sandbox e um limite estourado bloqueia novos runs", async ({ page }) => {
     await page.goto("/");
+    await page.getByRole("button", { name: "Run ao vivo" }).click();
     await expect(page.getByTestId("sandbox-chip")).toHaveText(/Sandbox Dev padrão/);
 
     await page.getByRole("button", { name: "Segurança" }).click();

@@ -476,6 +476,7 @@ pub fn run() {
             commands_orchestration::list_project_activity,
             commands_team::set_member_paused,
             commands_team::run_member_now,
+            commands_config::app_info,
             commands_security::list_audit_events,
             commands_security::verify_audit,
             commands_security::export_audit,

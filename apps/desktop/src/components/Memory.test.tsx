@@ -17,6 +17,7 @@ describe("Memória", () => {
   it("ao fim de um run, o log de tarefas do mês aparece como página com pedido e resultado", async () => {
     const { user } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     await user.click(within(await screen.findByTestId("approval-card")).getByRole("button", { name: "Permitir uma vez" }));
@@ -37,6 +38,7 @@ describe("Memória", () => {
   it("observações chegam sanitizadas; busca, nova página, histórico e arquivar funcionam", async () => {
     const { user, transport } = setup(memoryEvents.map((n) => n.params as unknown as RunEventNotification));
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.type(screen.getByLabelText("Instrução para o agente"), "crie a V12");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
@@ -96,6 +98,7 @@ describe("Memória", () => {
   it("o run seguinte recebe o brief com as páginas relevantes e o sidebar mostra o que entrou", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await transport.invoke("save_memory_page", { input: { projectId: "proj_demo", kind: "pitfalls", title: "Testes exigem Postgres 16", bodyMd: "Os testes de integração sobem um Postgres 16 local." } });
     await transport.invoke("save_memory_page", { input: { projectId: "proj_demo", kind: "note", title: "Convenções de commit", bodyMd: "Mensagens em pt-BR." } });
     await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");
@@ -111,6 +114,7 @@ describe("Memória", () => {
   it("run de task interrompido gera handoff automático, que o próximo run da task consome", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     const wf = await transport.invoke("create_workflow_from_template", { input: { projectId: "proj_demo", templateId: "research-synthesis" } });
     await transport.invoke("set_setting", { key: "scheduler.paused", value: true });
     const task = await transport.invoke("create_task", { projectId: "proj_demo", workflowId: wf.id, input: { title: "Mapear integrações", descriptionMd: "Listar integrações externas." } });

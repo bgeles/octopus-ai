@@ -11,17 +11,25 @@ function setup(options: Parameters<typeof createMockTransport>[0] = {}) {
   return { transport, user };
 }
 
+/** O app abre no Início; os fluxos de run começam clicando em "Run ao vivo". */
+async function openRunView(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByDisplayValue("chat-core");
+  await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
+}
+
 describe("App (fluxo da Fase 0 com transporte de mock)", () => {
   it("carrega o projeto padrão e mostra o estado vazio", async () => {
-    setup();
+    const { user } = setup();
     expect(await screen.findByDisplayValue("chat-core")).toBeInTheDocument();
+    expect(screen.getByTestId("home-view")).toBeInTheDocument();
+    await openRunView(user);
     expect(screen.getByText(/Nenhum run ainda/)).toBeInTheDocument();
     expect(screen.getByTestId("run-status")).toHaveTextContent("Pronto");
   });
 
   it("a navegação apresenta o time e leva à vista Time", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     const team = screen.getByRole("button", { name: "Time" });
     expect(team).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Agentes" })).not.toBeInTheDocument();
@@ -31,7 +39,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("inicia um run, mostra streaming, pede aprovação e conclui após permitir", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
 
     await user.type(screen.getByLabelText("Instrução para o agente"), "Liste as migrações");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
@@ -61,7 +69,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("negar a permissão registra o erro da ferramenta e o run continua", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.type(screen.getByLabelText("Instrução para o agente"), "x");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
 
@@ -78,7 +86,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("interromper encerra o run e o botão some", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.type(screen.getByLabelText("Instrução para o agente"), "x");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
 
@@ -94,7 +102,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
     window.localStorage.clear();
     delete document.documentElement.dataset.theme;
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
 
     const group = screen.getByRole("radiogroup", { name: "Tema" });
     expect(within(group).getByRole("radio", { name: "Sistema" })).toHaveAttribute("aria-checked", "true");
@@ -110,7 +118,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("lista runs e sessões na visão Sessões e reabre um run com seu histórico", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.type(screen.getByLabelText("Instrução para o agente"), "Primeiro run");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     await screen.findByTestId("approval-card");
@@ -126,7 +134,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("retoma uma sessão a partir da lista e o run nasce com resumeSessionId", async () => {
     const { user, transport } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.click(screen.getByRole("button", { name: /Sessões/ }));
     const row = (await screen.findAllByTestId("session-row"))[0]!;
     await user.click(within(row).getByRole("button", { name: "Retomar" }));
@@ -150,7 +158,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("bifurcar envia forkSession e a sessão nova aparece na lista", async () => {
     const { user, transport } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.click(screen.getByRole("button", { name: /Sessões/ }));
     const row = (await screen.findAllByTestId("session-row"))[0]!;
     await user.click(within(row).getByRole("button", { name: "Bifurcar" }));
@@ -171,7 +179,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("cancelar a retomada volta ao run normal", async () => {
     const { user, transport } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.click(screen.getByRole("button", { name: /Sessões/ }));
     const row = (await screen.findAllByTestId("session-row"))[0]!;
     await user.click(within(row).getByRole("button", { name: "Retomar" }));
@@ -185,7 +193,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("renomeia e tagueia uma sessão pela lista", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.click(screen.getByRole("button", { name: /Sessões/ }));
     const row = (await screen.findAllByTestId("session-row"))[0]!;
 
@@ -215,7 +223,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("'Continuar sessão' no header de um run concluído prepara a retomada", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.type(screen.getByLabelText("Instrução para o agente"), "Primeiro");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     expect(screen.queryByRole("button", { name: "Continuar sessão" })).not.toBeInTheDocument();
@@ -231,6 +239,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
   it("aprovações de Edit/Write mostram diff e a decisão com motivo fica na vista Aprovações", async () => {
     const { user } = setup({ events: editApprovalRunEvents() });
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.type(screen.getByLabelText("Instrução para o agente"), "Troque o findAll");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
 
@@ -263,7 +272,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("a vista Aprovações permite decidir um pedido pendente fora do transcript", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     await screen.findByTestId("approval-card");
@@ -283,6 +292,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
   it("mostra a árvore de subagentes no transcript e na lateral", async () => {
     const { user } = setup({ events: subagentRunEvents() });
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.type(screen.getByLabelText("Instrução para o agente"), "Mapeie as migrações");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     await waitFor(() => expect(screen.getByTestId("run-status")).toHaveTextContent("Concluído"), { timeout: 3000 });
@@ -304,7 +314,7 @@ describe("App (fluxo da Fase 0 com transporte de mock)", () => {
 
   it("o header acumula o custo do projeto ao longo dos runs", async () => {
     const { user } = setup();
-    await screen.findByDisplayValue("chat-core");
+    await openRunView(user);
     expect(screen.queryByTestId("project-cost")).not.toBeInTheDocument();
 
     for (const prompt of ["um", "dois"]) {

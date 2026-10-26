@@ -211,6 +211,9 @@ const MOCK_FILES: Record<string, string> = {
   ].join("\n"),
 };
 
+/** Versão que o mock informa (igual ao package.json/tauri.conf.json). */
+export const MOCK_APP_VERSION = "0.1.0";
+
 export function createMockTransport(options: MockOptions = {}): Transport & { emit: <E extends EventName>(e: E, p: Events[E]) => void; tamperAudit: (seq: number) => void } {
   const tickMs = options.tickMs ?? 120;
   const script = options.events ?? fixtureRunEvents();
@@ -1160,6 +1163,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
 
   const handlers: { [C in CommandName]: (args: Commands[C]["args"]) => Promise<Commands[C]["result"]> } = {
     runtime_info: async () => ({ protocolVersion: 1, runtimeVersion: "mock", sdkVersion: "mock" }),
+    app_info: async () => ({ version: MOCK_APP_VERSION, platform: "macos", arch: "aarch64", build: "mock" }),
     list_projects: async () => [...projects],
     create_project: async ({ input }) => {
       const project: Project = {
@@ -1988,7 +1992,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     },
     check_update: async () => {
       const endpoint = typeof settings["updates.endpoint"] === "string" ? (settings["updates.endpoint"] as string).trim() : "";
-      if (!endpoint) return { configured: false, currentVersion: "0.1.0", available: false, version: null, notes: null, date: null };
+      if (!endpoint) return { configured: false, currentVersion: MOCK_APP_VERSION, available: false, version: null, notes: null, date: null };
       if (endpoint.includes("offline")) throw new Error("Não consegui verificar: servidor indisponível");
       const available = endpoint.includes("nova");
       return { configured: true, currentVersion: "0.1.0", available, version: available ? "0.2.0" : null, notes: available ? "Melhorias no harness e correções." : null, date: available ? "2026-10-20T10:00:00Z" : null };

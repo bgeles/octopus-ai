@@ -22,6 +22,35 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Identidade do app para a tela (rodapé da sidebar e Configurações → Sobre).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub version: String,
+    pub platform: String,
+    pub arch: String,
+    /// `debug` ou `release`.
+    pub build: String,
+}
+
+pub fn app_info_value() -> AppInfo {
+    AppInfo {
+        version: APP_VERSION.to_string(),
+        platform: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        build: if cfg!(debug_assertions) {
+            "debug".to_string()
+        } else {
+            "release".to_string()
+        },
+    }
+}
+
+#[tauri::command]
+pub fn app_info() -> AppInfo {
+    app_info_value()
+}
+
 /// Grava uma cópia automática depois de uma mudança de configuração. Falhas só viram log.
 pub fn auto_backup(state: &AppState) {
     if state.store.backup_dir().is_none() {
@@ -343,5 +372,13 @@ mod tests {
         let item = super::bundled_sidecar_check(Some(dir.path())).unwrap();
         assert!(item.ok);
         assert!(item.detail.contains("binário único"));
+    }
+
+    #[test]
+    fn app_info_reports_cargo_version() {
+        let info = super::app_info_value();
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert!(!info.platform.is_empty() && !info.arch.is_empty());
+        assert!(info.build == "debug" || info.build == "release");
     }
 }

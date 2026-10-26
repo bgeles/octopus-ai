@@ -15,6 +15,7 @@ describe("Menu bar e notificações", () => {
   it("o menu bar navega para Aprovações e abre um run ativo", async () => {
     const { transport, user } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     act(() => transport.emit("app:navigate", "approvals"));
     expect(await screen.findByRole("heading", { name: "Aprovações" })).toBeInTheDocument();
     act(() => transport.emit("app:navigate", "nada"));
@@ -33,6 +34,7 @@ describe("Menu bar e notificações", () => {
   it("preferências de notificação ficam salvas", async () => {
     const { transport, user } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.click(screen.getByRole("button", { name: "Configurações" }));
     const box = await screen.findByTestId("notification-prefs");
     const runs = within(box).getByRole("switch", { name: "Run concluído ou falhou" });
@@ -46,6 +48,7 @@ describe("Menu bar e notificações", () => {
   it("atualizações: sem endereço não procura; com manifesto mostra a versão nova e instala", async () => {
     const { transport, user } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.click(screen.getByRole("button", { name: "Configurações" }));
     const box = await screen.findByTestId("updates");
     await user.click(within(box).getByRole("button", { name: "Verificar agora" }));
@@ -64,13 +67,16 @@ describe("Menu bar e notificações", () => {
     await waitFor(async () => expect((await transport.invoke("list_audit_events", { limit: 10 })).some((e) => e.kind === "app.updated")).toBe(true));
   });
 
-  it("atalhos: ⌘3 abre Aprovações, ⌘N foca o composer e ⌘. interrompe o run", async () => {
+  it("atalhos: ⌘4 abre Aprovações, ⌘N foca o composer e ⌘. interrompe o run", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");
-    await user.keyboard("{Meta>}3{/Meta}");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
+    await user.keyboard("{Meta>}4{/Meta}");
     expect(await screen.findByRole("heading", { name: "Aprovações" })).toBeInTheDocument();
-    await user.keyboard("{Meta>}9{/Meta}");
+    await user.keyboard("{Meta>},{/Meta}");
     expect(await screen.findByTestId("shortcuts")).toHaveTextContent("⌘1 … ⌘9");
+    await user.keyboard("{Meta>}1{/Meta}");
+    expect(await screen.findByTestId("home-view")).toBeInTheDocument();
     await user.keyboard("{Meta>}n{/Meta}");
     await waitFor(() => expect(screen.getByLabelText("Instrução para o agente")).toHaveFocus());
     await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");

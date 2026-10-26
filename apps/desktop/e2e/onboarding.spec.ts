@@ -16,7 +16,7 @@ test.describe("Onboarding (instalação nova, mock)", () => {
     await expect(page.getByTestId("onboarding")).toBeHidden();
     await expect(page.getByLabel("Projeto selecionado")).toHaveValue(/proj_/);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Run ao vivo");
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Início");
   });
 
   test("sem login do Claude Code mostra a orientação", async ({ page }) => {

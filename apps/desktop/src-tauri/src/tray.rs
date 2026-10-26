@@ -113,7 +113,7 @@ pub fn install(app: &AppHandle, store: &Store) -> tauri::Result<()> {
         .on_menu_event(|app, event| {
             let id = event.id.as_ref();
             match id {
-                "open" => show_main(app, None),
+                "open" => show_main(app, Some("home")),
                 "approvals" => show_main(app, Some("approvals")),
                 "board" => show_main(app, Some("board")),
                 "quit" => app.exit(0),

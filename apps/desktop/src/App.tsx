@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { memberState } from "./lib/memberState";
+import { HomeView } from "./components/HomeView";
 import type { EffortLevel, PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
@@ -23,7 +24,7 @@ import { shortcutFor } from "./lib/shortcuts";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { ActivityItem, AgentTotals, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { ActivityItem, AgentTotals, AppInfo, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
 import { projectDefaultsKey } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
@@ -32,7 +33,7 @@ type AppProps = { transport: Transport };
 export function App({ transport }: AppProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [view, setView] = useState<View>("run");
+  const [view, setView] = useState<View>("home");
   const [addOpen, setAddOpen] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
@@ -51,6 +52,9 @@ export function App({ transport }: AppProps) {
   const [checking, setChecking] = useState(false);
   const [snapshots, setSnapshots] = useState<BackupSnapshot[] | null>(null);
   const [runtime, setRuntime] = useState<HelloResult | null>(null);
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  /** Atividade recente do projeto (Início); null = carregando. */
+  const [activity, setActivity] = useState<ActivityItem[] | null>(null);
   const [team, setTeam] = useState<TeamMember[] | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
   const [teamTotals, setTeamTotals] = useState<AgentTotals[]>([]);
@@ -82,8 +86,19 @@ export function App({ transport }: AppProps) {
   const currentRunIdRef = useRef<string | null>(null);
   currentRunIdRef.current = currentRun?.id ?? null;
 
+  const refreshActivity = useCallback(
+    async (projectId: string) => {
+      try {
+        setActivity(await transport.invoke("list_project_activity", { projectId, limit: 10 }));
+      } catch {
+        setActivity([]);
+      }
+    },
+    [transport],
+  );
   const refreshRuns = useCallback(
     async (projectId: string) => {
+      void refreshActivity(projectId);
       const [list, projectTotals, agentTotals] = await Promise.all([
         transport.invoke("list_runs", { projectId, limit: 20 }),
         transport.invoke("get_project_totals", { projectId }),
@@ -233,7 +248,7 @@ export function App({ transport }: AppProps) {
     const keep = (fn: () => void) => (disposed ? fn() : unlisteners.push(fn));
     transport
       .listen("app:navigate", (target) => {
-        if (["run", "sessions", "approvals", "agents", "board", "memory", "harness", "security", "settings"].includes(target)) setView(target as View);
+        if (["home", "run", "sessions", "approvals", "agents", "board", "memory", "harness", "security", "settings"].includes(target)) setView(target as View);
       })
       .then(keep)
       .catch(() => {});
@@ -474,7 +489,7 @@ export function App({ transport }: AppProps) {
   useEffect(() => {
     if (view === "sessions" && sessions === null) void loadSessions();
     // Board e Time recarregam ao entrar: o scheduler e outras janelas podem ter mudado o estado.
-    if ((view === "board" || view === "agents") && selectedProject) {
+    if ((view === "board" || view === "agents" || view === "home") && selectedProject) {
       void refreshBoard(selectedProject.id);
       void refreshTeam(selectedProject.id);
       transport
@@ -606,12 +621,19 @@ export function App({ transport }: AppProps) {
     refreshSnapshots();
   };
 
+  useEffect(() => {
+    transport
+      .invoke("app_info", {})
+      .then(setAppInfo)
+      .catch(() => setAppInfo(null));
+  }, [transport]);
+
   const finishOnboarding = async (result: OnboardingResult) => {
     if (result.project) await createProject(result.project);
     await setSetting("defaultAuthMode", result.defaultAuthMode);
     await setSetting("theme", result.theme);
     await setSetting("onboarding.completedAt", new Date().toISOString());
-    setView("run");
+    setView("home");
   };
 
   const memberStatus = (agentProfileId: string): MemberStatus => {
@@ -814,12 +836,52 @@ export function App({ transport }: AppProps) {
       onAddProject={() => setAddOpen(true)}
       view={view}
       onChangeView={setView}
+      team={team ?? []}
+      onOpenRun={(run) => void openRun(run)}
+      appVersion={appInfo?.version ?? null}
       activeRuns={activeRuns}
       pendingApprovals={pendingApprovals}
       pendingGates={pendingGates}
       theme={theme}
       onThemeChange={changeTheme}
     >
+      {view === "home" && (
+        <HomeView
+          project={selectedProject}
+          team={team}
+          totals={teamTotals}
+          runs={runs}
+          tasks={tasks}
+          workflows={workflows ?? []}
+          approvals={approvals}
+          budget={budget}
+          activity={activity}
+          statusOf={memberStatus}
+          schedulerPaused={schedulerPaused}
+          onOpenMember={(member) => {
+            setOpenMemberId(member.profile.id);
+            setView("agents");
+          }}
+          onRunAs={runAsMember}
+          onPause={pauseMember}
+          onRunNow={runMemberNow}
+          onOpenTask={openTask}
+          onOpenRun={(id) => void openRunById(id)}
+          onGo={setView}
+          onAddMember={() => {
+            setView("agents");
+            setMemberDialog({ open: true, member: null });
+          }}
+          onRefresh={() => {
+            if (selectedProject) {
+              void refreshBoard(selectedProject.id);
+              void refreshRuns(selectedProject.id);
+              void refreshApprovals(selectedProject.id);
+              void refreshTeam(selectedProject.id);
+            }
+          }}
+        />
+      )}
       {view === "run" && (
         <>
           <RunHeader
@@ -833,6 +895,9 @@ export function App({ transport }: AppProps) {
             sandboxName={sandboxProfiles.find((p) => p.id === (selectedProject?.sandboxProfileId ?? "sandbox_dev"))?.name ?? null}
             budget={budget}
             liveCostUsd={liveCost && liveCost.runId === currentRun?.id ? liveCost.usd : null}
+            member={team?.find((m) => m.profile.id === currentRun?.agentProfileId) ?? null}
+            task={tasks.find((t) => t.id === currentRun?.taskId) ?? null}
+            onOpenTask={(task) => openTask(task.id)}
             onContinue={() => {
               const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
               if (sessionId) beginResume({ sessionId, title: currentRun?.prompt ?? null }, false);
@@ -882,6 +947,7 @@ export function App({ transport }: AppProps) {
       {view === "sessions" && (
         <SessionsView
           runs={runs}
+          team={team ?? []}
           sessions={sessions}
           busySessionId={busySessionId}
           onOpenRun={(run) => void openRun(run)}
@@ -1095,6 +1161,7 @@ export function App({ transport }: AppProps) {
           }}
           onRedoOnboarding={() => setSetting("onboarding.completedAt", null)}
           runtimeLabel={runtime ? `agent-runtime ${runtime.runtimeVersion} · SDK ${runtime.sdkVersion} · protocolo ${runtime.protocolVersion}` : "…"}
+          appInfo={appInfo}
         />
       )}
 
