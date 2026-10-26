@@ -2,10 +2,11 @@ import { PackageCheck, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { eventLabelFor } from "../lib/activity";
 import { copyText, renderMarkdown } from "../lib/markdown";
-import type { Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
+import type { Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowReport, WorkflowTemplate } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { DeliveriesList } from "./DeliveriesList";
 import { DiffView } from "./DiffView";
+import { WorkflowReportCard } from "./WorkflowReportCard";
 import { formatUsd } from "./RunSidebar";
 import { formatRelative } from "./SessionsView";
 
@@ -23,6 +24,10 @@ type BoardViewProps = {
   onOpenTask: (task: Task) => void;
   /** Diff do trabalho da task (worktree ou projeto) contra o commit base. */
   onLoadDiff: (task: Task) => Promise<TaskDiff>;
+  /** Relatório final do workflow selecionado e suas ações. */
+  report?: WorkflowReport | null;
+  onGenerateReport?: (workflow: Workflow) => Promise<void>;
+  onExportReport?: (report: WorkflowReport, destination: string | null) => Promise<string>;
   /** Quem aprova num estágio gate: você ou a política de confiança do responsável. */
   onSetGateApprover: (workflow: Workflow, stage: Stage, approver: StageApprover) => Promise<void>;
   schedulerPaused: boolean;
@@ -202,6 +207,9 @@ export function BoardView(props: BoardViewProps) {
                   <h2 className="m-0 font-display text-sm font-semibold">Entregas</h2>
                   <span className="text-xs text-slate">tasks concluídas, mais recentes primeiro · resultado deixado pelo agente</span>
                 </div>
+                {props.onGenerateReport && props.onExportReport && (
+                  <WorkflowReportCard report={props.report ?? null} workflow={workflow} team={team} tasksDone={deliveries.length} tasksTotal={wfTasks.length} onGenerate={() => props.onGenerateReport!(workflow)} onExport={props.onExportReport} onOpenTask={(id) => { const t = tasks.find((x) => x.id === id); if (t) onOpenTask(t); }} />
+                )}
                 <DeliveriesList tasks={deliveries} team={team} runs={runs} selectedTaskId={selectedTask?.id ?? null} onOpenTask={onOpenTask} />
               </section>
             )}

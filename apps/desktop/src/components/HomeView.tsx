@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { MEMBER_STATUS_LABELS, type MemberStatus } from "../lib/memberState";
-import type { ActivityItem, AgentTotals, Approval, BudgetStatus, Project, Run, Task, TeamMember, Workflow } from "../lib/types";
+import type { ActivityItem, AgentTotals, Approval, BudgetStatus, Project, Run, Task, TeamMember, Workflow, WorkflowReport } from "../lib/types";
+import { WorkflowReportCard } from "./WorkflowReportCard";
 import { ActivityFeed } from "./ActivityFeed";
 import { Avatar } from "./Avatar";
 import { DeliveriesList } from "./DeliveriesList";
@@ -17,6 +18,9 @@ type HomeViewProps = {
   approvals: Approval[] | null;
   budget: BudgetStatus | null;
   activity: ActivityItem[] | null;
+  reports?: WorkflowReport[];
+  onGenerateReport?: (workflow: Workflow) => Promise<void>;
+  onExportReport?: (report: WorkflowReport, destination: string | null) => Promise<string>;
   statusOf: (agentProfileId: string) => MemberStatus;
   schedulerPaused: boolean;
   onOpenMember: (member: TeamMember) => void;
@@ -31,7 +35,7 @@ type HomeViewProps = {
 };
 
 /** Início: o time atuando agora, o que espera você, gasto, atividade e entregas — como o Dashboard do Paperclip. */
-export function HomeView({ project, team, totals, runs, tasks, workflows, approvals, budget, activity, statusOf, schedulerPaused, onOpenMember, onRunAs, onPause, onRunNow, onOpenTask, onOpenRun, onGo, onAddMember, onRefresh }: HomeViewProps) {
+export function HomeView({ project, team, totals, runs, tasks, workflows, approvals, budget, activity, reports = [], onGenerateReport, onExportReport, statusOf, schedulerPaused, onOpenMember, onRunAs, onPause, onRunNow, onOpenTask, onOpenRun, onGo, onAddMember, onRefresh }: HomeViewProps) {
   const members = team ?? [];
   const states = new Map(members.map((m) => [m.profile.id, statusOf(m.profile.id)] as const));
   const activeMembers = members.filter((m) => states.get(m.profile.id) === "active").length;
@@ -156,6 +160,18 @@ export function HomeView({ project, team, totals, runs, tasks, workflows, approv
           <ActivityFeed items={activity} team={members} workflows={workflows} onOpenTask={onOpenTask} onOpenRun={onOpenRun} emptyText="Nada aconteceu ainda. Dê uma tarefa a um membro ou crie uma task no Board." />
         </section>
       </div>
+
+      {hasWorkflow && onGenerateReport && onExportReport && (
+        <section aria-label="Resultado final" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="home-reports">
+          <div className="flex flex-wrap items-baseline gap-3">
+            <h2 className="m-0 font-display text-sm font-semibold">Resultado final</h2>
+            <span className="text-xs text-slate">relatório consolidado de cada workflow quando a última task conclui</span>
+          </div>
+          {workflows.map((wf) => (
+            <WorkflowReportCard key={wf.id} report={reports.find((r) => r.workflowId === wf.id) ?? null} workflow={wf} team={members} tasksDone={tasks.filter((t) => t.workflowId === wf.id && t.status === "done").length} tasksTotal={tasks.filter((t) => t.workflowId === wf.id).length} onGenerate={() => onGenerateReport(wf)} onExport={onExportReport} onOpenTask={onOpenTask} compact />
+          ))}
+        </section>
+      )}
 
       <section aria-label="Entregas recentes" className="flex flex-col gap-2 rounded-xl border hairline bg-surface p-5" data-testid="home-deliveries">
         <div className="flex flex-wrap items-baseline gap-3">

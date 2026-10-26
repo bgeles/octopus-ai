@@ -1521,7 +1521,7 @@ pub(crate) fn agent_notes_in(tx: &Transaction<'_>, run_id: &str) -> Result<Vec<S
     Ok(notes)
 }
 
-fn first_chars(s: &str, n: usize) -> String {
+pub(crate) fn first_chars(s: &str, n: usize) -> String {
     let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() <= n {
         one_line

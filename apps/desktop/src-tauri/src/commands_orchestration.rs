@@ -195,6 +195,7 @@ pub async fn approve_task(
         .store
         .approve_task(&task_id, note.as_deref())
         .map_err(err)?;
+    crate::maybe_summarize_reports(&state.store, &state.sidecar, &task.project_id).await;
     if let Some(run_id) = before.and_then(|t| t.lock_run_id) {
         if let Ok(result) = state.sidecar.interrupt_run(&run_id).await {
             if result.interrupted {
@@ -253,6 +254,68 @@ pub fn list_project_activity(
             limit.unwrap_or(20).min(200),
         )
         .map_err(err)
+}
+
+/// Relatórios finais (última geração por workflow) do projeto.
+#[tauri::command]
+pub fn list_workflow_reports(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<crate::store::reports::WorkflowReport>> {
+    state.store.list_workflow_reports(&project_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn get_workflow_report(
+    state: State<'_, AppState>,
+    workflow_id: String,
+) -> CmdResult<Option<crate::store::reports::WorkflowReport>> {
+    state.store.get_workflow_report(&workflow_id).map_err(err)
+}
+
+/// "Gerar relatório": nova geração manual; se o resumo com Haiku estiver ligado, o run começa já.
+#[tauri::command]
+pub async fn generate_workflow_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workflow_id: String,
+) -> CmdResult<crate::store::reports::WorkflowReport> {
+    let report = state
+        .store
+        .generate_workflow_report(&workflow_id)
+        .map_err(err)?;
+    crate::maybe_summarize_reports(&state.store, &state.sidecar, &report.project_id).await;
+    let _ = app.emit(BOARD_CHANGED, &TickReport::default());
+    Ok(report)
+}
+
+/// Exporta o markdown do relatório (resumo + corpo) para um arquivo, ou devolve o texto.
+#[tauri::command]
+pub fn export_workflow_report(
+    state: State<'_, AppState>,
+    report_id: String,
+    destination: Option<String>,
+) -> CmdResult<String> {
+    let report = state
+        .store
+        .get_report(&report_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Relatório {report_id} não encontrado"))?;
+    let markdown = report.markdown();
+    match destination {
+        Some(path) if !path.trim().is_empty() => {
+            std::fs::write(&path, &markdown).map_err(|e| format!("gravando {path}: {e}"))?;
+            audit(
+                &state,
+                "você",
+                "board.report.exported",
+                Some(&report.project_id),
+                serde_json::json!({"reportId": report_id, "path": path}),
+            );
+            Ok(path)
+        }
+        _ => Ok(markdown),
+    }
 }
 
 /// Diff da entrega da task (worktree contra o commit base; sem worktree, a pasta do projeto).

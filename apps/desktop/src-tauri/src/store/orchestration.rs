@@ -569,6 +569,10 @@ impl Store {
                 "UPDATE task SET stage_id = ?2, status = ?3, last_note = COALESCE(?4, last_note), updated_at = ?5 WHERE id = ?1",
                 params![id, target_stage, status.as_str(), note, now()],
             )?;
+            // Só quando a task acabou de virar `done` (mover uma concluída de novo não gera relatório).
+            if status == TaskStatus::Done && task.status != TaskStatus::Done {
+                Store::maybe_complete_workflow_in(&tx, &task.workflow_id, None)?;
+            }
             insert_event(
                 &tx,
                 id,
@@ -1423,6 +1427,10 @@ fn advance_task(
         "UPDATE task SET stage_id = ?2, status = ?3, lock_run_id = NULL, approver_agent_id = NULL, last_note = COALESCE(?4, last_note), updated_at = ?5 WHERE id = ?1",
         params![task.id, stage_id, status, note, now()],
     )?;
+    if status == "done" {
+        // Última task do workflow concluída → relatório final (só SQL, dentro da tx).
+        Store::maybe_complete_workflow_in(tx, &workflow.id, None)?;
+    }
     let kind = if human {
         "approved"
     } else if status == "done" {

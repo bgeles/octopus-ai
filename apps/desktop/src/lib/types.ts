@@ -50,7 +50,7 @@ export type Run = {
   stopCause?: "budget" | null;
 };
 
-export type RunKind = "agent" | "consolidation" | "review";
+export type RunKind = "agent" | "consolidation" | "review" | "report";
 export type ConsolidationMode = "raw" | "haiku";
 export const CONSOLIDATION_SETTING = "memory.consolidation";
 export const CONSOLIDATION_MODEL = "claude-haiku-5-5";
@@ -174,6 +174,31 @@ export type ActivityItem = {
   fromStage: string | null;
   toStage: string | null;
   payload: unknown;
+};
+
+/** Relatório final de um workflow: entregas consolidadas, custo, membros e resumo executivo opcional. */
+export type ReportTask = { taskId: string; title: string; stageName: string; memberName: string | null; agentProfileId: string | null; costUsd: number; filesChanged: string[]; resultRunId: string | null; done: boolean; status: string };
+export type ReportMember = { agentProfileId: string; name: string; roleTitle: string; runs: number; costUsd: number };
+export type WorkflowReport = {
+  id: string;
+  projectId: string;
+  workflowId: string;
+  generation: number;
+  trigger: "auto" | "manual";
+  title: string;
+  bodyMd: string;
+  summaryMd: string | null;
+  summaryStatus: "none" | "pending" | "running" | "done" | "failed";
+  summaryRunId: string | null;
+  sourceRunId: string | null;
+  costUsd: number;
+  tasksTotal: number;
+  tasksDone: number;
+  members: ReportMember[];
+  tasks: ReportTask[];
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
 };
 
 /** Identidade do app (rodapé e Sobre). */
@@ -507,6 +532,10 @@ export type Commands = {
   set_member_paused: { args: { agentProfileId: string; paused: boolean }; result: TeamMember };
   run_member_now: { args: { agentProfileId: string }; result: TickReport };
   app_info: { args: Record<string, never>; result: AppInfo };
+  list_workflow_reports: { args: { projectId: string }; result: WorkflowReport[] };
+  get_workflow_report: { args: { workflowId: string }; result: WorkflowReport | null };
+  generate_workflow_report: { args: { workflowId: string }; result: WorkflowReport };
+  export_workflow_report: { args: { reportId: string; destination?: string | null }; result: string };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };

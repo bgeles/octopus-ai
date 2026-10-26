@@ -11,7 +11,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { ActivityItem, AgentProfile, AppSettings, Autonomy, TrustPolicy, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { ActivityItem, AgentProfile, AppSettings, Autonomy, TrustPolicy, WorkflowReport, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -284,6 +284,73 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   };
   const requestedByRun = new Map<string, string>();
   const resultByRun = new Map<string, string>();
+  const reports: WorkflowReport[] = [];
+  let reportCounter = 0;
+  const reportSummaryEnabled = () => (typeof settings["board.reportSummary"] === "string" ? settings["board.reportSummary"] === "haiku" : settings["memory.consolidation"] === "haiku");
+  /** Como `build_report_in` no core: só dados do mock, sem IA; `auto` só quando não resta task aberta. */
+  const buildReportMock = (workflow: Workflow, trigger: "auto" | "manual"): WorkflowReport => {
+    const wfTasks = tasks.filter((t) => t.workflowId === workflow.id);
+    const runsOf = (taskId: string) => [...runs.values()].filter((r) => r.taskId === taskId && (r.kind === "agent" || r.kind === "review"));
+    const members: WorkflowReport["members"] = [];
+    const reportTasks: WorkflowReport["tasks"] = wfTasks.map((t) => {
+      const rs = runsOf(t.id);
+      const cost = rs.reduce((sum, r) => sum + (r.costUsd ?? r.estCostUsd ?? 0), 0);
+      for (const r of rs) {
+        if (!r.agentProfileId) continue;
+        const m = findMember(r.agentProfileId);
+        const found = members.find((x) => x.agentProfileId === r.agentProfileId);
+        if (found) (found.runs += 1), (found.costUsd += r.costUsd ?? 0);
+        else members.push({ agentProfileId: r.agentProfileId, name: m?.profile.name ?? "membro removido", roleTitle: m?.role.title ?? "", runs: 1, costUsd: r.costUsd ?? 0 });
+      }
+      const memberId = [...rs].reverse().find((r) => r.agentProfileId)?.agentProfileId ?? t.assignedAgentId ?? null;
+      return { taskId: t.id, title: t.title, stageName: workflow.stages.find((s) => s.id === t.stageId)?.name ?? t.stageId, memberName: memberId ? (findMember(memberId)?.profile.name ?? null) : null, agentProfileId: memberId, costUsd: cost, filesChanged: [...t.filesChanged], resultRunId: t.resultRunId, done: t.status === "done", status: t.status };
+    });
+    const done = reportTasks.filter((t) => t.done);
+    const title = `Relatório — ${workflow.name}`;
+    const body = [
+      `# ${title}`,
+      "",
+      `Tasks: ${done.length} de ${reportTasks.length} concluídas · Custo: US$ ${reportTasks.reduce((s, t) => s + t.costUsd, 0).toFixed(2)}${members.length ? ` · Membros: ${members.map((m) => (m.roleTitle ? `${m.name} (${m.roleTitle})` : m.name)).join(", ")}` : ""}`,
+      "",
+      "## Entregas",
+      ...done.flatMap((t) => {
+        const task = wfTasks.find((x) => x.id === t.taskId)!;
+        return ["", `### ${t.taskId.replace(/^task_/, "T-")} · ${t.title} — ${t.memberName ?? "run avulso"} · US$ ${t.costUsd.toFixed(2)} · ${t.filesChanged.length} ${t.filesChanged.length === 1 ? "arquivo" : "arquivos"}`, task.resultMd?.trim() || "_Sem resumo da entrega._", ...(t.filesChanged.length ? [`Arquivos: ${t.filesChanged.join(", ")}`, "Diff: abra a task no Board (Ver diff)."] : [])];
+      }),
+      ...(done.length < reportTasks.length ? ["", "## Pendentes", ...reportTasks.filter((t) => !t.done).map((t) => `- ${t.taskId.replace(/^task_/, "T-")} · ${t.title} — ${t.stageName} (${t.status})`)] : []),
+    ].join("\n");
+    const generation = reports.filter((r) => r.workflowId === workflow.id).length + 1;
+    const doneTasks = wfTasks.filter((t) => t.status === "done");
+    const report: WorkflowReport = { id: `report_${++reportCounter}`, projectId: workflow.projectId, workflowId: workflow.id, generation, trigger, title, bodyMd: body, summaryMd: null, summaryStatus: reportSummaryEnabled() ? "pending" : "none", summaryRunId: null, sourceRunId: null, costUsd: reportTasks.reduce((s, t) => s + t.costUsd, 0), tasksTotal: reportTasks.length, tasksDone: done.length, members, tasks: reportTasks, startedAt: wfTasks.map((t) => t.createdAt).sort()[0] ?? null, finishedAt: doneTasks.map((t) => t.updatedAt).sort().at(-1) ?? null, createdAt: new Date().toISOString() };
+    reports.push(report);
+    if (report.summaryStatus === "pending") scheduleReportSummary(report);
+    return report;
+  };
+  const maybeCompleteWorkflow = (workflow: Workflow) => {
+    const wfTasks = tasks.filter((t) => t.workflowId === workflow.id);
+    if (wfTasks.length === 0 || wfTasks.some((t) => t.status !== "done")) return;
+    const lastDone = wfTasks.map((t) => t.updatedAt).sort().at(-1)!;
+    const covered = reports.filter((r) => r.workflowId === workflow.id && r.trigger === "auto").at(-1)?.finishedAt ?? null;
+    if (covered && covered >= lastDone) return;
+    buildReportMock(workflow, "auto");
+  };
+  /** Run `kind: report` do Haiku: sem tools, o texto final vira o resumo executivo. */
+  const scheduleReportSummary = (report: WorkflowReport) => {
+    report.summaryStatus = "running";
+    const run: Run = { id: `run_mock_${++runCounter}`, projectId: report.projectId, prompt: `Resuma o relatório ${report.title}`, options: { model: "claude-haiku-5-5", permissionMode: "dontAsk", maxTurns: 2, maxBudgetUsd: 0.1, allowedTools: [] }, agentProfileId: null, kind: "report", taskId: null, status: "running", claudeSessionId: null, model: "claude-haiku-5-5", startedAt: new Date().toISOString(), endedAt: null, costUsd: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, numTurns: null, stopReason: null, resultText: null, errorMessage: null };
+    report.summaryRunId = run.id;
+    runs.set(run.id, run);
+    events.set(run.id, []);
+    const at = run.startedAt;
+    scriptByRun.set(run.id, [
+      { runId: run.id, seq: 0, at, event: { type: "session_init", sessionId: `sess_${run.id}`, model: "claude-haiku-5-5", tools: [], mcpServers: [], permissionMode: "dontAsk", skills: [] } },
+      { runId: run.id, seq: 1, at, event: { type: "assistant_text", messageId: null, text: "**Entregas no prazo.** As tasks do workflow foram concluídas com os critérios atendidos; nenhuma pendência aberta. Próximo passo: revisar os arquivos tocados e seguir para o próximo objetivo.", parentToolUseId: null } },
+      { runId: run.id, seq: 2, at, event: { type: "result", sessionId: `sess_${run.id}`, subtype: "success", isError: false, costUsd: 0.01, durationMs: 800, numTurns: 1, usage: null, stopReason: "end_turn", resultText: "**Entregas no prazo.** As tasks do workflow foram concluídas com os critérios atendidos; nenhuma pendência aberta. Próximo passo: revisar os arquivos tocados e seguir para o próximo objetivo." } },
+    ]);
+    audit("sistema", "board.report.summary.started", report.projectId, { runId: run.id, reportId: report.id, model: "claude-haiku-5-5" });
+    schedule(run.id, 0);
+  };
+
   /** Como `resolve_approver` no core: supervisionado → você; senão sobe até um chefe que aprova; no topo, autônomo → auto. */
   const resolveApproverMock = (assignee: string | null): { kind: "human" } | { kind: "agent"; id: string } | { kind: "auto" } => {
     const member = assignee ? findMember(assignee) : undefined;
@@ -335,6 +402,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     if (note) task.lastNote = note;
     task.updatedAt = new Date().toISOString();
     pushTaskEvent(task.id, human ? "approved" : task.status === "done" ? "completed" : "advanced", from, task.stageId, null, actor, note);
+    if (task.status === "done") maybeCompleteWorkflow(workflow);
     if (next?.gate) enterGate(task, workflow, index + 1, worker, null);
   };
   const maxAgentReturns = () => (typeof settings["board.maxAgentReturns"] === "number" ? (settings["board.maxAgentReturns"] as number) : 2);
@@ -943,6 +1011,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
     } else if (ev.type === "result") {
       if (run.status === "interrupted") return;
+      if (run.kind === "report") {
+        const report = reports.find((r) => r.summaryRunId === run.id);
+        if (report) {
+          if (!ev.isError && ev.resultText?.trim()) (report.summaryMd = ev.resultText.trim()), (report.summaryStatus = "done");
+          else report.summaryStatus = "failed";
+          emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+        }
+      }
       run.status = ev.isError ? "failed" : "completed";
       run.costUsd = ev.costUsd;
       run.numTurns = ev.numTurns;
@@ -1551,6 +1627,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (input.note) task.lastNote = input.note;
       task.updatedAt = new Date().toISOString();
       pushTaskEvent(task.id, "moved", from, task.stageId, null, "você", input.note ?? null);
+      if (task.status === "done") maybeCompleteWorkflow(workflows.find((w) => w.id === task.workflowId)!);
       return { ...task };
     },
     approve_task: async ({ taskId, note }) => {
@@ -1610,6 +1687,30 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const report = await tickMock({ onlyAgent: agentProfileId, force: true });
       audit("você", "team.member.run_now", existing.projectId, { agentProfileId, name: existing.profile.name, started: report.started.length });
       return report;
+    },
+    list_workflow_reports: async ({ projectId }) => {
+      const latest = new Map<string, WorkflowReport>();
+      for (const r of reports) if (r.projectId === projectId) latest.set(r.workflowId, r);
+      return [...latest.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((r) => ({ ...r }));
+    },
+    get_workflow_report: async ({ workflowId }) => reports.filter((r) => r.workflowId === workflowId).at(-1) ?? null,
+    generate_workflow_report: async ({ workflowId }) => {
+      const wf = workflows.find((w) => w.id === workflowId);
+      if (!wf) throw new Error(`Workflow ${workflowId} não encontrado`);
+      const report = buildReportMock(wf, "manual");
+      audit("você", "board.report.generated", wf.projectId, { workflowId, reportId: report.id, generation: report.generation });
+      emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+      return { ...report };
+    },
+    export_workflow_report: async ({ reportId, destination }) => {
+      const report = reports.find((r) => r.id === reportId);
+      if (!report) throw new Error(`Relatório ${reportId} não encontrado`);
+      const md = report.summaryMd ? `${report.bodyMd}\n\n## Resumo executivo\n\n${report.summaryMd}` : report.bodyMd;
+      if (destination) {
+        audit("você", "board.report.exported", report.projectId, { reportId, path: destination });
+        return destination;
+      }
+      return md;
     },
     list_project_activity: async ({ projectId, agentProfileId, limit }) => {
       // Como o SQL do core: eventos de task (sem agent_update), runs avulsos (início/fim) e decisões suas.

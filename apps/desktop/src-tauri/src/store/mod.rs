@@ -17,6 +17,7 @@ pub mod orchestration;
 pub mod policy;
 pub mod preview;
 pub mod pricing;
+pub mod reports;
 pub mod security;
 pub mod skills;
 pub mod task_diff;
@@ -96,6 +97,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0022_member_state",
         include_str!("migrations/0022_member_state.sql"),
+    ),
+    (
+        "0023_workflow_report",
+        include_str!("migrations/0023_workflow_report.sql"),
     ),
 ];
 
@@ -571,16 +576,6 @@ impl Store {
                 } else {
                     RunStatus::Completed
                 };
-                close_pending_approvals(&tx, run_id)?;
-                Self::finish_task_run(&tx, run_id, !*is_error, result_text.as_deref())?;
-                let project_id = run_project_id(&tx, run_id)?;
-                Self::audit_in(
-                    &tx,
-                    "sistema",
-                    "run.finished",
-                    project_id.as_deref(),
-                    serde_json::json!({"runId": run_id, "status": status.as_str(), "costUsd": cost_usd, "numTurns": num_turns}),
-                )?;
                 tx.execute(
                     "UPDATE run SET status = CASE WHEN status = 'interrupted' THEN 'interrupted' ELSE ?2 END, claude_session_id = COALESCE(NULLIF(?3, ''), claude_session_id),
                         cost_usd = ?4, num_turns = ?5, stop_reason = ?6, result_text = ?7, ended_at = ?8,
@@ -600,6 +595,18 @@ impl Store {
                         usage.as_ref().map(|u| u.output_tokens as i64),
                         usage.as_ref().map(|u| u.cache_read_tokens as i64),
                     ],
+                )?;
+                close_pending_approvals(&tx, run_id)?;
+                // Run de resumo do relatório: o texto final vira o resumo executivo.
+                Self::finish_report_run_in(&tx, run_id, !*is_error, result_text.as_deref())?;
+                Self::finish_task_run(&tx, run_id, !*is_error, result_text.as_deref())?;
+                let project_id = run_project_id(&tx, run_id)?;
+                Self::audit_in(
+                    &tx,
+                    "sistema",
+                    "run.finished",
+                    project_id.as_deref(),
+                    serde_json::json!({"runId": run_id, "status": status.as_str(), "costUsd": cost_usd, "numTurns": num_turns}),
                 )?;
             }
             RunEvent::Observation {
@@ -884,11 +891,12 @@ mod tests {
                 "0020_trust".to_string(),
                 "0021_delegation".to_string(),
                 "0022_member_state".to_string(),
+                "0023_workflow_report".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 22);
+        assert_eq!(s.applied_migrations().unwrap().len(), 23);
     }
 
     #[test]

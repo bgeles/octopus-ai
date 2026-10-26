@@ -29,5 +29,7 @@ test.describe("Board (mock)", () => {
     await expect(page.getByTestId("task-diff")).toContainText("V12__add_triage_status.sql");
     await page.getByRole("radio", { name: /Entregas · 1/ }).click();
     await expect(page.getByTestId("delivery-row")).toContainText("Mapear integrações");
+    await expect(page.getByTestId("workflow-report")).toContainText("Relatório final");
+    await expect(page.getByTestId("report-progress")).toContainText("1 de 1");
   });
 });

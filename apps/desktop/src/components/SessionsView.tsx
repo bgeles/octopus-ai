@@ -62,6 +62,7 @@ export function SessionsView({ runs, team = [], sessions, busySessionId, onOpenR
                   <span className="rounded-full border hairline-strong px-2 text-[11px] text-slate">{run.options.forkSession ? "bifurcado" : "retomado"}</span>
                 )}
                 {run.kind === "consolidation" && <span className="rounded-full border hairline-strong px-2 text-[11px] text-slate">consolidação · Haiku</span>}
+                {run.kind === "report" && <span className="rounded-full border hairline-strong px-2 text-[11px] text-slate">relatório · Haiku</span>}
                 <span className="text-xs text-slate">{labelFor(run.status)}</span>
                 <span className="font-mono text-xs text-slate">{run.costUsd === null ? "—" : `US$ ${run.costUsd.toFixed(2).replace(".", ",")}`}</span>
               </button>
