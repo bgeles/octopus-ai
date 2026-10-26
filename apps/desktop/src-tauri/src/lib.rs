@@ -530,6 +530,7 @@ pub fn run() {
             commands_orchestration::get_workflow_report,
             commands_orchestration::generate_workflow_report,
             commands_orchestration::export_workflow_report,
+            commands_orchestration::add_task_comment,
             commands_security::list_audit_events,
             commands_security::verify_audit,
             commands_security::export_audit,

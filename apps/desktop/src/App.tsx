@@ -1045,6 +1045,10 @@ export function App({ transport }: AppProps) {
           onNewTask={() => setTaskDialogOpen(true)}
           onOpenTask={(task) => setSelectedTaskId(task.id)}
           onLoadDiff={(task) => transport.invoke("task_diff", { taskId: task.id })}
+          onComment={async (task, body) => {
+            await transport.invoke("add_task_comment", { taskId: task.id, body });
+            setTaskEvents(await transport.invoke("list_task_events", { taskId: task.id }));
+          }}
           report={reports.find((r) => r.workflowId === (selectedWorkflow?.id ?? "")) ?? null}
           onGenerateReport={generateReport}
           onExportReport={exportReport}

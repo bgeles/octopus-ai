@@ -529,6 +529,7 @@ export type Commands = {
   list_task_events: { args: { taskId: string }; result: TaskEvent[] };
   task_diff: { args: { taskId: string }; result: TaskDiff };
   list_project_activity: { args: { projectId: string; agentProfileId?: string | null; limit?: number }; result: ActivityItem[] };
+  add_task_comment: { args: { taskId: string; body: string }; result: TaskEvent };
   set_member_paused: { args: { agentProfileId: string; paused: boolean }; result: TeamMember };
   run_member_now: { args: { agentProfileId: string }; result: TickReport };
   app_info: { args: Record<string, never>; result: AppInfo };
