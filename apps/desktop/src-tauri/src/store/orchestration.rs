@@ -8,9 +8,18 @@ use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashSet;
+
 use super::team::{resolve_approver, Approver};
 use super::{new_id, now, Store};
 use crate::protocol::{TaskContext, TaskMode, TaskStatusUpdate};
+
+/// Filtro do scheduler: só um membro e/ou ignorando pausas (usado por "Rodar agora").
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskFilter {
+    pub only_agent: Option<String>,
+    pub ignore_pause: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -645,8 +654,32 @@ impl Store {
 
     /// Tasks `ready` cujas dependências estão `done`, respeitando o paralelismo do workflow.
     pub fn runnable_tasks(&self, project_id: &str) -> Result<Vec<(Task, Workflow, Stage)>> {
+        self.runnable_tasks_with(project_id, &TaskFilter::default())
+    }
+
+    /// Membros pausados do projeto (não recebem trabalho novo).
+    fn paused_agents(&self, project_id: &str, filter: &TaskFilter) -> Result<HashSet<String>> {
+        if filter.ignore_pause {
+            return Ok(HashSet::new());
+        }
+        Ok(self
+            .list_team(project_id)?
+            .into_iter()
+            .filter(|m| m.profile.paused_at.is_some())
+            .map(|m| m.profile.id)
+            .collect())
+    }
+
+    /// Como `runnable_tasks`, com filtro: só um membro (`only_agent`, pelo responsável efetivo —
+    /// atribuído, senão o do estágio) e/ou ignorando pausas ("Rodar agora").
+    pub fn runnable_tasks_with(
+        &self,
+        project_id: &str,
+        filter: &TaskFilter,
+    ) -> Result<Vec<(Task, Workflow, Stage)>> {
         let tasks = self.list_tasks(project_id)?;
         let workflows = self.list_workflows(project_id)?;
+        let paused = self.paused_agents(project_id, filter)?;
         let mut out = Vec::new();
         for workflow in &workflows {
             let active = tasks
@@ -675,6 +708,19 @@ impl Store {
                 if stage.gate {
                     // Gate sem run: a task espera você.
                     continue;
+                }
+                let effective = task
+                    .assigned_agent_id
+                    .as_deref()
+                    .or(stage.agent_profile_id.as_deref());
+                // Membro pausado: a task continua pronta, sem consumir slot nem bloquear as outras.
+                if effective.is_some_and(|a| paused.contains(a)) {
+                    continue;
+                }
+                if let Some(only) = filter.only_agent.as_deref() {
+                    if effective != Some(only) {
+                        continue;
+                    }
                 }
                 out.push((task.clone(), workflow.clone(), stage.clone()));
                 slots -= 1;
@@ -725,8 +771,17 @@ impl Store {
     /// Tasks em `review` esperando um run de revisão do aprovador, respeitando o paralelismo
     /// do workflow (runs de trabalho e de revisão contam juntos).
     pub fn reviewable_tasks(&self, project_id: &str) -> Result<Vec<(Task, Workflow, Stage)>> {
+        self.reviewable_tasks_with(project_id, &TaskFilter::default())
+    }
+
+    pub fn reviewable_tasks_with(
+        &self,
+        project_id: &str,
+        filter: &TaskFilter,
+    ) -> Result<Vec<(Task, Workflow, Stage)>> {
         let tasks = self.list_tasks(project_id)?;
         let workflows = self.list_workflows(project_id)?;
+        let paused = self.paused_agents(project_id, filter)?;
         let mut out = Vec::new();
         for workflow in &workflows {
             let active = tasks
@@ -742,6 +797,15 @@ impl Store {
             }) {
                 if slots == 0 {
                     break;
+                }
+                let reviewer = task.approver_agent_id.as_deref();
+                if reviewer.is_some_and(|a| paused.contains(a)) {
+                    continue;
+                }
+                if let Some(only) = filter.only_agent.as_deref() {
+                    if reviewer != Some(only) {
+                        continue;
+                    }
                 }
                 let Some(stage) = workflow.stages.iter().find(|s| s.id == task.stage_id) else {
                     continue;
@@ -2359,6 +2423,149 @@ mod tests {
                 max_agent_returns: 5,
                 review_max_turns: 8
             }
+        );
+    }
+
+    #[test]
+    fn paused_members_are_skipped_and_run_now_filters_by_member() {
+        let (s, project, wf) = setup();
+        let team = s.list_team(&project).unwrap();
+        let pedro = team
+            .iter()
+            .find(|m| m.profile.name == "Pedro")
+            .unwrap()
+            .profile
+            .id
+            .clone();
+        let ana = team
+            .iter()
+            .find(|m| m.profile.name == "Ana")
+            .unwrap()
+            .profile
+            .id
+            .clone();
+        // Planejar é do Pedro; a segunda task é atribuída à Ana (atribuição vence o estágio).
+        let t1 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Do Pedro".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let t2 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Da Ana".into(),
+                    assigned_agent_id: Some(ana.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.update_workflow(
+            &wf.id,
+            &WorkflowInput {
+                name: wf.name.clone(),
+                stages: wf.stages.clone(),
+                use_worktrees: false,
+                max_parallel: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.runnable_tasks(&project).unwrap().len(), 2);
+
+        // Pedro pausado: a task dele fica pronta, sem evento, e a da Ana continua elegível.
+        s.set_member_paused(&pedro, true).unwrap();
+        let runnable = s.runnable_tasks(&project).unwrap();
+        assert_eq!(
+            runnable
+                .iter()
+                .map(|(t, _, _)| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![t2.id.as_str()]
+        );
+        assert_eq!(
+            s.get_task(&t1.id).unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
+        assert_eq!(s.list_task_events(&t1.id).unwrap().len(), 1, "só o created");
+        // "Rodar agora" ignora a pausa e filtra pelo membro.
+        let forced = s
+            .runnable_tasks_with(
+                &project,
+                &TaskFilter {
+                    only_agent: Some(pedro.clone()),
+                    ignore_pause: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            forced
+                .iter()
+                .map(|(t, _, _)| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![t1.id.as_str()]
+        );
+        let only_ana = s
+            .runnable_tasks_with(
+                &project,
+                &TaskFilter {
+                    only_agent: Some(ana.clone()),
+                    ignore_pause: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(only_ana.len(), 1);
+        assert_eq!(only_ana[0].0.id, t2.id);
+        s.set_member_paused(&pedro, false).unwrap();
+        assert_eq!(s.runnable_tasks(&project).unwrap().len(), 2);
+
+        // Revisor pausado não recebe runs de revisão.
+        let rui = team
+            .iter()
+            .find(|m| m.profile.name == "Rui")
+            .unwrap()
+            .profile
+            .id
+            .clone();
+        let run = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t2.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t2.id, &run.id, None, None).unwrap());
+        {
+            let mut conn = s.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "UPDATE task SET status = 'review', approver_agent_id = ?2, lock_run_id = NULL WHERE id = ?1",
+                params![t2.id, rui],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(s.reviewable_tasks(&project).unwrap().len(), 1);
+        s.set_member_paused(&rui, true).unwrap();
+        assert!(s.reviewable_tasks(&project).unwrap().is_empty());
+        assert_eq!(
+            s.reviewable_tasks_with(
+                &project,
+                &TaskFilter {
+                    only_agent: Some(rui.clone()),
+                    ignore_pause: true
+                }
+            )
+            .unwrap()
+            .len(),
+            1
         );
     }
 

@@ -335,6 +335,9 @@ export type TeamMemberInput = {
 
 export type AgentTotals = {
   agentProfileId: string;
+  /** Status e id do run mais recente (sem consolidações). */
+  lastRunStatus?: RunStatus | null;
+  lastRunId?: string | null;
   runs: number;
   activeRuns: number;
   costUsd: number;
@@ -498,6 +501,8 @@ export type Commands = {
   list_task_events: { args: { taskId: string }; result: TaskEvent[] };
   task_diff: { args: { taskId: string }; result: TaskDiff };
   list_project_activity: { args: { projectId: string; agentProfileId?: string | null; limit?: number }; result: ActivityItem[] };
+  set_member_paused: { args: { agentProfileId: string; paused: boolean }; result: TeamMember };
+  run_member_now: { args: { agentProfileId: string }; result: TickReport };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };

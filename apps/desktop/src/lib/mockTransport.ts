@@ -252,6 +252,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       autonomy: input.autonomy ?? null,
       canAssignTasks: input.canAssignTasks ?? null,
       canApprove: input.canApprove ?? null,
+      pausedAt: existing?.profile.pausedAt ?? null,
     };
     const trust: TrustPolicy = {
       autonomy: (profile.autonomy ?? role.defaultAutonomy ?? "supervised") as Autonomy,
@@ -425,7 +426,9 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     // Como o loop do core: o próximo estágio (ou a revisão) começa sem esperar um clique.
     setTimeout(() => void handlers.scheduler_tick({}), tickMs);
   };
-  const runnableTasks = (projectId: string): Array<{ task: Task; workflow: Workflow; stage: Stage }> => {
+  type TickFilter = { onlyAgent?: string; force?: boolean };
+  const isPausedMember = (agentId: string | null | undefined, filter: TickFilter) => !filter.force && Boolean(agentId && findMember(agentId)?.profile.pausedAt);
+  const runnableTasks = (projectId: string, filter: TickFilter = {}): Array<{ task: Task; workflow: Workflow; stage: Stage }> => {
     const out: Array<{ task: Task; workflow: Workflow; stage: Stage }> = [];
     for (const workflow of workflows.filter((w) => w.projectId === projectId)) {
       const active = tasks.filter((t) => t.workflowId === workflow.id && t.status === "running").length;
@@ -435,6 +438,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         if (!task.dependsOn.every((dep) => tasks.some((t) => t.id === dep && t.status === "done"))) continue;
         const stage = workflow.stages.find((s) => s.id === task.stageId);
         if (!stage || stage.gate) continue;
+        const effective = task.assignedAgentId ?? stage.agentProfileId ?? null;
+        // Membro pausado: a task continua pronta, sem consumir slot.
+        if (isPausedMember(effective, filter)) continue;
+        if (filter.onlyAgent && effective !== filter.onlyAgent) continue;
         out.push({ task, workflow, stage });
         slots--;
       }
@@ -941,6 +948,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       closePendingApprovals(run.id);
       finishTaskRun(run, !ev.isError, ev.resultText);
       audit("sistema", "run.finished", run.projectId, { runId, status: run.status, costUsd: ev.costUsd, numTurns: ev.numTurns });
+      if (!run.taskId) emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
       consolidateRunMock(run);
     } else if (ev.type === "tool_use" && (ev.name === "mcp__octopus__task_create" || ev.name === "mcp__octopus__task_assign") && run.agentProfileId) {
       // Como `handle_board_call` no core: só para quem reporta ao membro do run; o responsável pode vir por nome.
@@ -1045,6 +1053,109 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     if (index >= scriptFor(runId).length) return;
     const timer = setTimeout(() => deliver(runId, index), tickMs);
     pendingTimers.set(runId, [...(pendingTimers.get(runId) ?? []), timer]);
+  };
+
+  /** Um tick do scheduler, como `scheduler::tick_with` no core (filtro por membro; "forçado" ignora pausas). */
+  const tickMock = async (filter: TickFilter): Promise<TickReport> => {
+    const report: TickReport = { started: [], failed: [], parked: 0, paused: settings["scheduler.paused"] === true && !filter.force };
+    if (report.paused) return report;
+      for (const project of projects) {
+        for (const task of filter.onlyAgent ? [] : tasks.filter((t) => t.projectId === project.id && t.status === "ready")) {
+          const wf = workflows.find((w) => w.id === task.workflowId);
+          const index = wf?.stages.findIndex((s) => s.id === task.stageId) ?? -1;
+          if (wf && index >= 0 && wf.stages[index]!.gate) {
+            const worker = task.assignedAgentId ?? wf.stages.slice(0, index).reverse().find((s) => s.agentProfileId)?.agentProfileId ?? null;
+            enterGate(task, wf, index, worker, null);
+            report.parked++;
+          }
+        }
+        for (const { task, workflow, stage } of runnableTasks(project.id, filter)) {
+          // Quem foi atribuído (por você ou por um gestor delegando) vence o padrão do estágio.
+          const agentId = task.assignedAgentId ?? stage.agentProfileId;
+          const member = agentId ? findMember(agentId) : undefined;
+          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}`;
+          const run: Run = {
+            id: `run_mock_${++runCounter}`,
+            projectId: project.id,
+            prompt,
+            options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"], mode: "work" }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
+            agentProfileId: member?.profile.id ?? null,
+            kind: "agent",
+            taskId: task.id,
+            status: "running",
+            claudeSessionId: null,
+            model: null,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            costUsd: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            numTurns: null,
+            stopReason: null,
+            resultText: null,
+            errorMessage: null,
+          };
+          runs.set(run.id, run);
+          events.set(run.id, []);
+          const taskBrief = buildBriefMock(project.id, task.id, prompt, run.id);
+          scriptByRun.set(run.id, taskBrief ? [briefEvent(run.id, taskBrief), ...taskRunEvents()] : taskRunEvents());
+          task.status = "running";
+          task.lockRunId = run.id;
+          task.baseCommit = task.baseCommit ?? "9c1f2e0a7b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f";
+          if (workflow.useWorktrees && !task.worktreePath) task.worktreePath = `${project.path}/.octopus/worktrees/${task.id}`;
+          task.updatedAt = run.startedAt;
+          pushTaskEvent(task.id, "run_started", task.stageId, task.stageId, run.id, "scheduler", null);
+          schedule(run.id, 0);
+          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "task" });
+        }
+        // Revisões por agentes: task em `review` esperando o run do aprovador.
+        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "review" && t.approverAgentId && !t.lockRunId)) {
+          const workflow = workflows.find((w) => w.id === task.workflowId);
+          const stage = workflow?.stages.find((s) => s.id === task.stageId);
+          const reviewer = findMember(task.approverAgentId!);
+          if (!workflow || !stage || !reviewer) continue;
+          if (isPausedMember(reviewer.profile.id, filter)) continue;
+          if (filter.onlyAgent && reviewer.profile.id !== filter.onlyAgent) continue;
+          const busy = tasks.filter((t) => t.workflowId === workflow.id && t.lockRunId).length;
+          if (busy >= workflow.maxParallel) continue;
+          const worker = task.assignedAgentId ?? stage.agentProfileId;
+          const prompt = `Revisão da task ${task.id} do board "${workflow.name}" (estágio "${stage.name}"), feita por ${worker ? nameOf(worker) : "um membro do time"}.\n\n# ${task.title}\n${task.resultMd ? `\nResumo da entrega deixado pelo autor:\n${task.resultMd}\n` : ""}\nVocê é o revisor: inspecione o trabalho sem editar nada e chame task_update com "approved" ou "returned".`;
+          const run: Run = {
+            id: `run_mock_${++runCounter}`,
+            projectId: project.id,
+            prompt,
+            options: { maxTurns: typeof settings["board.reviewMaxTurns"] === "number" ? (settings["board.reviewMaxTurns"] as number) : 15, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["approved", "returned"], mode: "review" }, disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"], systemPromptAppend: `Você é ${reviewer.profile.name}, ${reviewer.role.title} do time deste projeto.`, permissionMode: reviewer.profile.permissionMode ?? reviewer.role.defaultPermissionMode ?? undefined },
+            agentProfileId: reviewer.profile.id,
+            kind: "review",
+            taskId: task.id,
+            status: "running",
+            claudeSessionId: null,
+            model: null,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            costUsd: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            numTurns: null,
+            stopReason: null,
+            resultText: null,
+            errorMessage: null,
+          };
+          runs.set(run.id, run);
+          events.set(run.id, []);
+          scriptByRun.set(run.id, reviewRunEvents());
+          task.lockRunId = run.id;
+          task.reviewAttempts += 1;
+          task.updatedAt = run.startedAt;
+          pushTaskEvent(task.id, "review_started", null, null, run.id, "scheduler", null);
+          schedule(run.id, 0);
+          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "review" });
+        }
+      }
+    if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);
+    return report;
   };
 
   const handlers: { [C in CommandName]: (args: Commands[C]["args"]) => Promise<Commands[C]["result"]> } = {
@@ -1355,7 +1466,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         if (!t.lastRunAt || r.startedAt > t.lastRunAt) t.lastRunAt = r.startedAt;
         byAgent.set(r.agentProfileId, t);
       }
-      return [...byAgent].map(([agentProfileId, t]) => ({ agentProfileId, ...t }));
+      return [...byAgent].map(([agentProfileId, t]) => {
+        const last = [...runs.values()].filter((r) => r.agentProfileId === agentProfileId && r.kind !== "consolidation").sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+        return { agentProfileId, ...t, lastRunStatus: last?.status ?? null, lastRunId: last?.id ?? null };
+      });
     },
     list_workflow_templates: async () => WORKFLOW_TEMPLATES.map((t) => ({ ...t, stages: t.stages.map((s) => ({ ...s })) })),
     list_workflows: async ({ projectId }) => workflows.filter((w) => w.projectId === projectId).map((w) => ({ ...w, stages: w.stages.map((s) => ({ ...s })) })),
@@ -1477,103 +1591,20 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (task.resultRunId && !files.some((f) => f.path === MOCK_REPO_FILE)) files.push({ path: MOCK_REPO_FILE, status: "modified", before: MOCK_REPO_BEFORE, after: MOCK_REPO_AFTER, truncated: false });
       return { available: true, reason: null, base: task.baseCommit, scope: task.worktreePath ? "worktree" : "project", files };
     },
-    scheduler_tick: async () => {
-      const report: TickReport = { started: [], failed: [], parked: 0, paused: settings["scheduler.paused"] === true };
-      if (report.paused) return report;
-      for (const project of projects) {
-        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "ready")) {
-          const wf = workflows.find((w) => w.id === task.workflowId);
-          const index = wf?.stages.findIndex((s) => s.id === task.stageId) ?? -1;
-          if (wf && index >= 0 && wf.stages[index]!.gate) {
-            const worker = task.assignedAgentId ?? wf.stages.slice(0, index).reverse().find((s) => s.agentProfileId)?.agentProfileId ?? null;
-            enterGate(task, wf, index, worker, null);
-            report.parked++;
-          }
-        }
-        for (const { task, workflow, stage } of runnableTasks(project.id)) {
-          // Quem foi atribuído (por você ou por um gestor delegando) vence o padrão do estágio.
-          const agentId = task.assignedAgentId ?? stage.agentProfileId;
-          const member = agentId ? findMember(agentId) : undefined;
-          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}`;
-          const run: Run = {
-            id: `run_mock_${++runCounter}`,
-            projectId: project.id,
-            prompt,
-            options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"], mode: "work" }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
-            agentProfileId: member?.profile.id ?? null,
-            kind: "agent",
-            taskId: task.id,
-            status: "running",
-            claudeSessionId: null,
-            model: null,
-            startedAt: new Date().toISOString(),
-            endedAt: null,
-            costUsd: null,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            numTurns: null,
-            stopReason: null,
-            resultText: null,
-            errorMessage: null,
-          };
-          runs.set(run.id, run);
-          events.set(run.id, []);
-          const taskBrief = buildBriefMock(project.id, task.id, prompt, run.id);
-          scriptByRun.set(run.id, taskBrief ? [briefEvent(run.id, taskBrief), ...taskRunEvents()] : taskRunEvents());
-          task.status = "running";
-          task.lockRunId = run.id;
-          task.baseCommit = task.baseCommit ?? "9c1f2e0a7b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f";
-          if (workflow.useWorktrees && !task.worktreePath) task.worktreePath = `${project.path}/.octopus/worktrees/${task.id}`;
-          task.updatedAt = run.startedAt;
-          pushTaskEvent(task.id, "run_started", task.stageId, task.stageId, run.id, "scheduler", null);
-          schedule(run.id, 0);
-          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "task" });
-        }
-        // Revisões por agentes: task em `review` esperando o run do aprovador.
-        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "review" && t.approverAgentId && !t.lockRunId)) {
-          const workflow = workflows.find((w) => w.id === task.workflowId);
-          const stage = workflow?.stages.find((s) => s.id === task.stageId);
-          const reviewer = findMember(task.approverAgentId!);
-          if (!workflow || !stage || !reviewer) continue;
-          const busy = tasks.filter((t) => t.workflowId === workflow.id && t.lockRunId).length;
-          if (busy >= workflow.maxParallel) continue;
-          const worker = task.assignedAgentId ?? stage.agentProfileId;
-          const prompt = `Revisão da task ${task.id} do board "${workflow.name}" (estágio "${stage.name}"), feita por ${worker ? nameOf(worker) : "um membro do time"}.\n\n# ${task.title}\n${task.resultMd ? `\nResumo da entrega deixado pelo autor:\n${task.resultMd}\n` : ""}\nVocê é o revisor: inspecione o trabalho sem editar nada e chame task_update com "approved" ou "returned".`;
-          const run: Run = {
-            id: `run_mock_${++runCounter}`,
-            projectId: project.id,
-            prompt,
-            options: { maxTurns: typeof settings["board.reviewMaxTurns"] === "number" ? (settings["board.reviewMaxTurns"] as number) : 15, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["approved", "returned"], mode: "review" }, disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"], systemPromptAppend: `Você é ${reviewer.profile.name}, ${reviewer.role.title} do time deste projeto.`, permissionMode: reviewer.profile.permissionMode ?? reviewer.role.defaultPermissionMode ?? undefined },
-            agentProfileId: reviewer.profile.id,
-            kind: "review",
-            taskId: task.id,
-            status: "running",
-            claudeSessionId: null,
-            model: null,
-            startedAt: new Date().toISOString(),
-            endedAt: null,
-            costUsd: null,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            numTurns: null,
-            stopReason: null,
-            resultText: null,
-            errorMessage: null,
-          };
-          runs.set(run.id, run);
-          events.set(run.id, []);
-          scriptByRun.set(run.id, reviewRunEvents());
-          task.lockRunId = run.id;
-          task.reviewAttempts += 1;
-          task.updatedAt = run.startedAt;
-          pushTaskEvent(task.id, "review_started", null, null, run.id, "scheduler", null);
-          schedule(run.id, 0);
-          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "review" });
-        }
-      }
-      if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);
+    scheduler_tick: async () => tickMock({}),
+    set_member_paused: async ({ agentProfileId, paused }) => {
+      const existing = findMember(agentProfileId);
+      if (!existing) throw new Error(`Membro ${agentProfileId} não encontrado`);
+      existing.profile.pausedAt = paused ? (existing.profile.pausedAt ?? new Date().toISOString()) : null;
+      audit("você", paused ? "team.member.paused" : "team.member.resumed", existing.projectId, { agentProfileId, name: existing.profile.name });
+      emit("board:changed", paused ? { started: [], failed: [], parked: 0, paused: false } : await tickMock({}));
+      return { ...existing, profile: { ...existing.profile } };
+    },
+    run_member_now: async ({ agentProfileId }) => {
+      const existing = findMember(agentProfileId);
+      if (!existing) throw new Error(`Membro ${agentProfileId} não encontrado`);
+      const report = await tickMock({ onlyAgent: agentProfileId, force: true });
+      audit("você", "team.member.run_now", existing.projectId, { agentProfileId, name: existing.profile.name, started: report.started.length });
       return report;
     },
     list_project_activity: async ({ projectId, agentProfileId, limit }) => {

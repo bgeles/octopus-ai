@@ -365,6 +365,11 @@ pub struct AgentTotals {
     pub active_runs: u64,
     pub cost_usd: f64,
     pub last_run_at: Option<String>,
+    /// Status e id do run mais recente do membro (sem consolidações): "error" na UI quando falhou.
+    #[serde(default)]
+    pub last_run_status: Option<String>,
+    #[serde(default)]
+    pub last_run_id: Option<String>,
 }
 
 fn parse_json_list(raw: Option<String>) -> Option<Vec<String>> {
@@ -765,13 +770,32 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Pausa ou retoma um membro: pausado não recebe trabalho novo do scheduler (runs em andamento
+    /// continuam). Pausar de novo não muda a data.
+    pub fn set_member_paused(&self, agent_profile_id: &str, paused: bool) -> Result<TeamMember> {
+        {
+            let conn = self.conn.lock().expect("store mutex");
+            let changed = conn.execute(
+                "UPDATE agent_profile SET paused_at = CASE WHEN ?2 THEN COALESCE(paused_at, ?3) ELSE NULL END WHERE id = ?1",
+                params![agent_profile_id, paused, now()],
+            )?;
+            if changed == 0 {
+                anyhow::bail!("Membro {agent_profile_id} não encontrado");
+            }
+        }
+        self.get_team_member_by_agent(agent_profile_id)?
+            .with_context(|| format!("Membro {agent_profile_id} não está em nenhum time"))
+    }
+
     /// Custo e runs por membro do projeto.
     pub fn team_totals(&self, project_id: &str) -> Result<Vec<AgentTotals>> {
         let conn = self.conn.lock().expect("store mutex");
         let mut stmt = conn.prepare(
-            "SELECT agent_profile_id, COUNT(*), SUM(CASE WHEN status IN ('queued','running','waiting_approval') THEN 1 ELSE 0 END),
-                    COALESCE(SUM(cost_usd), 0), MAX(started_at)
-             FROM run WHERE project_id = ?1 AND agent_profile_id IS NOT NULL GROUP BY agent_profile_id",
+            "SELECT r.agent_profile_id, COUNT(*), SUM(CASE WHEN r.status IN ('queued','running','waiting_approval') THEN 1 ELSE 0 END),
+                    COALESCE(SUM(r.cost_usd), 0), MAX(r.started_at),
+                    (SELECT l.status FROM run l WHERE l.agent_profile_id = r.agent_profile_id AND l.kind <> 'consolidation' ORDER BY l.started_at DESC, l.rowid DESC LIMIT 1),
+                    (SELECT l.id FROM run l WHERE l.agent_profile_id = r.agent_profile_id AND l.kind <> 'consolidation' ORDER BY l.started_at DESC, l.rowid DESC LIMIT 1)
+             FROM run r WHERE r.project_id = ?1 AND r.agent_profile_id IS NOT NULL GROUP BY r.agent_profile_id",
         )?;
         let rows = stmt
             .query_map(params![project_id], |r| {
@@ -781,6 +805,8 @@ impl Store {
                     active_runs: r.get::<_, i64>(2)? as u64,
                     cost_usd: r.get(3)?,
                     last_run_at: r.get(4)?,
+                    last_run_status: r.get(5)?,
+                    last_run_id: r.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1153,6 +1179,51 @@ mod tests {
         assert_eq!(role.default_autonomy, Some(Autonomy::Managed));
         assert_eq!(role.default_can_approve, Some(true));
         assert_eq!(role.default_can_assign_tasks, None);
+    }
+
+    #[test]
+    fn pause_resume_and_last_run_status() {
+        let (s, project) = store_with_project();
+        let ana = s
+            .add_team_member(
+                &project,
+                &TeamMemberInput {
+                    name: "Ana".into(),
+                    role_id: "role_implementador".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        assert!(s.list_team(&project).unwrap()[0]
+            .profile
+            .paused_at
+            .is_none());
+        let paused = s.set_member_paused(&ana, true).unwrap();
+        let at = paused.profile.paused_at.clone().expect("paused_at");
+        assert_eq!(
+            s.set_member_paused(&ana, true).unwrap().profile.paused_at,
+            Some(at),
+            "pausar de novo não muda a data"
+        );
+        assert!(s
+            .set_member_paused(&ana, false)
+            .unwrap()
+            .profile
+            .paused_at
+            .is_none());
+        assert!(s.set_member_paused("agent_nope", true).is_err());
+
+        // Último run falhado aparece nos totais.
+        let run = s
+            .create_run_full(&project, "x", &RunOptions::default(), Some(&ana), None)
+            .unwrap();
+        s.mark_run_failed(&run.id, "estourou").unwrap();
+        let totals = s.team_totals(&project).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].last_run_status.as_deref(), Some("failed"));
+        assert_eq!(totals[0].last_run_id.as_deref(), Some(run.id.as_str()));
     }
 
     #[test]

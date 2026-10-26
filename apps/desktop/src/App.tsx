@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memberState } from "./lib/memberState";
 import type { EffortLevel, PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
@@ -614,10 +615,34 @@ export function App({ transport }: AppProps) {
   };
 
   const memberStatus = (agentProfileId: string): MemberStatus => {
-    const mine = runs.filter((r) => r.agentProfileId === agentProfileId);
-    if (mine.some((r) => r.status === "waiting_approval")) return "waiting";
-    if (mine.some((r) => r.status === "running" || r.status === "queued")) return "active";
-    return "idle";
+    const member = team?.find((m) => m.profile.id === agentProfileId);
+    if (!member) return "idle";
+    return memberState(member, teamTotals.find((t) => t.agentProfileId === agentProfileId) ?? null, runs);
+  };
+  const pauseMember = async (member: TeamMember, paused: boolean) => {
+    try {
+      await transport.invoke("set_member_paused", { agentProfileId: member.profile.id, paused });
+      setToast(paused ? `${member.profile.name} pausado: não recebe tasks novas até retomar.` : `${member.profile.name} retomado.`);
+      if (selectedProject) {
+        await refreshTeam(selectedProject.id);
+        await refreshBoard(selectedProject.id);
+        await refreshRuns(selectedProject.id);
+      }
+    } catch (e) {
+      setToast(`Falha ao ${paused ? "pausar" : "retomar"}: ${messageOf(e)}`);
+    }
+  };
+  const runMemberNow = async (member: TeamMember) => {
+    try {
+      const report = await transport.invoke("run_member_now", { agentProfileId: member.profile.id });
+      if (report.started.length === 0) setToast(report.failed[0] ? `Não deu para iniciar: ${report.failed[0][1]}` : `Nenhuma task pronta para ${member.profile.name}.`);
+      if (selectedProject) {
+        await refreshBoard(selectedProject.id);
+        await refreshRuns(selectedProject.id);
+      }
+    } catch (e) {
+      setToast(`Falha ao rodar agora: ${messageOf(e)}`);
+    }
   };
 
   const saveMember = async (input: TeamMemberInput) => {
@@ -892,6 +917,8 @@ export function App({ transport }: AppProps) {
           workflows={workflows ?? []}
           onOpenTask={openTask}
           onOpenRunById={(id) => void openRunById(id)}
+          onPause={(paused) => pauseMember(openMember, paused)}
+          onRunNow={tasks.some((t) => t.status === "ready" && t.assignedAgentId === openMember.profile.id) ? () => runMemberNow(openMember) : undefined}
           onBack={() => setOpenMemberId(null)}
           onEdit={() => setMemberDialog({ open: true, member: openMember })}
           onRunAs={() => runAsMember(openMember)}
@@ -910,6 +937,8 @@ export function App({ transport }: AppProps) {
           onAddMember={() => setMemberDialog({ open: true, member: null })}
           onOpenMember={(member) => setOpenMemberId(member.profile.id)}
           onRunAs={runAsMember}
+          onPause={pauseMember}
+          onRunNow={runMemberNow}
         />
       )}
 

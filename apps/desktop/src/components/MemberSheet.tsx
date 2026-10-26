@@ -19,6 +19,8 @@ type MemberSheetProps = {
   workflows?: Workflow[];
   onOpenTask?: (taskId: string) => void;
   onOpenRunById?: (runId: string) => void;
+  onPause?: (paused: boolean) => Promise<void>;
+  onRunNow?: () => Promise<void>;
   onBack: () => void;
   onEdit: () => void;
   onRunAs: () => void;
@@ -33,7 +35,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   auto: "classificador automático",
 };
 
-export function MemberSheet({ member, team, status, totals, runs, tasks = [], activity = null, workflows = [], onOpenTask, onOpenRunById, onBack, onEdit, onRunAs, onOpenRun }: MemberSheetProps) {
+export function MemberSheet({ member, team, status, totals, runs, tasks = [], activity = null, workflows = [], onOpenTask, onOpenRunById, onPause, onRunNow, onBack, onEdit, onRunAs, onOpenRun }: MemberSheetProps) {
   const load = taskLoad(tasks, member.profile.id);
   const boss = team.find((m) => m.profile.id === member.reportsToAgentId) ?? null;
   const delegates = team.filter((m) => m.reportsToAgentId === member.profile.id);
@@ -70,6 +72,25 @@ export function MemberSheet({ member, team, status, totals, runs, tasks = [], ac
           <button type="button" onClick={onEdit} className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium hover:border-ink">
             Editar membro
           </button>
+          {onPause && (
+
+            <button type="button" onClick={() => void onPause(status !== "paused")} className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium hover:border-ink" data-testid="member-pause">
+
+              {status === "paused" ? "Retomar" : "Pausar"}
+
+            </button>
+
+          )}
+
+          {onRunNow && (
+
+            <button type="button" onClick={() => void onRunNow()} className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium hover:border-ink" data-testid="member-run-now">
+
+              Rodar agora
+
+            </button>
+
+          )}
         </div>
       </div>
 

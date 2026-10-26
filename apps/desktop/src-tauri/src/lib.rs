@@ -117,6 +117,11 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         ) || ev.event.is_terminal()
                         {
                             tray::refresh(&app, &store);
+                            // Início e Time acompanham runs avulsos sem depender do tick do board.
+                            let _ = app.emit(
+                                commands_orchestration::BOARD_CHANGED,
+                                &scheduler::TickReport::default(),
+                            );
                         }
                         if let protocol::RunEvent::Usage { .. } = ev.event {
                             if let Ok(Some(run)) = store.get_run(&ev.run_id) {
@@ -469,6 +474,8 @@ pub fn run() {
             commands_orchestration::scheduler_tick,
             commands_orchestration::task_diff,
             commands_orchestration::list_project_activity,
+            commands_team::set_member_paused,
+            commands_team::run_member_now,
             commands_security::list_audit_events,
             commands_security::verify_audit,
             commands_security::export_audit,
