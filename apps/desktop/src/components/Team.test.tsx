@@ -164,6 +164,51 @@ describe("Time", () => {
     expect(await screen.findByTestId("task-detail")).toHaveTextContent("Mapear integrações");
   });
 
+  it("pausar um membro segura as tasks dele (prontas, com o motivo), retomar libera e 'Rodar agora' ignora o scheduler pausado", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    const pedro = await transport.invoke("add_team_member", { projectId: "proj_demo", input: { name: "Pedro", roleId: "role_pesquisador" } });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: true });
+    const wf = await transport.invoke("create_workflow_from_template", { input: { projectId: "proj_demo", templateId: "research-synthesis" } });
+    await transport.invoke("create_task", { projectId: "proj_demo", workflowId: wf.id, input: { title: "Levantar integrações", assignedAgentId: pedro.profile.id } });
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    const card = await screen.findByRole("article", { name: "Membro do time: Pedro" });
+
+    // Pausar: badge, atividade e task "pronta · Pedro pausado"; o scheduler retomado não pega a task.
+    await user.click(within(card).getByRole("button", { name: "Pausar" }));
+    await waitFor(() => expect(screen.getByRole("article", { name: "Membro do time: Pedro" })).toHaveAttribute("data-status", "paused"));
+    expect(screen.getByRole("article", { name: "Membro do time: Pedro" })).toHaveTextContent("Pausado");
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: null });
+    await transport.invoke("scheduler_tick", {});
+    expect((await transport.invoke("list_tasks", { projectId: "proj_demo" }))[0]?.status).toBe("ready");
+    await user.click(screen.getByRole("button", { name: /^Board/ }));
+    expect(await screen.findByTestId("paused-reason")).toHaveTextContent("pronta · Pedro pausado");
+
+    // Retomar: o run começa sozinho.
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    await user.click(within(screen.getByRole("article", { name: "Membro do time: Pedro" })).getByRole("button", { name: "Retomar" }));
+    await waitFor(() => expect(screen.getByRole("article", { name: "Membro do time: Pedro" })).toHaveAttribute("data-status", "active"), { timeout: 3000 });
+    const audit = await transport.invoke("list_audit_events", { projectId: "proj_demo", kindPrefix: "team.member.", limit: 10 });
+    expect(audit.map((a) => a.kind)).toEqual(expect.arrayContaining(["team.member.paused", "team.member.resumed"]));
+
+    // Rodar agora com o scheduler global pausado: a próxima task pronta do membro começa.
+    await waitFor(async () => {
+      const [task] = await transport.invoke("list_tasks", { projectId: "proj_demo" });
+      expect(task?.status).toBe("waiting_approval");
+    }, { timeout: 4000 });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: true });
+    const second = await transport.invoke("create_task", { projectId: "proj_demo", workflowId: wf.id, input: { title: "Segunda do Pedro", assignedAgentId: pedro.profile.id } });
+    // Sai e volta ao Time para recarregar as tasks (a criação por transporte não emite board:changed).
+    await user.click(screen.getByRole("button", { name: /^Board/ }));
+    await screen.findByTestId("kanban");
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    await user.click(within(await screen.findByRole("article", { name: "Membro do time: Pedro" })).getByRole("button", { name: "Rodar agora" }));
+    await waitFor(async () => {
+      const tasks = await transport.invoke("list_tasks", { projectId: "proj_demo" });
+      expect(tasks.find((t) => t.id === second.id)?.status).toBe("running");
+    });
+  });
+
   it("a ficha mostra responsabilidades, como trabalha, delegação e permite editar", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");

@@ -49,10 +49,14 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 };
 
 /** Rótulo do status; em revisão por agente, diz quem está revisando. */
-export function statusLabel(task: Task, team: TeamMember[]): string {
+export function statusLabel(task: Task, team: TeamMember[], stage?: Stage | null): string {
   if (task.status === "review" && task.approverAgentId) {
     const reviewer = team.find((m) => m.profile.id === task.approverAgentId);
     return `em revisão por ${reviewer?.profile.name ?? "um membro"}`;
+  }
+  if (task.status === "ready") {
+    const effective = team.find((m) => m.profile.id === (task.assignedAgentId ?? stage?.agentProfileId ?? null));
+    if (effective?.profile.pausedAt) return `pronta · ${effective.profile.name} pausado`;
   }
   return STATUS_LABELS[task.status];
 }
@@ -237,7 +241,7 @@ export function BoardView(props: BoardViewProps) {
                     </div>
                     {inStage.length === 0 && <div className="rounded-lg border border-dashed hairline p-3 text-center text-xs text-slate">vazio</div>}
                     {inStage.map((task) => (
-                      <TaskCard key={task.id} task={task} member={memberOf(task.assignedAgentId ?? stage.agentProfileId)} team={team} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
+                      <TaskCard key={task.id} task={task} stage={stage} member={memberOf(task.assignedAgentId ?? stage.agentProfileId)} team={team} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
                     ))}
                   </div>
                 );
@@ -256,13 +260,13 @@ export function BoardView(props: BoardViewProps) {
   );
 }
 
-function TaskCard({ task, member, team, run, selected, onOpen }: { task: Task; member: TeamMember | null; team: TeamMember[]; run: Run | null; selected: boolean; onOpen: () => void }) {
+function TaskCard({ task, stage, member, team, run, selected, onOpen }: { task: Task; stage?: Stage; member: TeamMember | null; team: TeamMember[]; run: Run | null; selected: boolean; onOpen: () => void }) {
   const border = task.status === "running" ? "border-[1.5px] border-brand" : task.status === "waiting_approval" || task.status === "review" ? "border-[1.5px] border-warning" : task.status === "failed" || task.status === "blocked" ? "border-[1.5px] border-brand/50" : selected ? "border-ink" : "hairline";
   return (
     <button type="button" onClick={onOpen} className={["flex flex-col gap-2 rounded-lg border bg-surface px-3.5 py-3 text-left hover:border-ink", border].join(" ")} data-testid="task-card" data-status={task.status} aria-current={selected ? "true" : undefined}>
       <div className="flex items-center gap-2">
         <StatusDot status={task.status} />
-        <span className="text-[11px] font-semibold text-slate">{statusLabel(task, team)}</span>
+        <span className="text-[11px] font-semibold text-slate" data-testid={statusLabel(task, team, stage).includes("pausado") ? "paused-reason" : undefined}>{statusLabel(task, team, stage)}</span>
         {task.resultMd && <PackageCheck size={13} aria-label="com entrega" className="text-success-ink" />}
         <span className="ml-auto font-mono text-[11px] text-slate">{shortId(task.id)}</span>
       </div>
@@ -310,7 +314,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
       <div className="flex items-start gap-3">
         <div className="flex min-w-0 flex-col gap-1">
           <span className="eyebrow text-slate">
-            {shortId(task.id)} · {stage?.name ?? "?"} · {statusLabel(task, team)}
+            {shortId(task.id)} · {stage?.name ?? "?"} · {statusLabel(task, team, stage)}
           </span>
           <h2 className="m-0 font-display text-lg font-bold tracking-tight">{task.title}</h2>
         </div>

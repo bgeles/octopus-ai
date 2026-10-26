@@ -1,11 +1,12 @@
 //! Comandos do time: cargos, membros e totais por membro.
 
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::AppState;
 use crate::commands_config::auto_backup;
 use crate::commands_security::audit;
+use crate::scheduler::{TickOptions, TickReport};
 use crate::store::team::{AgentTotals, Role, RoleInput, TeamMember, TeamMemberInput};
 
 type CmdResult<T> = Result<T, String>;
@@ -102,6 +103,76 @@ pub fn update_team_member(
     );
     auto_backup(&state);
     Ok(member)
+}
+
+/// Pausa ou retoma um membro (pausado não recebe trabalho novo); ao retomar, o scheduler roda.
+#[tauri::command]
+pub async fn set_member_paused(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent_profile_id: String,
+    paused: bool,
+) -> CmdResult<TeamMember> {
+    let member = state
+        .store
+        .set_member_paused(&agent_profile_id, paused)
+        .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        if paused {
+            "team.member.paused"
+        } else {
+            "team.member.resumed"
+        },
+        Some(&member.project_id),
+        serde_json::json!({"agentProfileId": agent_profile_id, "name": member.profile.name}),
+    );
+    let report = if paused {
+        TickReport::default()
+    } else {
+        crate::scheduler::tick(&state.store, &state.sidecar, state.secrets.as_ref())
+            .await
+            .map_err(err)?
+    };
+    let _ = app.emit(crate::commands_orchestration::BOARD_CHANGED, &report);
+    Ok(member)
+}
+
+/// "Rodar agora": tick escopado ao membro, ignorando a pausa dele e a pausa global.
+#[tauri::command]
+pub async fn run_member_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent_profile_id: String,
+) -> CmdResult<TickReport> {
+    let member = state
+        .store
+        .get_team_member_by_agent(&agent_profile_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Membro {agent_profile_id} não encontrado"))?;
+    let report = crate::scheduler::tick_with(
+        &state.store,
+        &state.sidecar,
+        state.secrets.as_ref(),
+        &TickOptions {
+            only_agent: Some(agent_profile_id.clone()),
+            force: true,
+        },
+    )
+    .await
+    .map_err(err)?;
+    audit(
+        &state,
+        "você",
+        "team.member.run_now",
+        Some(&member.project_id),
+        serde_json::json!({"agentProfileId": agent_profile_id, "name": member.profile.name, "started": report.started.len()}),
+    );
+    if report.changed() {
+        let _ = app.emit(crate::commands_orchestration::BOARD_CHANGED, &report);
+    }
+    Ok(report)
 }
 
 #[tauri::command]

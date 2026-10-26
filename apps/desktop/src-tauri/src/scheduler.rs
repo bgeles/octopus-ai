@@ -72,19 +72,41 @@ pub fn is_paused(store: &Store) -> bool {
     )
 }
 
+/// Opções de um tick: só um membro e/ou forçado ("Rodar agora" ignora a pausa global e a do membro).
+#[derive(Debug, Clone, Default)]
+pub struct TickOptions {
+    pub only_agent: Option<String>,
+    pub force: bool,
+}
+
 pub async fn tick(
     store: &Store,
     sidecar: &Sidecar,
     secrets: &dyn SecretStore,
 ) -> Result<TickReport> {
+    tick_with(store, sidecar, secrets, &TickOptions::default()).await
+}
+
+pub async fn tick_with(
+    store: &Store,
+    sidecar: &Sidecar,
+    secrets: &dyn SecretStore,
+    opts: &TickOptions,
+) -> Result<TickReport> {
     let mut report = TickReport::default();
-    if is_paused(store) {
+    if is_paused(store) && !opts.force {
         report.paused = true;
         return Ok(report);
     }
+    let filter = crate::store::orchestration::TaskFilter {
+        only_agent: opts.only_agent.clone(),
+        ignore_pause: opts.force,
+    };
     for project in store.list_projects()? {
-        report.parked += store.park_gate_tasks(&project.id)?;
-        for (task, workflow, stage) in store.runnable_tasks(&project.id)? {
+        if opts.only_agent.is_none() {
+            report.parked += store.park_gate_tasks(&project.id)?;
+        }
+        for (task, workflow, stage) in store.runnable_tasks_with(&project.id, &filter)? {
             // Quem foi atribuído à task (por você ou por um gestor delegando) vence o padrão do estágio.
             let agent_id = task
                 .assigned_agent_id
@@ -172,7 +194,7 @@ pub async fn tick(
 
         // Revisões por agentes: a task está em `review` esperando o aprovador do organograma.
         let limits = store.review_limits();
-        for (task, workflow, stage) in store.reviewable_tasks(&project.id)? {
+        for (task, workflow, stage) in store.reviewable_tasks_with(&project.id, &filter)? {
             let Some(reviewer) = task.approver_agent_id.clone() else {
                 continue;
             };
@@ -589,6 +611,142 @@ mod tests {
         assert!(report.failed[0].1.contains("worktree"));
         let t_now = store.get_task(&t.id).unwrap().unwrap();
         assert_eq!(t_now.status, TaskStatus::Failed);
+        sidecar.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn tick_skips_paused_member_and_run_now_starts_only_his_task() {
+        let Some(command) = fake_sidecar_command() else {
+            eprintln!("node não encontrado; pulando teste do scheduler");
+            return;
+        };
+        let (sidecar, _notifications) = Sidecar::spawn(command).await.unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = store
+            .create_project("p", dir.path().to_str().unwrap())
+            .unwrap();
+        let pedro = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Pedro".into(),
+                    role_id: "role_planejador".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        let ana = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Ana".into(),
+                    role_id: "role_implementador".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        // Dois slots: a task do Pedro (forçada) não pode bloquear a da Ana no tick seguinte.
+        let wf = store
+            .update_workflow(
+                &wf.id,
+                &crate::store::orchestration::WorkflowInput {
+                    name: wf.name.clone(),
+                    stages: wf.stages.clone(),
+                    use_worktrees: false,
+                    max_parallel: 2,
+                },
+            )
+            .unwrap();
+        let t_pedro = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Do Pedro".into(),
+                    assigned_agent_id: Some(pedro.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let t_ana = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Da Ana".into(),
+                    assigned_agent_id: Some(ana.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.set_member_paused(&pedro, true).unwrap();
+        store
+            .set_setting(PAUSED_SETTING, &serde_json::json!(true))
+            .unwrap();
+
+        // Scheduler global pausado: nada roda; "Rodar agora" do Pedro força só a task dele.
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
+        assert!(report.paused && report.started.is_empty());
+        let report = tick_with(
+            &store,
+            &sidecar,
+            &MemorySecrets::default(),
+            &TickOptions {
+                only_agent: Some(pedro.clone()),
+                force: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.started.len(), 1, "{report:?}");
+        assert_eq!(report.started[0].task_id, t_pedro.id);
+        let run = store.get_run(&report.started[0].run_id).unwrap().unwrap();
+        assert_eq!(run.agent_profile_id.as_deref(), Some(pedro.as_str()));
+        assert_eq!(
+            store.get_task(&t_ana.id).unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
+
+        // Scheduler retomado: Ana roda; Pedro continua pausado para trabalho novo.
+        store
+            .set_setting(PAUSED_SETTING, &serde_json::json!(false))
+            .unwrap();
+        let t_pedro2 = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Outra do Pedro".into(),
+                    assigned_agent_id: Some(pedro.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            report
+                .started
+                .iter()
+                .map(|s| s.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![t_ana.id.as_str()]
+        );
+        assert_eq!(
+            store.get_task(&t_pedro2.id).unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
         sidecar.shutdown().await;
     }
 

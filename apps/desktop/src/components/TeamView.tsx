@@ -3,7 +3,8 @@ import { AUTONOMY_LABELS, type AgentTotals, type Project, type Role, type TeamMe
 import { Avatar } from "./Avatar";
 import { formatUsd } from "./RunSidebar";
 
-export type MemberStatus = "active" | "waiting" | "idle";
+export type { MemberStatus } from "../lib/memberState";
+import type { MemberStatus } from "../lib/memberState";
 
 type TeamViewProps = {
   project: Project | null;
@@ -17,6 +18,9 @@ type TeamViewProps = {
   onAddMember: () => void;
   onOpenMember: (member: TeamMember) => void;
   onRunAs: (member: TeamMember) => void;
+  /** Pausar/retomar e "Rodar agora" (iniciar a próxima task pronta do membro). */
+  onPause?: (member: TeamMember, paused: boolean) => Promise<void>;
+  onRunNow?: (member: TeamMember) => Promise<void>;
 };
 
 /** Carga e delegação de um membro a partir das tasks do board. */
@@ -27,7 +31,7 @@ export function taskLoad(tasks: Task[], agentProfileId: string): { open: number;
   };
 }
 
-export function TeamView({ project, members, totals, statusOf, monthlyCost, tasks = [], onAddMember, onOpenMember, onRunAs }: TeamViewProps) {
+export function TeamView({ project, members, totals, statusOf, monthlyCost, tasks = [], onAddMember, onOpenMember, onRunAs, onPause, onRunNow }: TeamViewProps) {
   const list = members ?? [];
   const totalsById = new Map(totals.map((t) => [t.agentProfileId, t]));
   const active = list.filter((m) => statusOf(m.profile.id) === "active").length;
@@ -89,7 +93,7 @@ export function TeamView({ project, members, totals, statusOf, monthlyCost, task
 
       <section aria-label="Membros do time" className="grid grid-cols-[repeat(auto-fit,minmax(min(300px,100%),1fr))] gap-4">
         {list.map((member) => (
-          <MemberCard key={member.id} member={member} status={statusOf(member.profile.id)} totals={totalsById.get(member.profile.id) ?? null} load={taskLoad(tasks, member.profile.id)} boss={list.find((m) => m.profile.id === member.reportsToAgentId) ?? null} onOpen={() => onOpenMember(member)} onRunAs={() => onRunAs(member)} />
+          <MemberCard key={member.id} member={member} status={statusOf(member.profile.id)} totals={totalsById.get(member.profile.id) ?? null} load={taskLoad(tasks, member.profile.id)} boss={list.find((m) => m.profile.id === member.reportsToAgentId) ?? null} onOpen={() => onOpenMember(member)} onRunAs={() => onRunAs(member)} onPause={onPause ? (paused) => onPause(member, paused) : undefined} onRunNow={onRunNow && tasks.some((t) => t.status === "ready" && (t.assignedAgentId === member.profile.id)) ? () => onRunNow(member) : undefined} />
         ))}
       </section>
     </div>
@@ -140,7 +144,7 @@ function OrgNode({ initials, title, subtitle, manager = false, active = false, o
   );
 }
 
-function MemberCard({ member, status, totals, load, boss, onOpen, onRunAs }: { member: TeamMember; status: MemberStatus; totals: AgentTotals | null; load: { open: number; created: number }; boss: TeamMember | null; onOpen: () => void; onRunAs: () => void }) {
+function MemberCard({ member, status, totals, load, boss, onOpen, onRunAs, onPause, onRunNow }: { member: TeamMember; status: MemberStatus; totals: AgentTotals | null; load: { open: number; created: number }; boss: TeamMember | null; onOpen: () => void; onRunAs: () => void; onPause?: (paused: boolean) => Promise<void>; onRunNow?: () => Promise<void> }) {
   const budget = member.profile.maxBudgetUsd;
   const cost = totals?.costUsd ?? 0;
   const pct = budget ? Math.min(100, Math.round((cost / budget) * 100)) : 0;
@@ -196,6 +200,25 @@ function MemberCard({ member, status, totals, load, boss, onOpen, onRunAs }: { m
         <button type="button" onClick={onOpen} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink">
           Ver ficha
         </button>
+        {onPause && (
+
+          <button type="button" onClick={() => void onPause(status !== "paused")} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink" data-testid="member-pause">
+
+            {status === "paused" ? "Retomar" : "Pausar"}
+
+          </button>
+
+        )}
+
+        {onRunNow && (
+
+          <button type="button" onClick={() => void onRunNow()} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink" title="Inicia agora a próxima task pronta deste membro, mesmo com o scheduler pausado" data-testid="member-run-now">
+
+            Rodar agora
+
+          </button>
+
+        )}
         <button type="button" onClick={onRunAs} className="rounded-md border hairline-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:border-ink">
           Dar uma tarefa
         </button>
@@ -232,6 +255,18 @@ export function StatusBadge({ status }: { status: MemberStatus }) {
         <span className="size-2 rounded-full bg-warning" /> Aguardando sua aprovação
       </span>
     );
+  if (status === "paused")
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate">
+        <span className="size-2 rounded-full border hairline-strong bg-paper" /> Pausado
+      </span>
+    );
+  if (status === "error")
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-hover">
+        <span className="size-2 rounded-full bg-brand" /> Último run falhou
+      </span>
+    );
   return (
     <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate">
       <span className="size-2 rounded-full bg-mist" /> Disponível
@@ -242,5 +277,7 @@ export function StatusBadge({ status }: { status: MemberStatus }) {
 function statusLabel(status: MemberStatus, member: TeamMember): string {
   if (status === "active") return "Em run agora";
   if (status === "waiting") return "Aguardando aprovação";
+  if (status === "paused") return "Pausado";
+  if (status === "error") return "Último run falhou";
   return member.role.specialty;
 }
