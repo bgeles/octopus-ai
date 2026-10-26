@@ -1,9 +1,12 @@
 import { GitFork, Play } from "lucide-react";
 import { useState } from "react";
-import type { Run, SessionSummary } from "../lib/types";
+import type { Run, SessionSummary, TeamMember } from "../lib/types";
+import { firstLine } from "../lib/text";
+import { Avatar } from "./Avatar";
 
 type SessionsViewProps = {
   runs: Run[];
+  team?: TeamMember[];
   sessions: SessionSummary[] | null;
   busySessionId: string | null;
   onOpenRun: (run: Run) => void;
@@ -13,7 +16,7 @@ type SessionsViewProps = {
   onTag: (sessionId: string, tag: string | null) => Promise<void>;
 };
 
-export function SessionsView({ runs, sessions, busySessionId, onOpenRun, onRefresh, onResume, onRename, onTag }: SessionsViewProps) {
+export function SessionsView({ runs, team = [], sessions, busySessionId, onOpenRun, onRefresh, onResume, onRename, onTag }: SessionsViewProps) {
   return (
     <div className="flex flex-col gap-6 overflow-y-auto p-6">
       <div className="flex items-center gap-4">
@@ -46,7 +49,15 @@ export function SessionsView({ runs, sessions, busySessionId, onOpenRun, onRefre
             <li key={run.id}>
               <button type="button" onClick={() => onOpenRun(run)} className="flex w-full items-center gap-3 rounded-xl border hairline bg-surface px-4 py-3 text-left hover:border-ink/30">
                 <span className={["size-2 shrink-0 rounded-full", dotFor(run.status)].join(" ")} />
-                <span className="min-w-0 flex-1 truncate font-medium">{run.prompt}</span>
+                {(() => {
+                  const member = team.find((m) => m.profile.id === run.agentProfileId) ?? null;
+                  return member ? <Avatar initials={member.profile.avatarSeed} size={22} label={member.profile.name} /> : null;
+                })()}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate font-medium">{run.prompt}</span>
+                  {firstLine(run.resultText ?? run.errorMessage) && <span className="truncate text-xs text-slate">{firstLine(run.resultText ?? run.errorMessage)}</span>}
+                </span>
+                {run.kind === "review" && <span className="rounded-full border hairline-strong px-2 text-[11px] text-slate">revisão</span>}
                 {run.options.resumeSessionId && (
                   <span className="rounded-full border hairline-strong px-2 text-[11px] text-slate">{run.options.forkSession ? "bifurcado" : "retomado"}</span>
                 )}

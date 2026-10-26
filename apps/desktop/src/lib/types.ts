@@ -176,6 +176,9 @@ export type ActivityItem = {
   payload: unknown;
 };
 
+/** Identidade do app (rodapé e Sobre). */
+export type AppInfo = { version: string; platform: string; arch: string; build: string };
+
 export type AuditEvent = {
   seq: number;
   ts: string;
@@ -503,6 +506,7 @@ export type Commands = {
   list_project_activity: { args: { projectId: string; agentProfileId?: string | null; limit?: number }; result: ActivityItem[] };
   set_member_paused: { args: { agentProfileId: string; paused: boolean }; result: TeamMember };
   run_member_now: { args: { agentProfileId: string }; result: TickReport };
+  app_info: { args: Record<string, never>; result: AppInfo };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };

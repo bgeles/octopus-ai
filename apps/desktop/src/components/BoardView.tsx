@@ -2,9 +2,9 @@ import { PackageCheck, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { eventLabelFor } from "../lib/activity";
 import { copyText, renderMarkdown } from "../lib/markdown";
-import { firstLine } from "../lib/text";
 import type { Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
 import { Avatar } from "./Avatar";
+import { DeliveriesList } from "./DeliveriesList";
 import { DiffView } from "./DiffView";
 import { formatUsd } from "./RunSidebar";
 import { formatRelative } from "./SessionsView";
@@ -202,32 +202,7 @@ export function BoardView(props: BoardViewProps) {
                   <h2 className="m-0 font-display text-sm font-semibold">Entregas</h2>
                   <span className="text-xs text-slate">tasks concluídas, mais recentes primeiro · resultado deixado pelo agente</span>
                 </div>
-                {deliveries.length === 0 && <p className="m-0 text-[13px] text-slate">Nenhuma task concluída ainda. Quando um run terminar uma task, o resumo da entrega aparece aqui.</p>}
-                <ul className="m-0 flex list-none flex-col p-0">
-                  {deliveries.map((task) => {
-                    const member = memberOf(task.assignedAgentId ?? runs.find((r) => r.id === task.resultRunId)?.agentProfileId ?? null);
-                    const run = runs.find((r) => r.id === task.resultRunId) ?? null;
-                    return (
-                      <li key={task.id} className="border-b hairline last:border-b-0">
-                        <button type="button" onClick={() => onOpenTask(task)} aria-current={selectedTask?.id === task.id ? "true" : undefined} className="grid w-full grid-cols-[64px_minmax(0,1fr)_140px] items-start gap-3.5 py-3 text-left text-[13px] hover:text-brand-hover" data-testid="delivery-row">
-                          <span className="font-mono text-xs text-slate">{shortId(task.id)}</span>
-                          <span className="flex min-w-0 flex-col gap-0.5">
-                            <span className="font-semibold text-ink">{task.title}</span>
-                            <span className="truncate text-slate">{firstLine(task.resultMd) ?? task.lastNote ?? "sem resumo da entrega"}</span>
-                            <span className="text-xs text-slate">
-                              {task.filesChanged.length} {task.filesChanged.length === 1 ? "arquivo" : "arquivos"}
-                              {run?.costUsd != null ? ` · ${formatUsd(run.costUsd)}` : ""}
-                            </span>
-                          </span>
-                          <span className="flex flex-col gap-0.5 text-right text-xs text-slate">
-                            <span className="font-semibold text-ink">{member ? member.profile.name : "run avulso"}</span>
-                            <span>{formatRelative(task.updatedAt)}</span>
-                          </span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
+                <DeliveriesList tasks={deliveries} team={team} runs={runs} selectedTaskId={selectedTask?.id ?? null} onOpenTask={onOpenTask} />
               </section>
             )}
             <section aria-label="Tasks por estágio" className={["grid min-w-0 flex-1 basis-[640px] grid-cols-[repeat(auto-fit,minmax(min(220px,100%),1fr))] gap-3", boardView === "deliveries" ? "hidden" : ""].join(" ")} data-testid="kanban" hidden={boardView === "deliveries"}>

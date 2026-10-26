@@ -20,6 +20,7 @@ describe("Segurança · Política", () => {
   it("lista as regras do catálogo, simula um comando e alterna uma regra", async () => {
     const { user } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.click(screen.getByRole("button", { name: "Segurança" }));
     const tab = await screen.findByTestId("policy-tab");
     const rules = await within(tab).findAllByTestId("policy-rule");
@@ -50,6 +51,7 @@ describe("Segurança · Política", () => {
   it("regra do projeto só aperta: permitir é recusado, perguntar é aceito", async () => {
     const { user } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.click(screen.getByRole("button", { name: "Segurança" }));
     await screen.findByTestId("policy-tab");
     await user.click(screen.getByRole("button", { name: "Nova regra" }));
@@ -73,6 +75,7 @@ describe("Segurança · Política", () => {
   it("no run, a política nega o comando com o motivo visível e pergunta com o motivo da regra", async () => {
     const { user } = setup({ events: withCommand("rm -rf /tmp/x") });
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.type(screen.getByLabelText("Instrução para o agente"), "limpe o tmp");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     // Nada de aprovação: o motor negou antes, e o agente vê o motivo como erro da ferramenta.
@@ -86,6 +89,7 @@ describe("Segurança · Política", () => {
   it("comando de rede vira aprovação com o motivo da regra", async () => {
     const { user } = setup({ events: withCommand("curl https://registry-1.docker.io/v2/") });
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.type(screen.getByLabelText("Instrução para o agente"), "baixe a imagem");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     const approval = await screen.findByTestId("approval-card");

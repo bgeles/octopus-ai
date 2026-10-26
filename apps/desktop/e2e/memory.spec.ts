@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test.describe("Memória (mock)", () => {
   test("o run gera o log de tarefas; criar e buscar página", async ({ page }) => {
     await page.goto("/");
+    await page.getByRole("button", { name: "Run ao vivo" }).click();
     await page.getByLabel("Instrução para o agente").fill("rodar testes");
     await page.getByRole("button", { name: "Enviar" }).click();
     await page.getByTestId("approval-card").getByRole("button", { name: "Permitir uma vez" }).click();

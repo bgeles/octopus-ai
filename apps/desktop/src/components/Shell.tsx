@@ -1,9 +1,10 @@
-import { BookOpen, CheckCircle2, ChevronDown, History, KanbanSquare, Lock, Play, Settings, Users, Wrench } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronDown, History, Home, KanbanSquare, Lock, Play, Settings, Users, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
-import type { Project, Run } from "../lib/types";
+import type { Project, Run, TeamMember } from "../lib/types";
+import { Avatar } from "./Avatar";
 import { THEME_LABELS, type ThemePreference } from "../lib/theme";
 
-export type View = "run" | "sessions" | "approvals" | "agents" | "board" | "memory" | "harness" | "security" | "settings";
+export type View = "home" | "run" | "sessions" | "approvals" | "agents" | "board" | "memory" | "harness" | "security" | "settings";
 
 type NavItem = { id: View; label: string; icon: ReactNode; badge?: number; live?: boolean; disabled?: boolean };
 
@@ -20,13 +21,19 @@ type ShellProps = {
   pendingGates?: number;
   theme: ThemePreference;
   onThemeChange: (theme: ThemePreference) => void;
+  /** Membros do projeto (para nomear quem está rodando na lista de runs ativos). */
+  team?: TeamMember[];
+  onOpenRun?: (run: Run) => void;
+  /** Versão do app (rodapé). */
+  appVersion?: string | null;
   children: ReactNode;
 };
 
 const THEME_ORDER: ThemePreference[] = ["system", "light", "dark"];
 
-export function Shell({ projects, selectedProject, onSelectProject, onAddProject, view, onChangeView, activeRuns, pendingApprovals, pendingGates = 0, theme, onThemeChange, children }: ShellProps) {
+export function Shell({ projects, selectedProject, onSelectProject, onAddProject, view, onChangeView, activeRuns, pendingApprovals, pendingGates = 0, theme, onThemeChange, team = [], onOpenRun, appVersion = null, children }: ShellProps) {
   const nav: NavItem[] = [
+    { id: "home", label: "Início", icon: <Home size={16} aria-hidden /> },
     { id: "run", label: "Run ao vivo", icon: <Play size={16} aria-hidden />, live: activeRuns.length > 0 },
     { id: "sessions", label: "Sessões", icon: <History size={16} aria-hidden /> },
     { id: "approvals", label: "Aprovações", icon: <CheckCircle2 size={16} aria-hidden />, badge: pendingApprovals },
@@ -123,13 +130,21 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
           <div className="flex flex-col gap-2.5 rounded-xl border hairline-dark p-3">
             <div className="eyebrow text-sidebar-ink/72">Runs ativos</div>
             {activeRuns.length === 0 && <div className="text-[13px] text-sidebar-ink/50">Nenhum run em andamento</div>}
-            {activeRuns.slice(0, 3).map((run) => (
-              <div key={run.id} className="flex items-center gap-2 text-[13px]">
-                <span className={["size-2 rounded-full", run.status === "waiting_approval" ? "bg-warning" : "bg-brand"].join(" ")} />
-                <span className="flex-1 truncate">{run.prompt}</span>
-                <span className="font-mono text-xs text-sidebar-ink/72">{run.status === "waiting_approval" ? "aguardando" : "ativo"}</span>
-              </div>
-            ))}
+            {activeRuns.slice(0, 3).map((run) => {
+              const member = team.find((m) => m.profile.id === run.agentProfileId) ?? null;
+              return (
+                <button key={run.id} type="button" onClick={() => onOpenRun?.(run)} aria-label={`Abrir run ativo de ${member ? member.profile.name : "você"}`} className="flex w-full items-center gap-2 rounded-md text-left text-[13px] hover:bg-sidebar-ink/6" title={run.prompt} data-testid="active-run">
+                  <span className={["size-2 shrink-0 rounded-full", run.status === "waiting_approval" ? "bg-warning" : "animate-pulse bg-brand"].join(" ")} />
+                  {member ? <Avatar initials={member.profile.avatarSeed} size={18} /> : null}
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">{member ? member.profile.name : "Você"}{run.kind === "review" ? " · revisão" : ""}</span>
+                    <span className="truncate text-[11px] text-sidebar-ink/60">{run.prompt}</span>
+                  </span>
+                  <span className="font-mono text-[11px] text-sidebar-ink/72">{run.status === "waiting_approval" ? "aguardando" : "ativo"}</span>
+                </button>
+              );
+            })}
+            {activeRuns.length > 3 && <div className="text-[11px] text-sidebar-ink/50">+{activeRuns.length - 3} em andamento</div>}
           </div>
 
           <div role="radiogroup" aria-label="Tema" className="flex rounded-md border hairline-dark p-0.5 text-xs">
@@ -148,6 +163,9 @@ export function Shell({ projects, selectedProject, onSelectProject, onAddProject
                 </button>
               );
             })}
+          </div>
+          <div className="px-2 text-[11px] text-sidebar-ink/50" data-testid="app-version">
+            Octopus AI {appVersion ?? ""}
           </div>
         </div>
       </nav>

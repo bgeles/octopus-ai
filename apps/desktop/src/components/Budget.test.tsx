@@ -15,6 +15,7 @@ describe("Segurança · sandbox e orçamentos", () => {
   it("troca o perfil de sandbox do projeto e o header reflete", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     expect(screen.getByTestId("sandbox-chip")).toHaveTextContent("Sandbox Dev padrão");
     await user.click(screen.getByRole("button", { name: "Segurança" }));
     const section = await screen.findByTestId("sandbox-section");
@@ -39,6 +40,7 @@ describe("Segurança · sandbox e orçamentos", () => {
   it("define orçamento, mostra o aviso ao passar do soft e bloqueia novos runs no hard", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.click(screen.getByRole("button", { name: "Segurança" }));
     await user.click(await screen.findByRole("tab", { name: "Orçamentos" }));
     const tab = await screen.findByTestId("budget-tab");

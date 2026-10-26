@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { SHORTCUT_HELP } from "../lib/shortcuts";
 import { isTauri } from "../lib/transport";
 import { THEME_LABELS, type ThemePreference } from "../lib/theme";
-import { UPDATES_ENDPOINT_SETTING, type AppSettings, type AuthMode, type BackupSnapshot, type EnvironmentCheck, type ImportMode, type ImportPreview, type UpdateInfo } from "../lib/types";
+import { UPDATES_ENDPOINT_SETTING, type AppInfo, type AppSettings, type AuthMode, type BackupSnapshot, type EnvironmentCheck, type ImportMode, type ImportPreview, type UpdateInfo } from "../lib/types";
 import { EnvironmentChecks } from "./EnvironmentChecks";
 import { ImportPreviewPanel } from "./ImportPreviewPanel";
 import { formatRelative } from "./SessionsView";
@@ -27,6 +27,7 @@ type SettingsViewProps = {
   onCheckUpdate: () => Promise<UpdateInfo>;
   onInstallUpdate: () => Promise<void>;
   runtimeLabel: string;
+  appInfo?: AppInfo | null;
 };
 
 type PreviewTarget = { kind: "snapshot"; id: string } | { kind: "file"; path: string };
@@ -154,10 +155,6 @@ export function SettingsView(props: SettingsViewProps) {
               ))}
             </div>
           </div>
-          <div className="flex justify-between gap-3 border-t hairline pt-3 text-[13px]">
-            <span className="text-slate">Runtime</span>
-            <span className="font-mono text-xs">{runtimeLabel}</span>
-          </div>
         </section>
 
         <section aria-label="Board e delegação" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="board-prefs">
@@ -217,7 +214,22 @@ export function SettingsView(props: SettingsViewProps) {
           </dl>
         </section>
 
-        <UpdatesSection settings={settings} onSetSetting={onSetSetting} onCheck={props.onCheckUpdate} onInstall={props.onInstallUpdate} />
+        <section aria-label="Sobre" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="about">
+          <h2 className="m-0 font-display text-sm font-semibold">Sobre</h2>
+          <div className="flex flex-col gap-1.5 text-[13px]">
+            <div className="flex justify-between gap-3">
+              <span className="text-slate">Octopus AI</span>
+              <span className="font-mono text-xs" data-testid="about-version">
+                {props.appInfo ? `${props.appInfo.version} · ${props.appInfo.build} · ${props.appInfo.platform}/${props.appInfo.arch}` : "—"}
+              </span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-slate">Runtime</span>
+              <span className="font-mono text-xs">{runtimeLabel}</span>
+            </div>
+          </div>
+          <UpdatesSection settings={settings} onSetSetting={onSetSetting} onCheck={props.onCheckUpdate} onInstall={props.onInstallUpdate} embedded />
+        </section>
 
         <section aria-label="Backup de configurações" className="col-span-full flex flex-col gap-4 rounded-xl border hairline bg-surface p-5">
           <div className="flex flex-wrap items-center gap-3">
@@ -314,7 +326,7 @@ export const NOTIFICATION_PREFS: { key: string; title: string; description: stri
   { key: "notifications.runs", title: "Run concluído ou falhou", description: "Avisa ao fim de cada run", default: false },
 ];
 
-function UpdatesSection({ settings, onSetSetting, onCheck, onInstall }: { settings: AppSettings; onSetSetting: (key: string, value: unknown) => Promise<void>; onCheck: () => Promise<UpdateInfo>; onInstall: () => Promise<void> }) {
+function UpdatesSection({ settings, onSetSetting, onCheck, onInstall, embedded = false }: { settings: AppSettings; onSetSetting: (key: string, value: unknown) => Promise<void>; onCheck: () => Promise<UpdateInfo>; onInstall: () => Promise<void>; embedded?: boolean }) {
   const saved = typeof settings[UPDATES_ENDPOINT_SETTING] === "string" ? (settings[UPDATES_ENDPOINT_SETTING] as string) : "";
   const [endpoint, setEndpoint] = useState(saved);
   const [info, setInfo] = useState<UpdateInfo | null>(null);
@@ -339,7 +351,7 @@ function UpdatesSection({ settings, onSetSetting, onCheck, onInstall }: { settin
     }
   };
   return (
-    <section aria-label="Atualizações" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="updates">
+    <section aria-label="Atualizações" className={embedded ? "flex flex-col gap-3 border-t hairline pt-3" : "flex flex-col gap-3 rounded-xl border hairline bg-surface p-5"} data-testid="updates">
       <h2 className="m-0 font-display text-sm font-semibold">Atualizações</h2>
       <label className="flex flex-col gap-1 text-xs font-medium text-slate">
         Endereço do manifesto de atualização (latest.json)
