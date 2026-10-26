@@ -9,6 +9,7 @@ pub mod attention;
 pub mod audit;
 pub mod board_calls;
 pub mod config;
+pub mod goals;
 pub mod harness;
 pub mod hooks;
 pub mod memory;
@@ -102,6 +103,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0023_workflow_report",
         include_str!("migrations/0023_workflow_report.sql"),
     ),
+    ("0024_goals", include_str!("migrations/0024_goals.sql")),
 ];
 
 pub struct Store {
@@ -206,6 +208,7 @@ impl Store {
             auth_mode: models::AuthMode::Subscription,
             created_at: now(),
             sandbox_profile_id: Some("sandbox_dev".into()),
+            mission: None,
         };
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
@@ -232,7 +235,7 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let conn = self.conn.lock().expect("store mutex");
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id FROM project ORDER BY created_at DESC",
+            "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id, mission FROM project ORDER BY created_at DESC",
         )?;
         let rows = stmt
             .query_map([], Project::from_row)?
@@ -244,7 +247,7 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex");
         let project = conn
             .query_row(
-                "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id FROM project WHERE id = ?1",
+                "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id, mission FROM project WHERE id = ?1",
                 params![id],
                 Project::from_row,
             )
@@ -892,11 +895,12 @@ mod tests {
                 "0021_delegation".to_string(),
                 "0022_member_state".to_string(),
                 "0023_workflow_report".to_string(),
+                "0024_goals".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 23);
+        assert_eq!(s.applied_migrations().unwrap().len(), 24);
     }
 
     #[test]

@@ -33,6 +33,7 @@ describe("octopus tools", () => {
     const withBoard = factory({ board: { call: async (op, args) => (calls.push([op, args]), { ok: true, content: "Task task_24 criada" }) } }) as { tools: unknown[] };
     expect(withBoard.tools).toEqual(["team_list", "task_list", "task_create", "task_assign"]);
     expect(created.find((t) => t.name === "task_create")?.description).toContain("reporta a você");
+    expect(created.find((t) => t.name === "task_create")?.description).toContain("goal (opcional)");
     expect(BOARD_TOOLS).toEqual(["mcp__octopus__team_list", "mcp__octopus__task_list", "mcp__octopus__task_create", "mcp__octopus__task_assign"]);
     const handler = buildBoardHandler("task_create", async (op, args) => (calls.push([op, args]), { ok: false, content: "Responsável inválido" }));
     expect(await handler({ title: "X", assignee: "Leo" })).toEqual({ content: [{ type: "text", text: "Responsável inválido" }], isError: true });

@@ -1,6 +1,8 @@
 import { RefreshCw } from "lucide-react";
 import { MEMBER_STATUS_LABELS, type MemberStatus } from "../lib/memberState";
-import type { ActivityItem, AgentTotals, Approval, BudgetStatus, Project, Run, Task, TeamMember, Workflow, WorkflowReport } from "../lib/types";
+import type { ActivityItem, AgentTotals, Approval, BudgetStatus, GoalProgress, Project, Run, Task, TeamMember, Workflow, WorkflowReport } from "../lib/types";
+import { goalPercent } from "./GoalsPanel";
+import { MissionLine } from "./MissionLine";
 import { WorkflowReportCard } from "./WorkflowReportCard";
 import { ActivityFeed } from "./ActivityFeed";
 import { Avatar } from "./Avatar";
@@ -19,6 +21,9 @@ type HomeViewProps = {
   budget: BudgetStatus | null;
   activity: ActivityItem[] | null;
   reports?: WorkflowReport[];
+  /** Missão e objetivos ativos com progresso. */
+  goals?: GoalProgress[];
+  onEditMission?: () => void;
   onGenerateReport?: (workflow: Workflow) => Promise<void>;
   onExportReport?: (report: WorkflowReport, destination: string | null) => Promise<string>;
   statusOf: (agentProfileId: string) => MemberStatus;
@@ -35,7 +40,7 @@ type HomeViewProps = {
 };
 
 /** Início: o time atuando agora, o que espera você, gasto, atividade e entregas — como o Dashboard do Paperclip. */
-export function HomeView({ project, team, totals, runs, tasks, workflows, approvals, budget, activity, reports = [], onGenerateReport, onExportReport, statusOf, schedulerPaused, onOpenMember, onRunAs, onPause, onRunNow, onOpenTask, onOpenRun, onGo, onAddMember, onRefresh }: HomeViewProps) {
+export function HomeView({ project, team, totals, runs, tasks, workflows, approvals, budget, activity, reports = [], goals = [], onEditMission, onGenerateReport, onExportReport, statusOf, schedulerPaused, onOpenMember, onRunAs, onPause, onRunNow, onOpenTask, onOpenRun, onGo, onAddMember, onRefresh }: HomeViewProps) {
   const members = team ?? [];
   const states = new Map(members.map((m) => [m.profile.id, statusOf(m.profile.id)] as const));
   const activeMembers = members.filter((m) => states.get(m.profile.id) === "active").length;
@@ -68,6 +73,27 @@ export function HomeView({ project, team, totals, runs, tasks, workflows, approv
           </button>
         </div>
       </div>
+
+      {onEditMission && (
+        <section aria-label="Missão e objetivos" className="flex flex-col gap-2 rounded-xl border hairline bg-surface px-5 py-3.5" data-testid="home-goals">
+          <MissionLine project={project} onEdit={onEditMission} compact />
+          {goals.filter((g) => g.status === "active").length > 0 && (
+            <ul className="m-0 flex list-none flex-wrap gap-x-5 gap-y-1.5 p-0 text-xs text-slate">
+              {goals.filter((g) => g.status === "active").map((g) => (
+                <li key={g.id} className="flex items-center gap-2" data-testid="home-goal">
+                  <span className="font-semibold text-ink">{g.title}</span>
+                  <span className="h-1.5 w-24 overflow-hidden rounded-full bg-mist" aria-hidden>
+                    <span className="block h-full rounded-full bg-brand" style={{ width: `${goalPercent(g)}%` }} />
+                  </span>
+                  <span>
+                    {g.tasksDone} de {g.tasksTotal}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(min(200px,100%),1fr))] gap-3" data-testid="home-cards">
         <Card label="Membros em run" value={`${activeMembers}`} suffix={members.length ? `de ${members.length}` : ""} hint={members.length === 0 ? "nenhum membro ainda" : activeMembers === 0 ? "ninguém rodando agora" : members.filter((m) => states.get(m.profile.id) === "active").map((m) => m.profile.name).join(", ")} onClick={() => onGo("agents")} testId="card-active" />

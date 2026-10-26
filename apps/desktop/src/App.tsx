@@ -9,6 +9,7 @@ import { HarnessView } from "./components/HarnessView";
 import { MemoryView } from "./components/MemoryView";
 import { SecurityView, type SecurityTab } from "./components/SecurityView";
 import { TaskDialog } from "./components/TaskDialog";
+import { MissionDialog } from "./components/MissionDialog";
 import { MemberDialog } from "./components/MemberDialog";
 import { MemberSheet } from "./components/MemberSheet";
 import { TeamView, type MemberStatus } from "./components/TeamView";
@@ -24,7 +25,7 @@ import { shortcutFor } from "./lib/shortcuts";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { ActivityItem, AgentTotals, AppInfo, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowReport, WorkflowTemplate } from "./lib/types";
+import type { ActivityItem, AgentTotals, AppInfo, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, Goal, GoalInput, GoalProgress, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowReport, WorkflowTemplate } from "./lib/types";
 import { projectDefaultsKey } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
@@ -56,6 +57,8 @@ export function App({ transport }: AppProps) {
   /** Atividade recente do projeto (Início); null = carregando. */
   const [activity, setActivity] = useState<ActivityItem[] | null>(null);
   const [reports, setReports] = useState<WorkflowReport[]>([]);
+  const [goals, setGoals] = useState<GoalProgress[]>([]);
+  const [missionDialogOpen, setMissionDialogOpen] = useState(false);
   const [team, setTeam] = useState<TeamMember[] | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
   const [teamTotals, setTeamTotals] = useState<AgentTotals[]>([]);
@@ -193,10 +196,11 @@ export function App({ transport }: AppProps) {
   const refreshBoard = useCallback(
     async (projectId: string) => {
       try {
-        const [wfs, taskList, reportList] = await Promise.all([transport.invoke("list_workflows", { projectId }), transport.invoke("list_tasks", { projectId }), transport.invoke("list_workflow_reports", { projectId })]);
+        const [wfs, taskList, reportList, goalList] = await Promise.all([transport.invoke("list_workflows", { projectId }), transport.invoke("list_tasks", { projectId }), transport.invoke("list_workflow_reports", { projectId }), transport.invoke("list_goals", { projectId })]);
         setWorkflows(wfs);
         setTasks(taskList);
         setReports(reportList);
+        setGoals(goalList);
         setSelectedWorkflowId((current) => (current && wfs.some((w) => w.id === current) ? current : (wfs[0]?.id ?? null)));
       } catch (e) {
         setToast(`Falha ao carregar o board: ${messageOf(e)}`);
@@ -769,6 +773,35 @@ export function App({ transport }: AppProps) {
     void tick();
   };
 
+  // Missão e objetivos: o porquê que entra nos prompts.
+  const saveMission = async (mission: string | null) => {
+    if (!selectedProject) return;
+    const updated = await transport.invoke("set_project_mission", { projectId: selectedProject.id, mission });
+    setSelectedProject(updated);
+    setProjects((current) => current.map((p) => (p.id === updated.id ? updated : p)));
+  };
+  const createGoal = async (input: GoalInput) => {
+    if (!selectedProject) return;
+    await transport.invoke("create_goal", { projectId: selectedProject.id, input });
+    await refreshBoard(selectedProject.id);
+  };
+  const updateGoal = async (goal: Goal, input: GoalInput) => {
+    await transport.invoke("update_goal", { goalId: goal.id, input });
+    if (selectedProject) await refreshBoard(selectedProject.id);
+  };
+  const deleteGoal = async (goal: Goal) => {
+    await transport.invoke("delete_goal", { goalId: goal.id });
+    if (selectedProject) await refreshBoard(selectedProject.id);
+  };
+  const setWorkflowGoal = async (workflow: Workflow, goalId: string | null) => {
+    try {
+      await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages, useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel, goalId } });
+      if (selectedProject) await refreshBoard(selectedProject.id);
+    } catch (e) {
+      setToast(`Falha ao mudar o objetivo do workflow: ${messageOf(e)}`);
+    }
+  };
+
   const refreshAudit = useCallback(
     (kindPrefix: string | null) => {
       transport
@@ -868,6 +901,8 @@ export function App({ transport }: AppProps) {
           budget={budget}
           activity={activity}
           reports={reports}
+          goals={goals}
+          onEditMission={() => setMissionDialogOpen(true)}
           onGenerateReport={generateReport}
           onExportReport={exportReport}
           statusOf={memberStatus}
@@ -1052,9 +1087,15 @@ export function App({ transport }: AppProps) {
           report={reports.find((r) => r.workflowId === (selectedWorkflow?.id ?? "")) ?? null}
           onGenerateReport={generateReport}
           onExportReport={exportReport}
+          goals={goals}
+          onEditMission={() => setMissionDialogOpen(true)}
+          onSetWorkflowGoal={setWorkflowGoal}
+          onCreateGoal={createGoal}
+          onUpdateGoal={updateGoal}
+          onDeleteGoal={deleteGoal}
           onSetGateApprover={async (workflow, stage, approver) => {
             try {
-              await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages.map((s) => (s.id === stage.id ? { ...s, approver } : s)), useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel } });
+              await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages.map((s) => (s.id === stage.id ? { ...s, approver } : s)), useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel, goalId: workflow.goalId ?? null } });
               await afterTaskChange();
             } catch (e) {
               setToast(`Falha ao mudar o gate: ${messageOf(e)}`);
@@ -1196,7 +1237,8 @@ export function App({ transport }: AppProps) {
       )}
 
       <AddProjectDialog open={addOpen} onClose={() => setAddOpen(false)} onCreate={createProject} />
-      <TaskDialog open={taskDialogOpen} workflow={selectedWorkflow} tasks={tasks.filter((t) => t.workflowId === selectedWorkflow?.id)} team={team ?? []} onClose={() => setTaskDialogOpen(false)} onCreate={createTask} />
+      <TaskDialog open={taskDialogOpen} workflow={selectedWorkflow} tasks={tasks.filter((t) => t.workflowId === selectedWorkflow?.id)} team={team ?? []} goals={goals} onClose={() => setTaskDialogOpen(false)} onCreate={createTask} />
+      <MissionDialog open={missionDialogOpen} project={selectedProject} onClose={() => setMissionDialogOpen(false)} onSave={saveMission} />
       <MemberDialog
         open={memberDialog.open}
         roles={roles}

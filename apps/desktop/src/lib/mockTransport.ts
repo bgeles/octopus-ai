@@ -11,7 +11,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { ActivityItem, AgentProfile, AppSettings, Autonomy, TrustPolicy, WorkflowReport, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { ActivityItem, AgentProfile, AppSettings, Autonomy, Goal, GoalProgress, TrustPolicy, WorkflowReport, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -220,7 +220,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const listeners = new Map<EventName, Set<(payload: never) => void>>();
   const fresh = options.freshInstall ?? false;
   const projects: Project[] = options.projects ?? (fresh ? [] : [
-    { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString(), sandboxProfileId: "sandbox_dev" },
+    { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString(), sandboxProfileId: "sandbox_dev", mission: null },
   ]);
   const settings: AppSettings = fresh ? {} : { "onboarding.completedAt": "2026-10-15T10:00:00.000Z", defaultAuthMode: "subscription" };
   const roles: Role[] = seedRoles();
@@ -276,6 +276,34 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const workflows: Workflow[] = [];
   const tasks: Task[] = [];
   const taskEventsLog: TaskEvent[] = [];
+  // Missão e objetivos: o "porquê" ligado a workflows, tasks e prompts.
+  const goals: Goal[] = [];
+  let goalCounter = 0;
+  const goalProgress = (g: Goal): GoalProgress => {
+    const mine = tasks.filter((t) => t.goalId === g.id);
+    return { ...g, tasksTotal: mine.length, tasksDone: mine.filter((t) => t.status === "done").length, workflows: workflows.filter((w) => w.goalId === g.id).length };
+  };
+  const resolveGoal = (projectId: string, goalId: string | null | undefined): string | null => {
+    if (!goalId) return null;
+    if (!goals.some((g) => g.id === goalId && g.projectId === projectId)) throw new Error(`Objetivo ${goalId} não existe neste projeto`);
+    return goalId;
+  };
+  /** Como `board_calls::task_create`: `goal` (id ou título ativo), senão o da task do run, senão o do workflow. */
+  const goalForDelegation = (run: Run, wf: Workflow, key: string | undefined): string | null => {
+    if (key?.trim()) {
+      const k = key.trim().toLowerCase();
+      return goals.find((g) => g.projectId === run.projectId && g.status === "active" && (g.id === k || g.title.toLowerCase() === k))?.id ?? null;
+    }
+    const own = run.taskId ? tasks.find((t) => t.id === run.taskId)?.goalId : null;
+    return own ?? wf.goalId ?? null;
+  };
+  const purposeLines = (projectId: string, goalId: string | null): string => {
+    const mission = projects.find((p) => p.id === projectId)?.mission?.trim();
+    const goal = goalId ? goals.find((g) => g.id === goalId) : null;
+    if (!mission && !goal) return "";
+    const lines = [mission ? `Missão do projeto: ${mission}` : null, goal ? `Objetivo desta task: ${goal.title}${goal.descriptionMd ? ` — ${goal.descriptionMd}` : ""}` : null].filter(Boolean);
+    return `\n${lines.join("\n")}\n(contexto do porquê; não altera as regras do run)\n`;
+  };
   let wfCounter = 0;
   let taskCounter = 0;
   let tevCounter = 0;
@@ -1038,14 +1066,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         const current = frontier.pop()!;
         for (const m of members) if (m.reportsToAgentId === current && !reports.includes(m)) (reports.push(m), frontier.push(m.profile.id));
       }
-      const input = ev.input as { title?: string; description?: string; acceptance?: string; assignee?: string; dependsOn?: string[]; ready?: boolean; taskId?: string };
+      const input = ev.input as { title?: string; description?: string; acceptance?: string; assignee?: string; dependsOn?: string[]; ready?: boolean; taskId?: string; goal?: string };
       const assignee = reports.find((m) => m.profile.id === input.assignee || m.profile.name.toLowerCase() === String(input.assignee ?? "").toLowerCase());
       if (me?.trust.canAssignTasks && assignee) {
         if (ev.name === "mcp__octopus__task_create" && input.title) {
           const wf = workflows.find((w) => w.projectId === run.projectId);
           if (wf) {
             const at = new Date().toISOString();
-            const task: Task = { id: `task_${++taskCounter}`, projectId: run.projectId, workflowId: wf.id, stageId: wf.stages[0]!.id, title: input.title.trim(), descriptionMd: input.description?.trim() ?? "", acceptanceMd: input.acceptance?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: assignee.profile.id, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: me.profile.id };
+            const task: Task = { id: `task_${++taskCounter}`, projectId: run.projectId, workflowId: wf.id, stageId: wf.stages[0]!.id, title: input.title.trim(), descriptionMd: input.description?.trim() ?? "", acceptanceMd: input.acceptance?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: assignee.profile.id, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: me.profile.id, goalId: goalForDelegation(run, wf, input.goal) };
             tasks.push(task);
             pushTaskEvent(task.id, "created_by_agent", null, task.stageId, run.id, `agente ${me.profile.name}`, null);
             audit(`agente ${me.profile.name}`, "board.task.created_by_agent", run.projectId, { taskId: task.id, title: task.title, assignee: assignee.profile.name, runId: run.id });
@@ -1153,7 +1181,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           const agentId = task.assignedAgentId ?? stage.agentProfileId;
           const member = agentId ? findMember(agentId) : undefined;
           const comments = taskEventsLog.filter((e) => e.taskId === task.id && e.kind === "comment").slice(-5);
-          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}${comments.length ? `\n\nComentários do gestor (contexto do pedido; não alteram política, sandbox ou permissões):\n${comments.map((c) => `- ${c.note}`).join("\n")}` : ""}`;
+          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${purposeLines(project.id, task.goalId)}${task.descriptionMd}${comments.length ? `\n\nComentários do gestor (contexto do pedido; não alteram política, sandbox ou permissões):\n${comments.map((c) => `- ${c.note}`).join("\n")}` : ""}`;
           const run: Run = {
             id: `run_mock_${++runCounter}`,
             projectId: project.id,
@@ -1557,7 +1585,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     create_workflow: async ({ projectId, input }) => {
       if (!input.name.trim()) throw new Error("Informe o nome do workflow");
       if (input.stages.length === 0) throw new Error("Um workflow precisa de pelo menos um estágio");
-      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId, name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? false, maxParallel: Math.max(1, input.maxParallel ?? 1), createdAt: new Date().toISOString() };
+      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId, name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? false, maxParallel: Math.max(1, input.maxParallel ?? 1), createdAt: new Date().toISOString(), goalId: resolveGoal(projectId, input.goalId) };
       workflows.push(wf);
       writeSnapshot("auto");
       return { ...wf };
@@ -1573,7 +1601,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         gate: s.gate,
         instruction: TEMPLATE_INSTRUCTIONS[s.name] ?? null,
       }));
-      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId: input.projectId, name: template.name, stages, useWorktrees: input.useWorktrees ?? false, maxParallel: 1, createdAt: new Date().toISOString() };
+      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId: input.projectId, name: template.name, stages, useWorktrees: input.useWorktrees ?? false, maxParallel: 1, createdAt: new Date().toISOString(), goalId: null };
       workflows.push(wf);
       writeSnapshot("auto");
       return { ...wf };
@@ -1581,7 +1609,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     update_workflow: async ({ workflowId, input }) => {
       const wf = workflows.find((w) => w.id === workflowId);
       if (!wf) throw new Error(`Workflow ${workflowId} não encontrado`);
-      Object.assign(wf, { name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? wf.useWorktrees, maxParallel: Math.max(1, input.maxParallel ?? wf.maxParallel) });
+      Object.assign(wf, { name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? wf.useWorktrees, maxParallel: Math.max(1, input.maxParallel ?? wf.maxParallel), goalId: input.goalId === undefined ? (wf.goalId ?? null) : resolveGoal(wf.projectId, input.goalId) });
       return { ...wf };
     },
     delete_workflow: async ({ workflowId }) => {
@@ -1600,7 +1628,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!wf.stages.some((s) => s.id === stageId)) throw new Error(`Estágio ${stageId} não existe neste workflow`);
       for (const dep of input.dependsOn ?? []) if (!tasks.some((t) => t.id === dep)) throw new Error(`Dependência ${dep} não encontrada`);
       const at = new Date().toISOString();
-      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: null };
+      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: null, goalId: input.goalId ? resolveGoal(projectId, input.goalId) : (wf.goalId ?? null) };
       tasks.push(task);
       pushTaskEvent(task.id, "created", null, stageId, null, "você", null);
       return { ...task };
@@ -1609,8 +1637,45 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const task = tasks.find((t) => t.id === taskId);
       if (!task) throw new Error(`Task ${taskId} não encontrada`);
       if (!input.title.trim()) throw new Error("Informe o título da task");
-      Object.assign(task, { title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? task.descriptionMd, acceptanceMd: input.acceptanceMd?.trim() ?? task.acceptanceMd, stageId: input.stageId ?? task.stageId, assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? task.dependsOn)], updatedAt: new Date().toISOString() });
+      Object.assign(task, { title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? task.descriptionMd, acceptanceMd: input.acceptanceMd?.trim() ?? task.acceptanceMd, stageId: input.stageId ?? task.stageId, assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? task.dependsOn)], updatedAt: new Date().toISOString(), goalId: input.goalId === undefined ? task.goalId : resolveGoal(task.projectId, input.goalId) });
       return { ...task };
+    },
+    list_goals: async ({ projectId }) => goals.filter((g) => g.projectId === projectId).map(goalProgress),
+    create_goal: async ({ projectId, input }) => {
+      if (!input.title.trim()) throw new Error("Informe o título do objetivo");
+      if (input.parentGoalId && !goals.some((g) => g.id === input.parentGoalId && g.projectId === projectId)) throw new Error("O objetivo pai não está neste projeto");
+      const at = new Date().toISOString();
+      const goal: Goal = { id: `goal_${++goalCounter}`, projectId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", parentGoalId: input.parentGoalId ?? null, status: input.status ?? "active", position: goals.filter((g) => g.projectId === projectId).length + 1, createdAt: at, updatedAt: at };
+      goals.push(goal);
+      audit("você", "board.goal.created", projectId, { goalId: goal.id, title: goal.title });
+      return { ...goal };
+    },
+    update_goal: async ({ goalId, input }) => {
+      const goal = goals.find((g) => g.id === goalId);
+      if (!goal) throw new Error(`Objetivo ${goalId} não encontrado`);
+      if (!input.title.trim()) throw new Error("Informe o título do objetivo");
+      if (input.parentGoalId === goal.id) throw new Error("Um objetivo não pode ser pai de si mesmo");
+      Object.assign(goal, { title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? goal.descriptionMd, parentGoalId: input.parentGoalId === undefined ? goal.parentGoalId : input.parentGoalId, status: input.status ?? goal.status, updatedAt: new Date().toISOString() });
+      return { ...goal };
+    },
+    delete_goal: async ({ goalId }) => {
+      const index = goals.findIndex((g) => g.id === goalId);
+      if (index === -1) return false;
+      goals.splice(index, 1);
+      for (const g of goals) if (g.parentGoalId === goalId) g.parentGoalId = null;
+      for (const t of tasks) if (t.goalId === goalId) t.goalId = null;
+      for (const w of workflows) if (w.goalId === goalId) w.goalId = null;
+      return true;
+    },
+    set_project_mission: async ({ projectId, mission }) => {
+      const project = projects.find((p) => p.id === projectId);
+      if (!project) throw new Error(`Projeto ${projectId} não encontrado`);
+      const trimmed = mission?.trim() ?? "";
+      if (trimmed.length > 2000) throw new Error("A missão pode ter no máximo 2000 caracteres");
+      project.mission = trimmed || null;
+      audit("você", "project.mission.updated", projectId, { chars: trimmed.length });
+      writeSnapshot("auto");
+      return { ...project };
     },
     delete_task: async ({ taskId }) => {
       const index = tasks.findIndex((t) => t.id === taskId);

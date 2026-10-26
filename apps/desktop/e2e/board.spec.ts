@@ -36,5 +36,16 @@ test.describe("Board (mock)", () => {
     await expect(page.getByTestId("delivery-row")).toContainText("Mapear integrações");
     await expect(page.getByTestId("workflow-report")).toContainText("Relatório final");
     await expect(page.getByTestId("report-progress")).toContainText("1 de 1");
+
+    // Missão e objetivos: a missão fica no Board; o objetivo criado aparece com progresso.
+    await page.getByRole("button", { name: "Definir missão" }).click();
+    await page.getByRole("dialog", { name: "Missão do projeto" }).getByLabel("Missão", { exact: true }).fill("Reduzir a triagem em 30%.");
+    await page.getByRole("button", { name: "Salvar missão" }).click();
+    await expect(page.getByTestId("project-mission")).toContainText("Missão: Reduzir a triagem em 30%.");
+    await page.getByRole("radio", { name: "Objetivos · 0" }).click();
+    await page.getByTestId("goal-form").getByLabel("Título do objetivo").fill("Triagem 30% mais rápida");
+    await page.getByTestId("goal-form").getByRole("button", { name: "Criar" }).click();
+    await expect(page.getByTestId("goal-row")).toContainText("0 de 0 tasks");
+    await expect(page.getByRole("radio", { name: "Objetivos · 1" })).toBeVisible();
   });
 });

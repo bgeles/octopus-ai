@@ -826,6 +826,14 @@ impl Store {
         let team = self.list_team(&member.project_id)?;
         let mut options = requested.clone();
         let mut base_prompt = member_prompt(&member);
+        if let Some(mission) = self
+            .get_project(&member.project_id)?
+            .and_then(|p| p.mission)
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+        {
+            base_prompt.push_str(&format!("\n\nMissão do projeto: {mission}"));
+        }
         if member.trust.can_assign_tasks {
             let names: Vec<String> = descendants(&team, agent_profile_id)
                 .into_iter()
@@ -1341,6 +1349,37 @@ mod tests {
             .agent_profile_id
             .is_none());
         assert!(s.delete_role("role_testador").is_err(), "cargo em uso");
+    }
+
+    #[test]
+    fn run_options_carry_the_project_mission() {
+        let (s, project) = store_with_project();
+        let ana = s
+            .add_team_member(
+                &project,
+                &TeamMemberInput {
+                    name: "Ana".into(),
+                    role_id: "role_implementador".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let before = s
+            .agent_run_options(&ana.profile.id, &RunOptions::default())
+            .unwrap();
+        assert!(!before
+            .system_prompt_append
+            .unwrap_or_default()
+            .contains("Missão do projeto"));
+        s.set_project_mission(&project, Some("Reduzir a triagem em 30%."))
+            .unwrap();
+        let after = s
+            .agent_run_options(&ana.profile.id, &RunOptions::default())
+            .unwrap();
+        assert!(after
+            .system_prompt_append
+            .unwrap()
+            .contains("Missão do projeto: Reduzir a triagem em 30%."));
     }
 
     #[test]

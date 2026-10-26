@@ -669,6 +669,7 @@ mod tests {
                     stages: wf.stages.clone(),
                     use_worktrees: false,
                     max_parallel: 2,
+                    goal_id: None,
                 },
             )
             .unwrap();

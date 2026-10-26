@@ -19,6 +19,9 @@ use crate::protocol::{TaskContext, TaskMode, TaskStatusUpdate};
 pub struct PromptContext {
     /// Últimos comentários do gestor, em ordem cronológica.
     pub comments: Vec<TaskEvent>,
+    /// Missão do projeto e objetivo da task (ou do workflow): o "porquê".
+    pub mission: Option<String>,
+    pub goal: Option<super::goals::Goal>,
 }
 
 pub const MAX_COMMENT_CHARS: usize = 4_000;
@@ -68,6 +71,9 @@ pub struct Workflow {
     pub use_worktrees: bool,
     pub max_parallel: u32,
     pub created_at: String,
+    /// Objetivo padrão das tasks deste workflow.
+    #[serde(default)]
+    pub goal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -79,6 +85,8 @@ pub struct WorkflowInput {
     pub use_worktrees: bool,
     #[serde(default = "default_parallel")]
     pub max_parallel: u32,
+    #[serde(default)]
+    pub goal_id: Option<String>,
 }
 
 fn default_parallel() -> u32 {
@@ -164,13 +172,16 @@ pub struct Task {
     /// Membro (agente) que criou a task pelas tools de delegação; `None` = você.
     #[serde(default)]
     pub created_by_agent_id: Option<String>,
+    /// Objetivo da task (herda do workflow quando não informado).
+    #[serde(default)]
+    pub goal_id: Option<String>,
     /// Commit base no claim, para o diff da entrega.
     #[serde(default)]
     pub base_commit: Option<String>,
 }
 
 impl Task {
-    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit, approver_agent_id, return_count, review_attempts, created_by_agent_id FROM task";
+    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit, approver_agent_id, return_count, review_attempts, created_by_agent_id, goal_id FROM task";
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let deps: String = row.get(9)?;
@@ -202,6 +213,7 @@ impl Task {
             return_count: row.get::<_, i64>(21)? as u32,
             review_attempts: row.get::<_, i64>(22)? as u32,
             created_by_agent_id: row.get(23)?,
+            goal_id: row.get(24)?,
         })
     }
 }
@@ -224,6 +236,9 @@ pub struct TaskInput {
     /// `true` entra em `ready` (o scheduler pega); `false` fica em `backlog`.
     #[serde(default = "default_true")]
     pub ready: bool,
+    /// Objetivo; `None` herda o do workflow.
+    #[serde(default)]
+    pub goal_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -240,6 +255,7 @@ impl Default for TaskInput {
             assigned_agent_id: None,
             depends_on: Vec::new(),
             ready: true,
+            goal_id: None,
         }
     }
 }
@@ -292,7 +308,7 @@ impl Store {
 
     pub fn list_workflows(&self, project_id: &str) -> Result<Vec<Workflow>> {
         let conn = self.conn.lock().expect("store mutex");
-        let mut stmt = conn.prepare("SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE project_id = ?1 ORDER BY created_at")?;
+        let mut stmt = conn.prepare("SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE project_id = ?1 ORDER BY created_at")?;
         let rows = stmt
             .query_map(params![project_id], workflow_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -303,7 +319,7 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex");
         Ok(conn
             .query_row(
-                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE id = ?1",
+                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE id = ?1",
                 params![id],
                 workflow_from_row,
             )
@@ -317,11 +333,15 @@ impl Store {
         if input.stages.is_empty() {
             anyhow::bail!("Um workflow precisa de pelo menos um estágio");
         }
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(project_id, g)?),
+            None => None,
+        };
         let id = new_id("wf");
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
-            "INSERT INTO workflow (id, project_id, name, stages_json, use_worktrees, max_parallel, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, project_id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64, now()],
+            "INSERT INTO workflow (id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, project_id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64, now(), goal_id],
         )?;
         drop(conn);
         self.get_workflow(&id)?.context("workflow sumiu após criar")
@@ -362,11 +382,19 @@ impl Store {
                 stages,
                 use_worktrees,
                 max_parallel: 1,
+                goal_id: None,
             },
         )
     }
 
     pub fn update_workflow(&self, id: &str, input: &WorkflowInput) -> Result<Workflow> {
+        let current = self
+            .get_workflow(id)?
+            .with_context(|| format!("Workflow {id} não encontrado"))?;
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(&current.project_id, g)?),
+            None => None,
+        };
         if input.name.trim().is_empty() {
             anyhow::bail!("Informe o nome do workflow");
         }
@@ -376,8 +404,8 @@ impl Store {
         {
             let conn = self.conn.lock().expect("store mutex");
             let changed = conn.execute(
-                "UPDATE workflow SET name = ?2, stages_json = ?3, use_worktrees = ?4, max_parallel = ?5 WHERE id = ?1",
-                params![id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64],
+                "UPDATE workflow SET name = ?2, stages_json = ?3, use_worktrees = ?4, max_parallel = ?5, goal_id = ?6 WHERE id = ?1",
+                params![id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64, goal_id],
             )?;
             if changed == 0 {
                 anyhow::bail!("Workflow {id} não encontrado");
@@ -457,6 +485,10 @@ impl Store {
                 anyhow::bail!("Dependência {dep} não encontrada");
             }
         }
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(project_id, g)?),
+            None => workflow.goal_id.clone(),
+        };
         let id = new_id("task");
         let ts = now();
         {
@@ -468,8 +500,8 @@ impl Store {
                 |r| r.get(0),
             )?;
             tx.execute(
-                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at, created_by_agent_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
+                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at, created_by_agent_id, goal_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
                 params![
                     id,
                     project_id,
@@ -483,7 +515,8 @@ impl Store {
                     serde_json::to_string(&input.depends_on)?,
                     position,
                     ts,
-                    created_by
+                    created_by,
+                    goal_id
                 ],
             )?;
             insert_event(
@@ -512,6 +545,10 @@ impl Store {
         let current = self
             .get_task(id)?
             .with_context(|| format!("Task {id} não encontrada"))?;
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(&current.project_id, g)?),
+            None => current.goal_id.clone(),
+        };
         for dep in &input.depends_on {
             if dep == id {
                 anyhow::bail!("Uma task não pode depender de si mesma");
@@ -524,8 +561,8 @@ impl Store {
         {
             let conn = self.conn.lock().expect("store mutex");
             conn.execute(
-                "UPDATE task SET title = ?2, description_md = ?3, acceptance_md = ?4, stage_id = ?5, assigned_agent_id = ?6, depends_on_json = ?7, updated_at = ?8 WHERE id = ?1",
-                params![id, input.title.trim(), input.description_md.trim(), input.acceptance_md.trim(), stage_id, input.assigned_agent_id, serde_json::to_string(&input.depends_on)?, now()],
+                "UPDATE task SET title = ?2, description_md = ?3, acceptance_md = ?4, stage_id = ?5, assigned_agent_id = ?6, depends_on_json = ?7, updated_at = ?8, goal_id = ?9 WHERE id = ?1",
+                params![id, input.title.trim(), input.description_md.trim(), input.acceptance_md.trim(), stage_id, input.assigned_agent_id, serde_json::to_string(&input.depends_on)?, now(), goal_id],
             )?;
         }
         self.get_task(id)?.context("task sumiu após atualizar")
@@ -970,8 +1007,25 @@ impl Store {
 
     /// Contexto para `task_prompt`/`review_prompt`: os últimos comentários do gestor.
     pub fn prompt_context(&self, task: &Task) -> Result<PromptContext> {
+        let mission = self
+            .get_project(&task.project_id)?
+            .and_then(|p| p.mission)
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        let goal_id = match task.goal_id.clone() {
+            Some(g) => Some(g),
+            None => self
+                .get_workflow(&task.workflow_id)?
+                .and_then(|w| w.goal_id),
+        };
+        let goal = match goal_id {
+            Some(g) => self.get_goal(&g)?,
+            None => None,
+        };
         Ok(PromptContext {
             comments: self.task_comments(&task.id, PROMPT_COMMENTS)?,
+            mission,
+            goal,
         })
     }
 
@@ -990,6 +1044,7 @@ impl Store {
             who = worker.unwrap_or("um membro do time"),
             title = task.title
         );
+        push_purpose(&mut text, ctx);
         if !task.description_md.trim().is_empty() {
             text.push_str("\nPedido original:\n");
             text.push_str(task.description_md.trim());
@@ -1111,6 +1166,7 @@ impl Store {
             stage = stage.name,
             title = task.title
         );
+        push_purpose(&mut text, ctx);
         if task.created_by_agent_id.is_some() {
             // Só um rótulo: política, sandbox e permissões não mudam por quem criou a task.
             text.push_str(
@@ -1319,7 +1375,7 @@ impl Store {
         }
         let workflow = tx
             .query_row(
-                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE id = ?1",
+                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE id = ?1",
                 params![task.workflow_id],
                 workflow_from_row,
             )
@@ -1639,7 +1695,7 @@ fn finish_review_run(
 ) -> Result<()> {
     let workflow = tx
         .query_row(
-            "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE id = ?1",
+            "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE id = ?1",
             params![task.workflow_id],
             workflow_from_row,
         )
@@ -1796,6 +1852,26 @@ fn finish_review_run(
     Ok(())
 }
 
+/// Missão e objetivo no prompt: o "porquê" (contexto; não altera as regras do run).
+fn push_purpose(text: &mut String, ctx: &PromptContext) {
+    if ctx.mission.is_none() && ctx.goal.is_none() {
+        return;
+    }
+    text.push('\n');
+    if let Some(m) = &ctx.mission {
+        text.push_str(&format!("Missão do projeto: {m}\n"));
+    }
+    if let Some(g) = &ctx.goal {
+        let desc = g.description_md.trim();
+        if desc.is_empty() {
+            text.push_str(&format!("Objetivo desta task: {}\n", g.title));
+        } else {
+            text.push_str(&format!("Objetivo desta task: {} — {desc}\n", g.title));
+        }
+    }
+    text.push_str("(contexto do porquê; não altera as regras do run)\n");
+}
+
 /// Comentários do gestor no prompt: só contexto do pedido (não mudam política, sandbox nem permissões).
 fn push_comments(text: &mut String, ctx: &PromptContext) {
     if ctx.comments.is_empty() {
@@ -1896,6 +1972,7 @@ fn workflow_from_row(row: &Row<'_>) -> rusqlite::Result<Workflow> {
         use_worktrees: row.get::<_, i64>(4)? != 0,
         max_parallel: row.get::<_, i64>(5)? as u32,
         created_at: row.get(6)?,
+        goal_id: row.get(7)?,
     })
 }
 
@@ -1998,6 +2075,7 @@ mod tests {
                 stages: wf.stages.clone(),
                 use_worktrees: false,
                 max_parallel: 2,
+                goal_id: None,
             },
         )
         .unwrap()
@@ -2570,6 +2648,7 @@ mod tests {
                 stages: wf.stages.clone(),
                 use_worktrees: false,
                 max_parallel: 2,
+                goal_id: None,
             },
         )
         .unwrap();
@@ -2663,6 +2742,66 @@ mod tests {
             .unwrap()
             .len(),
             1
+        );
+    }
+
+    #[test]
+    fn prompts_carry_mission_and_goal() {
+        use crate::store::goals::GoalInput;
+        let (s, project, wf) = setup();
+        s.set_project_mission(&project, Some("Reduzir a triagem em 30%."))
+            .unwrap();
+        let goal = s
+            .create_goal(
+                &project,
+                &GoalInput {
+                    title: "Regras de roteamento".into(),
+                    description_md: "para onde cada lead vai".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.update_workflow(
+            &wf.id,
+            &WorkflowInput {
+                name: wf.name.clone(),
+                stages: wf.stages.clone(),
+                use_worktrees: false,
+                max_parallel: 1,
+                goal_id: Some(goal.id.clone()),
+            },
+        )
+        .unwrap();
+        let t = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Com porquê".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ctx = s.prompt_context(&t).unwrap();
+        assert_eq!(ctx.mission.as_deref(), Some("Reduzir a triagem em 30%."));
+        assert_eq!(
+            ctx.goal.as_ref().map(|g| g.id.as_str()),
+            Some(goal.id.as_str()),
+            "herdado do workflow"
+        );
+        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf, &ctx);
+        assert!(prompt.contains("Missão do projeto: Reduzir a triagem em 30%."));
+        assert!(
+            prompt.contains("Objetivo desta task: Regras de roteamento — para onde cada lead vai")
+        );
+        assert!(prompt.contains("não altera as regras do run"));
+        assert!(
+            Store::review_prompt(&t, &wf.stages[0], &wf, Some("Ana"), &ctx)
+                .contains("Objetivo desta task")
+        );
+        assert!(
+            !Store::task_prompt(&t, &wf.stages[0], &wf, &PromptContext::default())
+                .contains("Missão do projeto")
         );
     }
 
