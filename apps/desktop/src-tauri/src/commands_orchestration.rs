@@ -256,6 +256,53 @@ pub fn list_project_activity(
         .map_err(err)
 }
 
+// ---------------------------------------------------------------- missão e objetivos
+
+#[tauri::command]
+pub fn list_goals(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<crate::store::goals::GoalProgress>> {
+    state.store.list_goals(&project_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn create_goal(
+    state: State<'_, AppState>,
+    project_id: String,
+    input: crate::store::goals::GoalInput,
+) -> CmdResult<crate::store::goals::Goal> {
+    state.store.create_goal(&project_id, &input).map_err(err)
+}
+
+#[tauri::command]
+pub fn update_goal(
+    state: State<'_, AppState>,
+    goal_id: String,
+    input: crate::store::goals::GoalInput,
+) -> CmdResult<crate::store::goals::Goal> {
+    state.store.update_goal(&goal_id, &input).map_err(err)
+}
+
+#[tauri::command]
+pub fn delete_goal(state: State<'_, AppState>, goal_id: String) -> CmdResult<bool> {
+    state.store.delete_goal(&goal_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_project_mission(
+    state: State<'_, AppState>,
+    project_id: String,
+    mission: Option<String>,
+) -> CmdResult<crate::store::models::Project> {
+    let project = state
+        .store
+        .set_project_mission(&project_id, mission.as_deref())
+        .map_err(err)?;
+    auto_backup(&state);
+    Ok(project)
+}
+
 /// Comentário seu na linha do tempo da task; entra no prompt do próximo run dela.
 #[tauri::command]
 pub fn add_task_comment(

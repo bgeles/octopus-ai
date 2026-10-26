@@ -1,10 +1,12 @@
-import { PackageCheck, Plus } from "lucide-react";
+import { PackageCheck, Plus, Target } from "lucide-react";
 import { useEffect, useState } from "react";
 import { copyText, renderMarkdown } from "../lib/markdown";
-import type { Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowReport, WorkflowTemplate } from "../lib/types";
+import type { Goal, GoalInput, GoalProgress, Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowReport, WorkflowTemplate } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { DeliveriesList } from "./DeliveriesList";
 import { DiffView } from "./DiffView";
+import { GoalsPanel } from "./GoalsPanel";
+import { MissionLine } from "./MissionLine";
 import { TaskTimeline } from "./TaskTimeline";
 import { WorkflowReportCard } from "./WorkflowReportCard";
 import { formatUsd } from "./RunSidebar";
@@ -32,6 +34,13 @@ type BoardViewProps = {
   onExportReport?: (report: WorkflowReport, destination: string | null) => Promise<string>;
   /** Quem aprova num estágio gate: você ou a política de confiança do responsável. */
   onSetGateApprover: (workflow: Workflow, stage: Stage, approver: StageApprover) => Promise<void>;
+  /** Missão e objetivos: o porquê ligado ao workflow, às tasks e aos prompts. */
+  goals?: GoalProgress[];
+  onEditMission?: () => void;
+  onSetWorkflowGoal?: (workflow: Workflow, goalId: string | null) => Promise<void>;
+  onCreateGoal?: (input: GoalInput) => Promise<void>;
+  onUpdateGoal?: (goal: Goal, input: GoalInput) => Promise<void>;
+  onDeleteGoal?: (goal: Goal) => Promise<void>;
   schedulerPaused: boolean;
   onTogglePaused: () => void;
   onTick: () => void;
@@ -72,7 +81,9 @@ export function BoardView(props: BoardViewProps) {
   const { project, workflows, templates, tasks, team, runs, selectedWorkflowId, onSelectWorkflow, onNewTask, onOpenTask, schedulerPaused, onTogglePaused, onTick, selectedTask } = props;
   const [useWorktrees, setUseWorktrees] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
-  const [boardView, setBoardView] = useState<"kanban" | "deliveries">("kanban");
+  const [boardView, setBoardView] = useState<"kanban" | "deliveries" | "goals">("kanban");
+  const goals = props.goals ?? [];
+  const goalTitle = (id: string | null) => (id ? (goals.find((g) => g.id === id)?.title ?? null) : null);
   const workflow = workflows?.find((w) => w.id === selectedWorkflowId) ?? workflows?.[0] ?? null;
   const wfTasks = workflow ? tasks.filter((t) => t.workflowId === workflow.id) : [];
   const deliveries = wfTasks.filter((t) => t.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -87,9 +98,9 @@ export function BoardView(props: BoardViewProps) {
         </div>
         {workflow && (
           <div role="radiogroup" aria-label="Vista" className="flex rounded-lg border hairline-strong p-0.5 text-[13px]">
-            {(["kanban", "deliveries"] as const).map((v) => (
+            {(["kanban", "deliveries", ...(props.onCreateGoal ? (["goals"] as const) : [])] as const).map((v) => (
               <button key={v} type="button" role="radio" aria-checked={boardView === v} onClick={() => setBoardView(v)} className={["rounded-md px-3 py-1.5 font-medium", boardView === v ? "bg-ink text-paper" : "text-slate hover:text-ink"].join(" ")}>
-                {v === "kanban" ? "Kanban" : `Entregas · ${deliveries.length}`}
+                {v === "kanban" ? "Kanban" : v === "deliveries" ? `Entregas · ${deliveries.length}` : `Objetivos · ${goals.filter((g) => g.status === "active").length}`}
               </button>
             ))}
           </div>
@@ -121,6 +132,27 @@ export function BoardView(props: BoardViewProps) {
           )}
         </div>
       </div>
+
+      {props.onEditMission && workflows && workflows.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <MissionLine project={project} onEdit={props.onEditMission} />
+          </div>
+          {workflow && props.onSetWorkflowGoal && goals.length > 0 && (
+            <label className="flex items-center gap-2 text-[13px] text-slate">
+              Objetivo do workflow
+              <select aria-label="Objetivo do workflow" data-testid="workflow-goal" value={workflow.goalId ?? ""} onChange={(e) => void props.onSetWorkflowGoal!(workflow, e.target.value || null)} className="rounded-sm border hairline-strong bg-surface px-2 py-1.5 text-[13px] text-ink">
+                <option value="">Nenhum</option>
+                {goals.filter((g) => g.status === "active" || g.id === workflow.goalId).map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
 
       {workflows && workflows.length === 0 && (
         <section aria-label="Começar um workflow" className="flex flex-col gap-4 rounded-xl border hairline bg-surface p-6">
@@ -203,6 +235,7 @@ export function BoardView(props: BoardViewProps) {
           </section>
 
           <div className="flex min-h-0 flex-wrap gap-5">
+            {boardView === "goals" && props.onCreateGoal && props.onUpdateGoal && props.onDeleteGoal && <GoalsPanel goals={goals} onCreate={props.onCreateGoal} onUpdate={props.onUpdateGoal} onDelete={props.onDeleteGoal} />}
             {boardView === "deliveries" && (
               <section aria-label="Entregas" className="flex min-w-0 flex-1 basis-[480px] flex-col gap-2 rounded-xl border hairline bg-surface p-5" data-testid="deliveries">
                 <div className="flex items-baseline gap-3">
@@ -215,7 +248,7 @@ export function BoardView(props: BoardViewProps) {
                 <DeliveriesList tasks={deliveries} team={team} runs={runs} selectedTaskId={selectedTask?.id ?? null} onOpenTask={onOpenTask} />
               </section>
             )}
-            <section aria-label="Tasks por estágio" className={["grid min-w-0 flex-1 basis-[640px] grid-cols-[repeat(auto-fit,minmax(min(220px,100%),1fr))] gap-3", boardView === "deliveries" ? "hidden" : ""].join(" ")} data-testid="kanban" hidden={boardView === "deliveries"}>
+            <section aria-label="Tasks por estágio" className={["grid min-w-0 flex-1 basis-[640px] grid-cols-[repeat(auto-fit,minmax(min(220px,100%),1fr))] gap-3", boardView !== "kanban" ? "hidden" : ""].join(" ")} data-testid="kanban" hidden={boardView !== "kanban"}>
               {workflow.stages.map((stage) => {
                 const inStage = wfTasks.filter((t) => t.stageId === stage.id);
                 return (
@@ -226,7 +259,7 @@ export function BoardView(props: BoardViewProps) {
                     </div>
                     {inStage.length === 0 && <div className="rounded-lg border border-dashed hairline p-3 text-center text-xs text-slate">vazio</div>}
                     {inStage.map((task) => (
-                      <TaskCard key={task.id} task={task} stage={stage} member={memberOf(task.assignedAgentId ?? stage.agentProfileId)} team={team} run={runs.find((r) => r.id === task.lockRunId) ?? null} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
+                      <TaskCard key={task.id} task={task} stage={stage} member={memberOf(task.assignedAgentId ?? stage.agentProfileId)} team={team} run={runs.find((r) => r.id === task.lockRunId) ?? null} goal={goalTitle(task.goalId)} selected={selectedTask?.id === task.id} onOpen={() => onOpenTask(task)} />
                     ))}
                   </div>
                 );
@@ -234,7 +267,7 @@ export function BoardView(props: BoardViewProps) {
             </section>
 
             {selectedTask && workflow && (
-              <TaskDetail task={selectedTask} workflow={workflow} team={team} runs={runs} events={props.taskEvents} tasks={tasks} onApprove={props.onApprove} onReturn={props.onReturn} onMove={props.onMove} onOpenRun={props.onOpenRun} onLoadDiff={props.onLoadDiff} onComment={props.onComment} onClose={props.onCloseTask} />
+              <TaskDetail task={selectedTask} workflow={workflow} team={team} runs={runs} events={props.taskEvents} tasks={tasks} goal={goalTitle(selectedTask.goalId)} onApprove={props.onApprove} onReturn={props.onReturn} onMove={props.onMove} onOpenRun={props.onOpenRun} onLoadDiff={props.onLoadDiff} onComment={props.onComment} onClose={props.onCloseTask} />
             )}
           </div>
         </>
@@ -245,7 +278,7 @@ export function BoardView(props: BoardViewProps) {
   );
 }
 
-function TaskCard({ task, stage, member, team, run, selected, onOpen }: { task: Task; stage?: Stage; member: TeamMember | null; team: TeamMember[]; run: Run | null; selected: boolean; onOpen: () => void }) {
+function TaskCard({ task, stage, member, team, run, goal, selected, onOpen }: { task: Task; stage?: Stage; member: TeamMember | null; team: TeamMember[]; run: Run | null; goal?: string | null; selected: boolean; onOpen: () => void }) {
   const border = task.status === "running" ? "border-[1.5px] border-brand" : task.status === "waiting_approval" || task.status === "review" ? "border-[1.5px] border-warning" : task.status === "failed" || task.status === "blocked" ? "border-[1.5px] border-brand/50" : selected ? "border-ink" : "hairline";
   return (
     <button type="button" onClick={onOpen} className={["flex flex-col gap-2 rounded-lg border bg-surface px-3.5 py-3 text-left hover:border-ink", border].join(" ")} data-testid="task-card" data-status={task.status} aria-current={selected ? "true" : undefined}>
@@ -256,6 +289,11 @@ function TaskCard({ task, stage, member, team, run, selected, onOpen }: { task: 
         <span className="ml-auto font-mono text-[11px] text-slate">{shortId(task.id)}</span>
       </div>
       <span className="text-[13px] font-semibold">{task.title}</span>
+      {goal && (
+        <span className="inline-flex max-w-full items-center gap-1 self-start rounded-full border hairline-strong px-2 py-0.5 text-[11px] text-slate" data-testid="task-goal" title={`Objetivo: ${goal}`}>
+          <Target size={11} aria-hidden /> <span className="truncate">{goal}</span>
+        </span>
+      )}
       <div className="flex items-center gap-2 text-xs text-slate">
         {member ? <Avatar initials={member.profile.avatarSeed} size={20} active={task.status === "running"} /> : <Avatar initials="VC" size={20} manager />}
         <span className="truncate">{member ? member.profile.name : "Você"}</span>
@@ -276,7 +314,7 @@ export function shortId(id: string): string {
   return id.replace(/^task_/, "T-").slice(0, 10);
 }
 
-function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onReturn, onMove, onOpenRun, onLoadDiff, onComment, onClose }: { task: Task; workflow: Workflow; team: TeamMember[]; runs: Run[]; events: TaskEvent[]; tasks: Task[]; onApprove: BoardViewProps["onApprove"]; onReturn: BoardViewProps["onReturn"]; onMove: BoardViewProps["onMove"]; onOpenRun: (run: Run) => void; onLoadDiff: BoardViewProps["onLoadDiff"]; onComment?: BoardViewProps["onComment"]; onClose: () => void }) {
+function TaskDetail({ task, workflow, team, runs, events, tasks, goal, onApprove, onReturn, onMove, onOpenRun, onLoadDiff, onComment, onClose }: { task: Task; workflow: Workflow; team: TeamMember[]; runs: Run[]; events: TaskEvent[]; tasks: Task[]; goal?: string | null; onApprove: BoardViewProps["onApprove"]; onReturn: BoardViewProps["onReturn"]; onMove: BoardViewProps["onMove"]; onOpenRun: (run: Run) => void; onLoadDiff: BoardViewProps["onLoadDiff"]; onComment?: BoardViewProps["onComment"]; onClose: () => void }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -341,6 +379,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
         <Row label="Responsável" value={stage?.gate ? "Você (gate humano)" : member ? `${member.profile.name} · ${member.role.title}` : "run avulso"} />
         {task.createdByAgentId && <Row label="Criada por" value={(() => { const c = team.find((m) => m.profile.id === task.createdByAgentId); return c ? `${c.profile.name} · ${c.role.title} (pelo board)` : "um membro do time"; })()} />}
         {task.dependsOn.length > 0 && <Row label="Depende de" value={task.dependsOn.map((id) => tasks.find((t) => t.id === id)?.title ?? id).join(", ")} />}
+        {goal && <Row label="Objetivo" value={goal} />}
         {currentRun && <Row label="Run atual" value={`${currentRun.id.slice(-6)} · ${currentRun.status}`} />}
         {task.worktreePath && <Row label="Worktree" value={task.worktreePath} />}
       </div>

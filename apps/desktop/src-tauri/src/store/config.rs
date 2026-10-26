@@ -310,19 +310,20 @@ impl Store {
                 match (existing, mode) {
                     (None, _) => {
                         tx.execute(
-                            "INSERT INTO project (id, name, path, auth_mode, created_at, sandbox_profile_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                            params![incoming.id, incoming.name, incoming.path, incoming.auth_mode.as_str(), incoming.created_at, incoming.sandbox_profile_id.clone().unwrap_or_else(|| "sandbox_dev".into())],
+                            "INSERT INTO project (id, name, path, auth_mode, created_at, sandbox_profile_id, mission) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![incoming.id, incoming.name, incoming.path, incoming.auth_mode.as_str(), incoming.created_at, incoming.sandbox_profile_id.clone().unwrap_or_else(|| "sandbox_dev".into()), incoming.mission],
                         )?;
                         result.projects_added += 1;
                     }
                     (Some(existing), ImportMode::Replace) if !same_project(existing, incoming) => {
                         tx.execute(
-                            "UPDATE project SET name = ?2, path = ?3, auth_mode = ?4 WHERE id = ?1",
+                            "UPDATE project SET name = ?2, path = ?3, auth_mode = ?4, mission = COALESCE(?5, mission) WHERE id = ?1",
                             params![
                                 existing.id,
                                 incoming.name,
                                 incoming.path,
-                                incoming.auth_mode.as_str()
+                                incoming.auth_mode.as_str(),
+                                incoming.mission
                             ],
                         )?;
                         result.projects_updated += 1;

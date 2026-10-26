@@ -40,6 +40,9 @@ pub struct Project {
     /// Perfil de sandbox (`sandbox_strict`, `sandbox_dev`, `sandbox_readonly` ou próprio).
     #[serde(default)]
     pub sandbox_profile_id: Option<String>,
+    /// Missão do projeto: o "porquê" que entra nos prompts do time.
+    #[serde(default)]
+    pub mission: Option<String>,
 }
 
 impl Project {
@@ -51,6 +54,7 @@ impl Project {
             auth_mode: AuthMode::parse(&row.get::<_, String>(3)?),
             created_at: row.get(4)?,
             sandbox_profile_id: row.get(5)?,
+            mission: row.get(6)?,
         })
     }
 }

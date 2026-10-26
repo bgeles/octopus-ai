@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 
+use super::goals::{find_goal, GoalProgress};
 use super::orchestration::{Task, TaskInput, TaskStatus};
 use super::team::{descendants, TeamMember};
 use super::Store;
@@ -64,6 +65,8 @@ impl Store {
         }
         let reports = descendants(&team, &agent_id);
         let tasks = self.list_tasks(&project_id)?;
+        let goals = self.list_goals(&project_id)?;
+        let mission = self.get_project(&project_id)?.and_then(|p| p.mission);
         let str_arg = |k: &str| {
             args.get(k)
                 .and_then(|v| v.as_str())
@@ -74,7 +77,14 @@ impl Store {
         match op {
             BoardOp::TeamList => Ok(BoardCallResult {
                 ok: true,
-                content: team_list_markdown(&team, me, &reports, &tasks),
+                content: team_list_markdown(
+                    &team,
+                    me,
+                    &reports,
+                    &tasks,
+                    &goals,
+                    mission.as_deref(),
+                ),
             }),
             BoardOp::TaskList => {
                 let filter = str_arg("status");
@@ -89,7 +99,7 @@ impl Store {
                     .collect();
                 Ok(BoardCallResult {
                     ok: true,
-                    content: task_list_markdown(&mine, &team, &filter),
+                    content: task_list_markdown(&mine, &team, &goals, &filter),
                 })
             }
             BoardOp::TaskCreate => {
@@ -180,6 +190,36 @@ impl Store {
                         depends_on.push(dep.to_string());
                     }
                 }
+                // Objetivo: informado (id ou título ativo), senão o da task do run, senão o do workflow.
+                let goal_arg = str_arg("goal");
+                let goal_id = if goal_arg.is_empty() {
+                    let run_task: Option<String> = {
+                        let conn = self.conn.lock().expect("store mutex");
+                        conn.query_row(
+                            "SELECT t.goal_id FROM run r JOIN task t ON t.id = r.task_id WHERE r.id = ?1",
+                            params![run_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten()
+                    };
+                    run_task.or_else(|| workflow.goal_id.clone())
+                } else {
+                    match find_goal(&goals, &goal_arg) {
+                        Some(g) => Some(g.id.clone()),
+                        None => {
+                            return Ok(refuse(&format!(
+                            "Objetivo \"{goal_arg}\" não existe ou está concluído; use um de: {}.",
+                            goals
+                                .iter()
+                                .filter(|g| g.goal.status == super::goals::GoalStatus::Active)
+                                .map(|g| g.goal.title.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )))
+                        }
+                    }
+                };
                 let input = TaskInput {
                     title,
                     description_md: str_arg("description"),
@@ -188,6 +228,7 @@ impl Store {
                     assigned_agent_id: Some(assignee.profile.id.clone()),
                     depends_on,
                     ready: args.get("ready").and_then(|v| v.as_bool()).unwrap_or(true),
+                    goal_id,
                 };
                 let actor = format!("agente {}", me.profile.name);
                 let task = self.create_task_as(
@@ -310,6 +351,8 @@ fn team_list_markdown(
     me: &TeamMember,
     reports: &[&TeamMember],
     tasks: &[Task],
+    goals: &[GoalProgress],
+    mission: Option<&str>,
 ) -> String {
     let open_for = |id: &str| {
         tasks
@@ -362,10 +405,31 @@ fn team_list_markdown(
         "Você pode criar e atribuir tasks para: {}.",
         names(reports)
     ));
+    if let Some(m) = mission.map(str::trim).filter(|m| !m.is_empty()) {
+        out.push_str(&format!("\nMissão do projeto: {m}"));
+    }
+    let active: Vec<&GoalProgress> = goals
+        .iter()
+        .filter(|g| g.goal.status == super::goals::GoalStatus::Active)
+        .collect();
+    if !active.is_empty() {
+        out.push_str("\nObjetivos ativos (use o título ou o id em `goal` ao criar tasks):");
+        for g in active {
+            out.push_str(&format!(
+                "\n- {} ({}) · {} de {} tasks concluídas",
+                g.goal.title, g.goal.id, g.tasks_done, g.tasks_total
+            ));
+        }
+    }
     out
 }
 
-fn task_list_markdown(tasks: &[&Task], team: &[TeamMember], filter: &str) -> String {
+fn task_list_markdown(
+    tasks: &[&Task],
+    team: &[TeamMember],
+    goals: &[GoalProgress],
+    filter: &str,
+) -> String {
     let name_of = |id: Option<&str>| {
         id.and_then(|i| team.iter().find(|m| m.profile.id == i))
             .map(|m| m.profile.name.clone())
@@ -400,6 +464,17 @@ fn task_list_markdown(tasks: &[&Task], team: &[TeamMember], filter: &str) -> Str
                 format!(" · depende de {}", t.depends_on.join(", "))
             }
         ));
+        if let Some(g) = t
+            .goal_id
+            .as_deref()
+            .and_then(|id| goals.iter().find(|g| g.goal.id == id))
+        {
+            let last = out.pop();
+            out.push_str(&format!(" · objetivo: {}", g.goal.title));
+            if let Some(c) = last {
+                out.push(c);
+            }
+        }
     }
     out
 }
@@ -617,6 +692,98 @@ mod tests {
             .unwrap();
         assert_eq!(audit.len(), 2);
         assert_eq!(audit[0].actor, "agente Gabi");
+    }
+
+    #[test]
+    fn task_create_accepts_goal_by_title_and_inherits_from_the_run_task() {
+        use crate::store::goals::GoalInput;
+        let (s, project, gabi, dani, _rest) = setup();
+        s.set_project_mission(&project, Some("Reduzir a triagem em 30%."))
+            .unwrap();
+        let goal = s
+            .create_goal(
+                &project,
+                &GoalInput {
+                    title: "Mapear mercado".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let run = run_as(&s, &project, Some(&gabi));
+
+        // team_list termina com a missão e os objetivos ativos.
+        let list = s
+            .handle_board_call(&run, BoardOp::TeamList, &serde_json::json!({}))
+            .unwrap();
+        assert!(list
+            .content
+            .contains("Missão do projeto: Reduzir a triagem em 30%."));
+        assert!(list.content.contains("Objetivos ativos"));
+        assert!(list
+            .content
+            .contains(&format!("Mapear mercado ({}) · 0 de 0 tasks", goal.id)));
+
+        // Por título (sem diferenciar maiúsculas).
+        let created = s
+            .handle_board_call(
+                &run,
+                BoardOp::TaskCreate,
+                &serde_json::json!({"title": "Concorrentes", "assignee": "Dani", "goal": "mapear MERCADO"}),
+            )
+            .unwrap();
+        assert!(created.ok, "{}", created.content);
+        let t1 = s.list_tasks(&project).unwrap().remove(0);
+        assert_eq!(t1.goal_id.as_deref(), Some(goal.id.as_str()));
+        assert_eq!(t1.assigned_agent_id.as_deref(), Some(dani.as_str()));
+
+        // task_list mostra o objetivo.
+        let open = s
+            .handle_board_call(&run, BoardOp::TaskList, &serde_json::json!({}))
+            .unwrap();
+        assert!(
+            open.content.contains("· objetivo: Mapear mercado"),
+            "{}",
+            open.content
+        );
+
+        // Run de uma task com objetivo: a task criada sem `goal` herda o dela.
+        let task_run = s
+            .create_run_full(
+                &project,
+                "subdivida",
+                &RunOptions::default(),
+                Some(&gabi),
+                Some(&t1.id),
+            )
+            .unwrap()
+            .id;
+        let child = s
+            .handle_board_call(
+                &task_run,
+                BoardOp::TaskCreate,
+                &serde_json::json!({"title": "Preços", "assignee": "Dani"}),
+            )
+            .unwrap();
+        assert!(child.ok, "{}", child.content);
+        let t2 = s
+            .list_tasks(&project)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.title == "Preços")
+            .unwrap();
+        assert_eq!(t2.goal_id.as_deref(), Some(goal.id.as_str()));
+
+        // Objetivo inexistente: recusa listando os válidos.
+        let bad = s
+            .handle_board_call(
+                &run,
+                BoardOp::TaskCreate,
+                &serde_json::json!({"title": "Sem objetivo válido", "assignee": "Dani", "goal": "Nada"}),
+            )
+            .unwrap();
+        assert!(!bad.ok);
+        assert!(bad.content.contains("Mapear mercado"), "{}", bad.content);
+        assert_eq!(s.list_tasks(&project).unwrap().len(), 2);
     }
 
     #[test]

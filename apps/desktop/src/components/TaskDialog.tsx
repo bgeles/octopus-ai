@@ -1,22 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import type { Task, TaskInput, TeamMember, Workflow } from "../lib/types";
+import type { GoalProgress, Task, TaskInput, TeamMember, Workflow } from "../lib/types";
 
 type TaskDialogProps = {
   open: boolean;
   workflow: Workflow | null;
   tasks: Task[];
   team: TeamMember[];
+  /** Objetivos do projeto; o padrão é o do workflow. */
+  goals?: GoalProgress[];
   onClose: () => void;
   onCreate: (input: TaskInput) => Promise<void>;
 };
 
-export function TaskDialog({ open, workflow, tasks, team, onClose, onCreate }: TaskDialogProps) {
+export function TaskDialog({ open, workflow, tasks, team, goals = [], onClose, onCreate }: TaskDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [acceptance, setAcceptance] = useState("");
   const [stageId, setStageId] = useState("");
   const [dependsOn, setDependsOn] = useState("");
+  const [goalId, setGoalId] = useState("");
   const [ready, setReady] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -34,6 +37,7 @@ export function TaskDialog({ open, workflow, tasks, team, onClose, onCreate }: T
     setDescription("");
     setAcceptance("");
     setDependsOn("");
+    setGoalId(workflow?.goalId ?? "");
     setReady(true);
     setError(null);
     setStageId(workflow?.stages[0]?.id ?? "");
@@ -47,7 +51,7 @@ export function TaskDialog({ open, workflow, tasks, team, onClose, onCreate }: T
     }
     setSaving(true);
     try {
-      await onCreate({ title: title.trim(), descriptionMd: description.trim(), acceptanceMd: acceptance.trim(), stageId: stageId || null, dependsOn: dependsOn ? [dependsOn] : [], ready });
+      await onCreate({ title: title.trim(), descriptionMd: description.trim(), acceptanceMd: acceptance.trim(), stageId: stageId || null, dependsOn: dependsOn ? [dependsOn] : [], ready, goalId: goalId || null });
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -111,6 +115,21 @@ export function TaskDialog({ open, workflow, tasks, team, onClose, onCreate }: T
             </select>
           </label>
         </div>
+        {goals.length > 0 && (
+          <label className="flex flex-col gap-1 text-[13px] font-medium text-slate">
+            Objetivo
+            <select aria-label="Objetivo" value={goalId} onChange={(e) => setGoalId(e.target.value)} className="rounded-sm border hairline-strong bg-surface px-3 py-2 text-sm text-ink">
+              <option value="">Nenhum</option>
+              {goals.filter((g) => g.status === "active" || g.id === goalId).map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.title}
+                  {g.id === workflow?.goalId ? " (do workflow)" : ""}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs font-normal">Entra no prompt como o porquê da task.</span>
+          </label>
+        )}
         <label className="flex items-center gap-2 text-[13px]">
           <input type="checkbox" checked={ready} onChange={(e) => setReady(e.target.checked)} />
           Entrar na fila agora (desmarque para deixar no backlog)

@@ -125,6 +125,7 @@ mod tests {
             auth_mode: mode,
             created_at: "t".into(),
             sandbox_profile_id: None,
+            mission: None,
         }
     }
 
