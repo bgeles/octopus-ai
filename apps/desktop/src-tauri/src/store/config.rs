@@ -227,7 +227,7 @@ impl Store {
 
     fn all_agent_profiles(&self) -> Result<Vec<AgentProfile>> {
         let conn = self.conn.lock().expect("store mutex");
-        let mut stmt = conn.prepare("SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort, autonomy, can_assign_tasks, can_approve FROM agent_profile ORDER BY created_at")?;
+        let mut stmt = conn.prepare(&format!("{} ORDER BY created_at", AgentProfile::SELECT))?;
         let rows = stmt
             .query_map([], AgentProfile::from_row_pub)?
             .collect::<std::result::Result<Vec<_>, _>>()?;

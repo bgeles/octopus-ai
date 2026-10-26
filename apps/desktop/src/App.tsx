@@ -22,7 +22,7 @@ import { shortcutFor } from "./lib/shortcuts";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, McpServer, PolicyRule, SandboxProfile, Skill, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { ActivityItem, AgentTotals, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
 import { projectDefaultsKey } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
@@ -54,6 +54,8 @@ export function App({ transport }: AppProps) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [teamTotals, setTeamTotals] = useState<AgentTotals[]>([]);
   const [openMemberId, setOpenMemberId] = useState<string | null>(null);
+  /** Feed de atividade do membro aberto na ficha (null = carregando). */
+  const [memberActivity, setMemberActivity] = useState<ActivityItem[] | null>(null);
   const [memberDialog, setMemberDialog] = useState<{ open: boolean; member: TeamMember | null }>({ open: false, member: null });
   const [runAs, setRunAs] = useState<TeamMember | null>(null);
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
@@ -638,6 +640,34 @@ export function App({ transport }: AppProps) {
   };
 
   const openMember = team?.find((m) => m.profile.id === openMemberId) ?? null;
+  const refreshMemberActivity = useCallback(
+    (projectId: string, agentProfileId: string) => {
+      transport
+        .invoke("list_project_activity", { projectId, agentProfileId, limit: 50 })
+        .then(setMemberActivity)
+        .catch(() => setMemberActivity([]));
+    },
+    [transport],
+  );
+  useEffect(() => {
+    if (!openMemberId || !selectedProject) {
+      setMemberActivity(null);
+      return;
+    }
+    // Recarrega quando o board/os runs mudam (board:changed, fim de run).
+    refreshMemberActivity(selectedProject.id, openMemberId);
+  }, [openMemberId, selectedProject, refreshMemberActivity, tasks, runs]);
+  /** Abre uma task no Board (seleciona o workflow dela). */
+  const openTask = (taskId: string) => {
+    const task = tasks.find((t) => t.id === taskId);
+    if (task) setSelectedWorkflowId(task.workflowId);
+    setSelectedTaskId(taskId);
+    setView("board");
+  };
+  const openRunById = async (runId: string) => {
+    const run = runs.find((r) => r.id === runId) ?? (await transport.invoke("get_run", { runId }).catch(() => null));
+    if (run) await openRun(run);
+  };
   const monthlyTeamCost = teamTotals.reduce((sum, t) => sum + t.costUsd, 0);
 
   // Defaults do projeto (esforço) podem ter mudado no Harness: relê as preferências ao voltar ao run.
@@ -858,6 +888,10 @@ export function App({ transport }: AppProps) {
           totals={teamTotals.find((t) => t.agentProfileId === openMember.profile.id) ?? null}
           tasks={tasks}
           runs={runs}
+          activity={memberActivity}
+          workflows={workflows ?? []}
+          onOpenTask={openTask}
+          onOpenRunById={(id) => void openRunById(id)}
           onBack={() => setOpenMemberId(null)}
           onEdit={() => setMemberDialog({ open: true, member: openMember })}
           onRunAs={() => runAsMember(openMember)}

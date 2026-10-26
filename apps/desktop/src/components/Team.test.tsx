@@ -131,6 +131,39 @@ describe("Time", () => {
     expect(within(screen.getByRole("article", { name: "Membro do time: Dani" })).getByTestId("task-load")).toHaveTextContent("1 task aberta");
   });
 
+  it("a ficha mostra a atividade do membro: movimentos das tasks dele com custo e link para a task", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    const ana = await transport.invoke("add_team_member", { projectId: "proj_demo", input: { name: "Ana", roleId: "role_pesquisador" } });
+    await transport.invoke("add_team_member", { projectId: "proj_demo", input: { name: "Leo", roleId: "role_documentador" } });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: true });
+    const wf = await transport.invoke("create_workflow_from_template", { input: { projectId: "proj_demo", templateId: "research-synthesis" } });
+    await transport.invoke("create_task", { projectId: "proj_demo", workflowId: wf.id, input: { title: "Mapear integrações", assignedAgentId: ana.profile.id } });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: null });
+    await transport.invoke("scheduler_tick", {});
+    // Espera o run da Ana terminar (pede revisão → aguardando você).
+    await waitFor(async () => {
+      const [task] = await transport.invoke("list_tasks", { projectId: "proj_demo" });
+      expect(task?.status).toBe("waiting_approval");
+    }, { timeout: 3000 });
+
+    await user.click(screen.getByRole("button", { name: "Time" }));
+    await user.click(within(await screen.findByRole("article", { name: "Membro do time: Ana" })).getByRole("button", { name: "Ver ficha" }));
+    const activity = await screen.findByTestId("member-activity");
+    const rows = await within(activity).findAllByTestId("activity-row");
+    const texts = rows.map((r) => r.textContent ?? "");
+    expect(texts.some((t) => t.includes("Ana") && t.includes("iniciou run em Pesquisar") && t.includes("Mapear integrações"))).toBe(true);
+    expect(texts.some((t) => t.includes("run terminou") && t.includes("US$"))).toBe(true);
+    expect(texts.some((t) => t.includes("agente atualizou"))).toBe(false);
+    // Leo não aparece na atividade da Ana.
+    const leo = await transport.invoke("list_project_activity", { projectId: "proj_demo", agentProfileId: (await transport.invoke("list_team", { projectId: "proj_demo" })).find((m) => m.profile.name === "Leo")!.profile.id });
+    expect(leo.map((i) => i.kind)).toEqual(["team.member.added"]);
+    // Prévia do resultado na lista de runs e link da task abre o Board.
+    expect(screen.getByTestId("run-preview")).toHaveTextContent("Pronto para revisão");
+    await user.click(within(activity).getAllByRole("button", { name: "Mapear integrações" })[0]!);
+    expect(await screen.findByTestId("task-detail")).toHaveTextContent("Mapear integrações");
+  });
+
   it("a ficha mostra responsabilidades, como trabalha, delegação e permite editar", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");

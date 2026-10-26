@@ -1,6 +1,8 @@
 import { PackageCheck, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
+import { eventLabelFor } from "../lib/activity";
 import { copyText, renderMarkdown } from "../lib/markdown";
+import { firstLine } from "../lib/text";
 import type { Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowTemplate } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { DiffView } from "./DiffView";
@@ -512,15 +514,6 @@ function Delivery({ task, runs, team, onLoadDiff }: { task: Task; runs: Run[]; t
   );
 }
 
-function firstLine(md: string | null): string | null {
-  if (!md) return null;
-  const line = md
-    .split("\n")
-    .map((l) => l.replace(/^#+\s*/, "").replace(/^[-*]\s+/, "").replace(/[`*]/g, "").trim())
-    .find((l) => l && !/^entrega$/i.test(l));
-  return line ?? null;
-}
-
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between gap-3 border-b hairline py-1.5 last:border-b-0">
@@ -531,48 +524,6 @@ function Row({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-
 function eventLabel(e: TaskEvent, workflow: Workflow): string {
-  const name = (id: string | null) => workflow.stages.find((s) => s.id === id)?.name ?? id ?? "";
-  switch (e.kind) {
-    case "created":
-      return `criou em ${name(e.toStage)}`;
-    case "created_by_agent":
-      return `criou em ${name(e.toStage)} pelo board`;
-    case "assigned":
-      return "reatribuiu";
-    case "run_started":
-      return `iniciou run em ${name(e.toStage)}`;
-    case "agent_update":
-      return "agente atualizou";
-    case "advanced":
-      return `${name(e.fromStage)} → ${name(e.toStage)}`;
-    case "completed":
-      return "concluiu";
-    case "approved":
-      return `aprovou ${name(e.fromStage)} → ${name(e.toStage)}`;
-    case "returned":
-      return `devolveu para ${name(e.toStage)}`;
-    case "moved":
-      return `moveu para ${name(e.toStage)}`;
-    case "blocked":
-      return "bloqueou";
-    case "run_finished":
-      return "run terminou";
-    case "run_failed":
-    case "failed":
-      return "falhou";
-    case "review_requested":
-      return "encaminhou para revisão";
-    case "review_started":
-      return "iniciou run de revisão";
-    case "review_failed":
-      return "revisão não concluiu";
-    case "auto_approved":
-      return "auto-aprovou por política";
-    case "escalated":
-      return "escalou para você";
-    default:
-      return e.kind;
-  }
+  return eventLabelFor(e, (id) => workflow.stages.find((s) => s.id === id)?.name ?? id ?? "");
 }
