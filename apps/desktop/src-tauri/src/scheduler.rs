@@ -1219,6 +1219,198 @@ mod tests {
         sidecar.shutdown().await;
     }
 
+    /// Verificação da Fase 9 (relatório final) com o Claude de verdade: a única task de um workflow
+    /// conclui nos dois estágios, o relatório nasce com a entrega e o Haiku escreve o resumo executivo.
+    /// Custa dinheiro: `cargo test real_report -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "usa o Claude de verdade (custa dinheiro); rode com --ignored"]
+    async fn real_report_is_built_and_summarized_by_haiku() {
+        use crate::protocol::{
+            PermissionDecideParams, PermissionDecision, RunEvent, RunStartParams,
+        };
+        use crate::sidecar::command::find_node;
+        use crate::sidecar::SidecarNotification;
+
+        let main_js = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../packages/agent-runtime/dist/main.js")
+            .canonicalize()
+            .expect("sidecar compilado");
+        let (sidecar, mut notifications) = Sidecar::spawn(SidecarCommand::new(
+            find_node(),
+            vec![main_js.to_string_lossy().into_owned()],
+        ))
+        .await
+        .unwrap();
+        sidecar.hello().await.unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = store
+            .create_project("relatorio", dir.path().to_str().unwrap())
+            .unwrap();
+        store
+            .set_setting(
+                crate::store::reports::REPORT_SUMMARY_SETTING,
+                &serde_json::json!("haiku"),
+            )
+            .unwrap();
+        let dani = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Dani".into(),
+                    role_id: "role_pesquisador".into(),
+                    max_turns: Some(4),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        let task = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Definição de triagem".into(),
+                    description_md: "Não leia nem altere arquivos. Chame a tool task_update com status \"done\", uma nota curta e, em \"result\", um resumo em markdown de duas linhas definindo o que é triagem de leads.".into(),
+                    assigned_agent_id: Some(dani.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        async fn drive(
+            store: &Store,
+            sidecar: &Sidecar,
+            notifications: &mut tokio::sync::mpsc::Receiver<crate::sidecar::SidecarNotification>,
+            run_id: &str,
+        ) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(240);
+            loop {
+                let n = tokio::time::timeout_at(deadline, notifications.recv())
+                    .await
+                    .expect("timeout esperando o run")
+                    .expect("canal fechado");
+                match n {
+                    SidecarNotification::MemoryCall(call) => {
+                        let result = store
+                            .handle_memory_call(&call.run_id, call.op, &call.args)
+                            .unwrap();
+                        sidecar
+                            .memory_result(crate::protocol::MemoryResultParams {
+                                run_id: call.run_id.clone(),
+                                call_id: call.call_id.clone(),
+                                result,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    SidecarNotification::Hook(hook) => {
+                        let decision = crate::decide_hook(store, &hook);
+                        sidecar
+                            .decide_hook(crate::protocol::HookDecideParams {
+                                run_id: hook.run_id.clone(),
+                                hook_id: hook.hook_id.clone(),
+                                decision,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    SidecarNotification::RunEvent(ev) if ev.run_id == run_id => {
+                        eprintln!("[{}] {}", ev.seq, ev.event.kind());
+                        if let RunEvent::PermissionRequest { request_id, .. } = &ev.event {
+                            sidecar
+                                .decide_permission(PermissionDecideParams {
+                                    run_id: run_id.to_string(),
+                                    request_id: request_id.clone(),
+                                    decision: PermissionDecision::Deny {
+                                        message: "teste: só task_update".into(),
+                                    },
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        let terminal = ev.event.is_terminal();
+                        store
+                            .record_run_event(&ev.run_id, ev.seq, &ev.at, &ev.event)
+                            .unwrap();
+                        if terminal {
+                            break;
+                        }
+                    }
+                    SidecarNotification::Exited(code) => panic!("sidecar saiu: {code:?}"),
+                    _ => {}
+                }
+            }
+        }
+
+        // Dois estágios, dois runs da Dani; ao fim do segundo a task está concluída e o relatório existe.
+        for stage in 1..=2 {
+            let report = tick(&store, &sidecar, &MemorySecrets::default())
+                .await
+                .unwrap();
+            assert_eq!(report.started.len(), 1, "estágio {stage}: {report:?}");
+            drive(
+                &store,
+                &sidecar,
+                &mut notifications,
+                &report.started[0].run_id,
+            )
+            .await;
+            let run = store.get_run(&report.started[0].run_id).unwrap().unwrap();
+            assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error_message);
+        }
+        let done = store.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(done.status, TaskStatus::Done, "nota: {:?}", done.last_note);
+        let report = store
+            .get_workflow_report(&wf.id)
+            .unwrap()
+            .expect("relatório gerado ao concluir");
+        eprintln!("relatório: {}\n", report.body_md);
+        assert_eq!(report.trigger, "auto");
+        assert_eq!((report.tasks_done, report.tasks_total), (1, 1));
+        assert!(report.body_md.contains("Definição de triagem"));
+        assert_eq!(report.summary_status, "pending");
+
+        // Resumo executivo com o Haiku de verdade.
+        let plans = store.plan_report_summaries(&project.id).unwrap();
+        assert_eq!(plans.len(), 1);
+        let (report_id, prompt, options) = plans.into_iter().next().unwrap();
+        let srun = store
+            .create_report_run(&project.id, &report_id, &prompt, &options)
+            .unwrap();
+        sidecar
+            .start_run(RunStartParams {
+                run_id: srun.id.clone(),
+                cwd: project.path.clone(),
+                prompt,
+                options,
+            })
+            .await
+            .unwrap();
+        drive(&store, &sidecar, &mut notifications, &srun.id).await;
+        let srun_done = store.get_run(&srun.id).unwrap().unwrap();
+        eprintln!(
+            "resumo {:?} custo {:?}: {:?}",
+            srun_done.status, srun_done.cost_usd, srun_done.result_text
+        );
+        assert_eq!(
+            srun_done.status,
+            RunStatus::Completed,
+            "{:?}",
+            srun_done.error_message
+        );
+        let summarized = store.get_report(&report_id).unwrap().unwrap();
+        assert_eq!(summarized.summary_status, "done");
+        assert!(summarized.summary_md.as_deref().unwrap().len() > 20);
+        assert!(summarized.markdown().contains("## Resumo executivo"));
+        sidecar.shutdown().await;
+    }
+
     /// Verificação da Fase 8 (delegação) com o Claude de verdade: Gabi (gestora, delega) lista o
     /// time e cria uma task para a Dani pelas tools do board; o próximo tick roda como a Dani.
     /// Custa dinheiro: `cargo test real_delegation -- --ignored --nocapture`.

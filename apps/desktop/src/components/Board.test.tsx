@@ -96,6 +96,17 @@ describe("Board e scheduler", () => {
 
     // A aba Entregas lista as tasks concluídas com o resumo; clicar abre o painel.
     await user.click(screen.getByRole("radio", { name: /Entregas · 1/ }));
+    // Relatório final gerado sozinho quando a última task concluiu: 1 de 1, custo e a entrega.
+    const report = screen.getByTestId("workflow-report");
+    expect(within(report).getByTestId("report-progress")).toHaveTextContent("1 de 1 task");
+    expect(report).toHaveTextContent("gerado quando a última task concluiu");
+    expect(within(report).getByTestId("report-body")).toHaveTextContent("Tasks: 1 de 1 concluídas");
+    expect(within(report).getByTestId("report-body")).toHaveTextContent("Criada a migração");
+    expect(within(report).queryByTestId("report-summary")).not.toBeInTheDocument();
+    const reports = await transport.invoke("list_workflow_reports", { projectId: "proj_demo" });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.trigger).toBe("auto");
+    expect(reports[0]?.tasks[0]?.filesChanged).toEqual(["src/main/resources/db/migration/V12__add_triage_status.sql"]);
     const rows = within(screen.getByTestId("deliveries")).getAllByTestId("delivery-row");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveTextContent("Mapear integrações");
@@ -178,6 +189,31 @@ describe("Board e scheduler", () => {
     await waitFor(() => expect(screen.getByTestId("task-card")).toHaveAttribute("data-status", "done"));
     await user.click(screen.getByTestId("task-card"));
     expect(within(await screen.findByTestId("task-detail")).getByTestId("task-history")).toHaveTextContent("política · auto-aprovou por política");
+  });
+
+  it("o relatório pode ser gerado sob demanda com pendentes e ganha resumo executivo do Haiku quando ligado", async () => {
+    const { user, transport } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await transport.invoke("set_setting", { key: "board.reportSummary", value: "haiku" });
+    await transport.invoke("set_setting", { key: "scheduler.paused", value: true });
+    const wf = await transport.invoke("create_workflow_from_template", { input: { projectId: "proj_demo", templateId: "research-synthesis" } });
+    await transport.invoke("create_task", { projectId: "proj_demo", workflowId: wf.id, input: { title: "Pendente" } });
+    await user.click(screen.getByRole("button", { name: /^Board/ }));
+    await screen.findByTestId("kanban");
+    await user.click(screen.getByRole("radio", { name: /Entregas · 0/ }));
+    const empty = screen.getByTestId("workflow-report");
+    expect(empty).toHaveTextContent("0 de 1 task concluída");
+    await user.click(within(empty).getByRole("button", { name: "Gerar relatório agora" }));
+    const report = await screen.findByTestId("report-progress");
+    expect(report).toHaveTextContent("0 de 1 task");
+    expect(screen.getByTestId("report-body")).toHaveTextContent("Pendentes");
+    // Haiku ligado: o resumo chega sozinho (run kind report) e o Início mostra o card compacto.
+    await waitFor(() => expect(screen.getByTestId("report-summary")).toHaveAttribute("data-status", "done"), { timeout: 3000 });
+    expect(screen.getByTestId("report-summary")).toHaveTextContent("Entregas no prazo");
+    const runs = await transport.invoke("list_runs", { projectId: "proj_demo" });
+    expect(runs.some((r) => r.kind === "report")).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Início" }));
+    expect(within(await screen.findByTestId("home-reports")).getByTestId("report-summary")).toHaveTextContent("Entregas no prazo");
   });
 
   it("respeita dependências: a segunda task só roda depois da primeira concluir, e o scheduler pode ser pausado", async () => {

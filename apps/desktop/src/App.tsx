@@ -24,7 +24,7 @@ import { shortcutFor } from "./lib/shortcuts";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { ActivityItem, AgentTotals, AppInfo, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { ActivityItem, AgentTotals, AppInfo, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowReport, WorkflowTemplate } from "./lib/types";
 import { projectDefaultsKey } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
@@ -55,6 +55,7 @@ export function App({ transport }: AppProps) {
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   /** Atividade recente do projeto (Início); null = carregando. */
   const [activity, setActivity] = useState<ActivityItem[] | null>(null);
+  const [reports, setReports] = useState<WorkflowReport[]>([]);
   const [team, setTeam] = useState<TeamMember[] | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
   const [teamTotals, setTeamTotals] = useState<AgentTotals[]>([]);
@@ -192,9 +193,10 @@ export function App({ transport }: AppProps) {
   const refreshBoard = useCallback(
     async (projectId: string) => {
       try {
-        const [wfs, taskList] = await Promise.all([transport.invoke("list_workflows", { projectId }), transport.invoke("list_tasks", { projectId })]);
+        const [wfs, taskList, reportList] = await Promise.all([transport.invoke("list_workflows", { projectId }), transport.invoke("list_tasks", { projectId }), transport.invoke("list_workflow_reports", { projectId })]);
         setWorkflows(wfs);
         setTasks(taskList);
+        setReports(reportList);
         setSelectedWorkflowId((current) => (current && wfs.some((w) => w.id === current) ? current : (wfs[0]?.id ?? null)));
       } catch (e) {
         setToast(`Falha ao carregar o board: ${messageOf(e)}`);
@@ -711,6 +713,15 @@ export function App({ transport }: AppProps) {
     setSelectedTaskId(taskId);
     setView("board");
   };
+  const generateReport = async (workflow: Workflow) => {
+    await transport.invoke("generate_workflow_report", { workflowId: workflow.id });
+    if (selectedProject) await refreshBoard(selectedProject.id);
+  };
+  const exportReport = async (report: WorkflowReport, destination: string | null) => {
+    const result = await transport.invoke("export_workflow_report", { reportId: report.id, destination });
+    setToast(destination ? `Relatório exportado para ${destination}` : "Relatório copiado.");
+    return result;
+  };
   const openRunById = async (runId: string) => {
     const run = runs.find((r) => r.id === runId) ?? (await transport.invoke("get_run", { runId }).catch(() => null));
     if (run) await openRun(run);
@@ -856,6 +867,9 @@ export function App({ transport }: AppProps) {
           approvals={approvals}
           budget={budget}
           activity={activity}
+          reports={reports}
+          onGenerateReport={generateReport}
+          onExportReport={exportReport}
           statusOf={memberStatus}
           schedulerPaused={schedulerPaused}
           onOpenMember={(member) => {
@@ -1031,6 +1045,9 @@ export function App({ transport }: AppProps) {
           onNewTask={() => setTaskDialogOpen(true)}
           onOpenTask={(task) => setSelectedTaskId(task.id)}
           onLoadDiff={(task) => transport.invoke("task_diff", { taskId: task.id })}
+          report={reports.find((r) => r.workflowId === (selectedWorkflow?.id ?? "")) ?? null}
+          onGenerateReport={generateReport}
+          onExportReport={exportReport}
           onSetGateApprover={async (workflow, stage, approver) => {
             try {
               await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages.map((s) => (s.id === stage.id ? { ...s, approver } : s)), useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel } });

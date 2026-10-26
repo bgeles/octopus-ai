@@ -160,6 +160,17 @@ export function SettingsView(props: SettingsViewProps) {
         <section aria-label="Board e delegação" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="board-prefs">
           <h2 className="m-0 font-display text-sm font-semibold">Board e delegação</h2>
           <p className="m-0 text-xs text-slate">Limites da aprovação em cadeia e da delegação entre membros. Valem para todos os projetos.</p>
+          <label className="flex items-center justify-between gap-3 text-[13px]">
+            <span className="flex flex-col">
+              <span>Resumo executivo do relatório final</span>
+              <span className="text-xs text-slate">quando a última task de um workflow conclui, o Haiku resume as entregas (≈ US$ 0,01)</span>
+            </span>
+            <select aria-label="Resumo executivo do relatório final" value={typeof settings["board.reportSummary"] === "string" ? (settings["board.reportSummary"] as string) : ""} onChange={(e) => void onSetSetting("board.reportSummary", e.target.value || null)} className="rounded-sm border hairline-strong bg-surface px-2 py-1 text-xs">
+              <option value="">Herdar da consolidação da memória</option>
+              <option value="haiku">Com Haiku</option>
+              <option value="off">Desligado</option>
+            </select>
+          </label>
           {BOARD_LIMITS.map((limit) => (
             <label key={limit.key} className="flex items-center justify-between gap-3 text-[13px]">
               <span className="flex flex-col">
