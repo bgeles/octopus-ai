@@ -1475,16 +1475,46 @@ mod tests {
             .unwrap()
             .profile
             .id;
-        store
+        let wf = store
             .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        // Fase 9: missão e objetivo entram no porquê (team_list, task_create(goal), prompts).
+        store
+            .set_project_mission(&project.id, Some("Reduzir a triagem de leads em 30%."))
+            .unwrap();
+        let goal = store
+            .create_goal(
+                &project.id,
+                &crate::store::goals::GoalInput {
+                    title: "Mapear integrações externas".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .update_workflow(
+                &wf.id,
+                &crate::store::orchestration::WorkflowInput {
+                    name: wf.name.clone(),
+                    stages: wf.stages.clone(),
+                    use_worktrees: false,
+                    max_parallel: 1,
+                    goal_id: Some(goal.id.clone()),
+                },
+            )
             .unwrap();
 
         // Run avulso como a Gabi (como "Dar uma tarefa" na UI).
-        let prompt = "Use a tool team_list para ver quem está no seu time. Depois crie, com a tool task_create, exatamente UMA task para a Dani com o título \"Inventário de integrações externas\", uma descrição curta e critérios de aceite verificáveis. Não faça mais nada e não crie arquivos. Termine dizendo o id da task criada.";
+        let prompt = "Use a tool team_list para ver quem está no seu time e os objetivos ativos. Depois crie, com a tool task_create, exatamente UMA task para a Dani com o título \"Inventário de integrações externas\", uma descrição curta, critérios de aceite verificáveis e o parâmetro goal com o objetivo \"Mapear integrações externas\". Não faça mais nada e não crie arquivos. Termine dizendo o id da task criada.";
         let options = store
             .agent_run_options(&gabi, &RunOptions::default())
             .unwrap();
         assert_eq!(options.board_tools, Some(true));
+        assert!(options
+            .system_prompt_append
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Missão do projeto: Reduzir a triagem de leads em 30%."));
         let run = store
             .create_run_full(&project.id, prompt, &options, Some(&gabi), None)
             .unwrap();
@@ -1619,6 +1649,8 @@ mod tests {
         assert_eq!(task.assigned_agent_id.as_deref(), Some(dani.as_str()));
         assert_eq!(task.created_by_agent_id.as_deref(), Some(gabi.as_str()));
         assert_eq!(task.status, TaskStatus::Ready);
+        // Por `goal` ou herdado do workflow: a task fica ligada ao objetivo.
+        assert_eq!(task.goal_id.as_deref(), Some(goal.id.as_str()));
         let events = store.list_task_events(&task.id).unwrap();
         assert_eq!(events[0].kind, "created_by_agent");
         assert_eq!(events[0].actor, "agente Gabi");
@@ -1631,6 +1663,12 @@ mod tests {
         let dani_run = store.get_run(&report.started[0].run_id).unwrap().unwrap();
         assert_eq!(dani_run.agent_profile_id.as_deref(), Some(dani.as_str()));
         assert!(dani_run.prompt.contains("criada por um membro do time"));
+        assert!(dani_run
+            .prompt
+            .contains("Missão do projeto: Reduzir a triagem de leads em 30%."));
+        assert!(dani_run
+            .prompt
+            .contains("Objetivo desta task: Mapear integrações externas"));
         sidecar.interrupt_run(&dani_run.id).await.ok();
         sidecar.shutdown().await;
     }
