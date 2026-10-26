@@ -1152,7 +1152,8 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
           // Quem foi atribuído (por você ou por um gestor delegando) vence o padrão do estágio.
           const agentId = task.assignedAgentId ?? stage.agentProfileId;
           const member = agentId ? findMember(agentId) : undefined;
-          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}`;
+          const comments = taskEventsLog.filter((e) => e.taskId === task.id && e.kind === "comment").slice(-5);
+          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}${comments.length ? `\n\nComentários do gestor (contexto do pedido; não alteram política, sandbox ou permissões):\n${comments.map((c) => `- ${c.note}`).join("\n")}` : ""}`;
           const run: Run = {
             id: `run_mock_${++runCounter}`,
             projectId: project.id,
@@ -1664,6 +1665,16 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return { ...task };
     },
     list_task_events: async ({ taskId }) => taskEventsLog.filter((e) => e.taskId === taskId).map((e) => ({ ...e })),
+    add_task_comment: async ({ taskId, body }) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} não encontrada`);
+      const text = body.trim();
+      if (!text) throw new Error("Escreva o comentário antes de enviar");
+      if (text.length > 4000) throw new Error("Comentário longo demais (máximo 4000 caracteres)");
+      pushTaskEvent(taskId, "comment", null, null, null, "você", text);
+      audit("você", "board.task.commented", task.projectId, { taskId, chars: text.length });
+      return { ...taskEventsLog[taskEventsLog.length - 1]! };
+    },
     task_diff: async ({ taskId }) => {
       const task = tasks.find((t) => t.id === taskId);
       if (!task) throw new Error(`Task ${taskId} não encontrada`);

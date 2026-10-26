@@ -1,11 +1,11 @@
 import { PackageCheck, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
-import { eventLabelFor } from "../lib/activity";
 import { copyText, renderMarkdown } from "../lib/markdown";
 import type { Project, Run, Stage, StageApprover, Task, TaskDiff, TaskEvent, TaskStatus, TeamMember, Workflow, WorkflowReport, WorkflowTemplate } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { DeliveriesList } from "./DeliveriesList";
 import { DiffView } from "./DiffView";
+import { TaskTimeline } from "./TaskTimeline";
 import { WorkflowReportCard } from "./WorkflowReportCard";
 import { formatUsd } from "./RunSidebar";
 import { formatRelative } from "./SessionsView";
@@ -24,6 +24,8 @@ type BoardViewProps = {
   onOpenTask: (task: Task) => void;
   /** Diff do trabalho da task (worktree ou projeto) contra o commit base. */
   onLoadDiff: (task: Task) => Promise<TaskDiff>;
+  /** Comentário seu na linha do tempo da task (entra no prompt do próximo run). */
+  onComment?: (task: Task, body: string) => Promise<void>;
   /** Relatório final do workflow selecionado e suas ações. */
   report?: WorkflowReport | null;
   onGenerateReport?: (workflow: Workflow) => Promise<void>;
@@ -232,7 +234,7 @@ export function BoardView(props: BoardViewProps) {
             </section>
 
             {selectedTask && workflow && (
-              <TaskDetail task={selectedTask} workflow={workflow} team={team} runs={runs} events={props.taskEvents} tasks={tasks} onApprove={props.onApprove} onReturn={props.onReturn} onMove={props.onMove} onOpenRun={props.onOpenRun} onLoadDiff={props.onLoadDiff} onClose={props.onCloseTask} />
+              <TaskDetail task={selectedTask} workflow={workflow} team={team} runs={runs} events={props.taskEvents} tasks={tasks} onApprove={props.onApprove} onReturn={props.onReturn} onMove={props.onMove} onOpenRun={props.onOpenRun} onLoadDiff={props.onLoadDiff} onComment={props.onComment} onClose={props.onCloseTask} />
             )}
           </div>
         </>
@@ -274,7 +276,7 @@ export function shortId(id: string): string {
   return id.replace(/^task_/, "T-").slice(0, 10);
 }
 
-function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onReturn, onMove, onOpenRun, onLoadDiff, onClose }: { task: Task; workflow: Workflow; team: TeamMember[]; runs: Run[]; events: TaskEvent[]; tasks: Task[]; onApprove: BoardViewProps["onApprove"]; onReturn: BoardViewProps["onReturn"]; onMove: BoardViewProps["onMove"]; onOpenRun: (run: Run) => void; onLoadDiff: BoardViewProps["onLoadDiff"]; onClose: () => void }) {
+function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onReturn, onMove, onOpenRun, onLoadDiff, onComment, onClose }: { task: Task; workflow: Workflow; team: TeamMember[]; runs: Run[]; events: TaskEvent[]; tasks: Task[]; onApprove: BoardViewProps["onApprove"]; onReturn: BoardViewProps["onReturn"]; onMove: BoardViewProps["onMove"]; onOpenRun: (run: Run) => void; onLoadDiff: BoardViewProps["onLoadDiff"]; onComment?: BoardViewProps["onComment"]; onClose: () => void }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -374,37 +376,7 @@ function TaskDetail({ task, workflow, team, runs, events, tasks, onApprove, onRe
         </div>
       )}
 
-      {taskRuns.length > 0 && (
-        <div className="flex flex-col gap-1 border-t hairline pt-3">
-          <span className="text-xs font-medium text-slate">Runs</span>
-          {taskRuns.map((r) => (
-            <button key={r.id} type="button" onClick={() => onOpenRun(r)} className="flex items-center gap-2 text-left text-[13px] hover:text-brand-hover">
-              <StatusDot status={r.status === "running" || r.status === "queued" ? "running" : r.status === "waiting_approval" ? "waiting_approval" : r.status === "completed" ? "done" : "failed"} />
-              <span className="truncate">{r.id.slice(-6)}</span>
-              {r.kind === "review" && <span className="rounded-full border hairline-strong px-1.5 text-[10px] text-slate">revisão</span>}
-              <span className="ml-auto text-xs text-slate">{formatRelative(r.startedAt)}</span>
-              {r.costUsd != null && <span className="font-mono text-xs">{formatUsd(r.costUsd)}</span>}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="flex flex-col gap-1 border-t hairline pt-3" data-testid="task-history">
-        <span className="text-xs font-medium text-slate">Movimentos</span>
-        {events.length === 0 && <span className="text-xs text-slate">—</span>}
-        {events
-          .slice()
-          .reverse()
-          .map((e) => (
-            <div key={e.id} className="flex items-baseline gap-2 text-xs">
-              <span className="font-mono text-slate">{formatRelative(e.at)}</span>
-              <span>
-                <strong>{e.actor}</strong> · {eventLabel(e, workflow)}
-                {e.note ? ` · ${e.note}` : ""}
-              </span>
-            </div>
-          ))}
-      </div>
+      <TaskTimeline task={task} workflow={workflow} team={team} runs={taskRuns} events={events} onOpenRun={onOpenRun} onComment={onComment ? (body) => onComment(task, body) : undefined} />
     </aside>
   );
 }
@@ -510,7 +482,4 @@ function Row({ label, value }: { label: string; value: string }) {
       </span>
     </div>
   );
-}
-function eventLabel(e: TaskEvent, workflow: Workflow): string {
-  return eventLabelFor(e, (id) => workflow.stages.find((s) => s.id === id)?.name ?? id ?? "");
 }

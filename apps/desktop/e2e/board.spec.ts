@@ -17,6 +17,9 @@ test.describe("Board (mock)", () => {
     await expect(card).toHaveAttribute("data-status", "running");
     await expect(card).toHaveAttribute("data-status", "waiting_approval", { timeout: 10_000 });
     await expect(page.getByTestId("task-detail")).toContainText("aguardando você");
+    await page.getByTestId("task-detail").getByLabel("Comentário").fill("Cite as fontes no resumo.");
+    await page.getByTestId("task-detail").getByRole("button", { name: "Comentar" }).click();
+    await expect(page.getByTestId("task-comment")).toContainText("Cite as fontes");
     await page.getByTestId("task-detail").getByRole("button", { name: "Aprovar e seguir" }).click();
     await expect(card).toHaveAttribute("data-status", "running");
 
@@ -25,6 +28,8 @@ test.describe("Board (mock)", () => {
     await page.getByTestId("task-detail").getByRole("button", { name: "Aprovar e concluir" }).click();
     await expect(card).toHaveAttribute("data-status", "done");
     await expect(page.getByTestId("task-result")).toContainText("Como verificar");
+    await expect(page.getByTestId("task-history").getByTestId("task-run")).toHaveCount(2);
+    await expect(page.getByTestId("task-comment")).toContainText("Cite as fontes");
     await page.getByTestId("task-detail").getByRole("button", { name: "Ver diff" }).click();
     await expect(page.getByTestId("task-diff")).toContainText("V12__add_triage_status.sql");
     await page.getByRole("radio", { name: /Entregas · 1/ }).click();

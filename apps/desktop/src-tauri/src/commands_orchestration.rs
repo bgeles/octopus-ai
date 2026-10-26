@@ -256,6 +256,16 @@ pub fn list_project_activity(
         .map_err(err)
 }
 
+/// Comentário seu na linha do tempo da task; entra no prompt do próximo run dela.
+#[tauri::command]
+pub fn add_task_comment(
+    state: State<'_, AppState>,
+    task_id: String,
+    body: String,
+) -> CmdResult<crate::store::orchestration::TaskEvent> {
+    state.store.add_task_comment(&task_id, &body).map_err(err)
+}
+
 /// Relatórios finais (última geração por workflow) do projeto.
 #[tauri::command]
 pub fn list_workflow_reports(

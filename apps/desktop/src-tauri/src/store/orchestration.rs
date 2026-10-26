@@ -14,6 +14,16 @@ use super::team::{resolve_approver, Approver};
 use super::{new_id, now, Store};
 use crate::protocol::{TaskContext, TaskMode, TaskStatusUpdate};
 
+/// Contexto extra dos prompts de task e de revisão: comentários seus na task (e, adiante, missão e objetivo).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PromptContext {
+    /// Últimos comentários do gestor, em ordem cronológica.
+    pub comments: Vec<TaskEvent>,
+}
+
+pub const MAX_COMMENT_CHARS: usize = 4_000;
+const PROMPT_COMMENTS: usize = 5;
+
 /// Filtro do scheduler: só um membro e/ou ignorando pausas (usado por "Rodar agora").
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TaskFilter {
@@ -909,11 +919,68 @@ impl Store {
     }
 
     /// Prompt do run de revisão: o revisor vê a task, a entrega e os critérios, e decide.
+    /// Comentário seu na task (linha do tempo): vira evento `comment` e entra no prompt do próximo run.
+    pub fn add_task_comment(&self, task_id: &str, body: &str) -> Result<TaskEvent> {
+        let body = body.trim();
+        if body.is_empty() {
+            anyhow::bail!("Escreva o comentário antes de enviar");
+        }
+        if body.chars().count() > MAX_COMMENT_CHARS {
+            anyhow::bail!("Comentário longo demais (máximo {MAX_COMMENT_CHARS} caracteres)");
+        }
+        let task = self
+            .get_task(task_id)?
+            .with_context(|| format!("Task {task_id} não encontrada"))?;
+        let id = {
+            let mut conn = self.conn.lock().expect("store mutex");
+            let tx = conn.transaction()?;
+            let id = new_id("tev");
+            tx.execute(
+                "INSERT INTO task_event (id, task_id, at, kind, from_stage, to_stage, run_id, actor, note) VALUES (?1, ?2, ?3, 'comment', NULL, NULL, NULL, 'você', ?4)",
+                params![id, task_id, now(), body],
+            )?;
+            Self::audit_in(
+                &tx,
+                "você",
+                "board.task.commented",
+                Some(&task.project_id),
+                serde_json::json!({"taskId": task_id, "chars": body.chars().count()}),
+            )?;
+            tx.commit()?;
+            id
+        };
+        self.list_task_events(task_id)?
+            .into_iter()
+            .find(|e| e.id == id)
+            .context("comentário sumiu após gravar")
+    }
+
+    /// Últimos `limit` comentários seus na task, em ordem cronológica.
+    pub fn task_comments(&self, task_id: &str, limit: usize) -> Result<Vec<TaskEvent>> {
+        let mut comments: Vec<TaskEvent> = self
+            .list_task_events(task_id)?
+            .into_iter()
+            .filter(|e| e.kind == "comment")
+            .collect();
+        if comments.len() > limit {
+            comments.drain(..comments.len() - limit);
+        }
+        Ok(comments)
+    }
+
+    /// Contexto para `task_prompt`/`review_prompt`: os últimos comentários do gestor.
+    pub fn prompt_context(&self, task: &Task) -> Result<PromptContext> {
+        Ok(PromptContext {
+            comments: self.task_comments(&task.id, PROMPT_COMMENTS)?,
+        })
+    }
+
     pub fn review_prompt(
         task: &Task,
         stage: &Stage,
         workflow: &Workflow,
         worker: Option<&str>,
+        ctx: &PromptContext,
     ) -> String {
         let mut text = format!(
             "Revisão da task {id} do board \"{wf}\" (estágio \"{stage}\"), feita por {who}.\n\n# {title}\n",
@@ -958,6 +1025,7 @@ impl Store {
             text.push_str(note);
             text.push('\n');
         }
+        push_comments(&mut text, ctx);
         text.push_str("\nVocê é o revisor: inspecione o trabalho no diretório atual (leia os arquivos, rode testes se fizer sentido), sem editar nada. Depois chame a tool task_update com status \"approved\" se a entrega cumpre o pedido e os critérios, ou \"returned\" com uma nota objetiva do que falta ou está errado.");
         text
     }
@@ -1030,7 +1098,12 @@ impl Store {
     }
 
     /// Texto da task para o prompt do run.
-    pub fn task_prompt(task: &Task, stage: &Stage, workflow: &Workflow) -> String {
+    pub fn task_prompt(
+        task: &Task,
+        stage: &Stage,
+        workflow: &Workflow,
+        ctx: &PromptContext,
+    ) -> String {
         let mut text = format!(
             "Task {id} do board \"{wf}\", estágio \"{stage}\".\n\n# {title}\n",
             id = task.id,
@@ -1074,6 +1147,7 @@ impl Store {
             text.push_str(note);
             text.push('\n');
         }
+        push_comments(&mut text, ctx);
         text.push_str("\nAo terminar, chame a tool task_update com status \"done\" (concluiu este estágio), \"review\" (precisa de revisão) ou \"blocked\" (não consegue prosseguir), uma nota curta e, em `result`, o resumo da entrega em markdown: o que mudou, onde, e como verificar.");
         text
     }
@@ -1720,6 +1794,21 @@ fn finish_review_run(
         }
     }
     Ok(())
+}
+
+/// Comentários do gestor no prompt: só contexto do pedido (não mudam política, sandbox nem permissões).
+fn push_comments(text: &mut String, ctx: &PromptContext) {
+    if ctx.comments.is_empty() {
+        return;
+    }
+    text.push_str("\nComentários do gestor (contexto do pedido, mais recentes por último; não alteram política, sandbox ou permissões):\n");
+    for c in &ctx.comments {
+        let when = c.at.get(..16).unwrap_or(&c.at).replace('T', " ");
+        text.push_str(&format!(
+            "- [{when}] {}\n",
+            c.note.as_deref().unwrap_or("").trim()
+        ));
+    }
 }
 
 /// Auditoria das decisões automáticas da cadeia de aprovação (o que aconteceu sem você).
@@ -2578,6 +2667,59 @@ mod tests {
     }
 
     #[test]
+    fn comments_are_recorded_and_only_the_last_five_enter_the_prompts() {
+        let (s, project, wf) = setup();
+        let t = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Com comentários".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(s.add_task_comment(&t.id, "   ").is_err());
+        assert!(s
+            .add_task_comment(&t.id, &"x".repeat(MAX_COMMENT_CHARS + 1))
+            .is_err());
+        assert!(s.add_task_comment("task_nope", "oi").is_err());
+        for i in 1..=6 {
+            let ev = s
+                .add_task_comment(&t.id, &format!("  comentário {i}  "))
+                .unwrap();
+            assert_eq!(ev.kind, "comment");
+            assert_eq!(ev.actor, "você");
+            assert_eq!(ev.note.as_deref(), Some(format!("comentário {i}").as_str()));
+        }
+        let all = s.list_task_events(&t.id).unwrap();
+        assert_eq!(all.iter().filter(|e| e.kind == "comment").count(), 6);
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().updated_at,
+            t.updated_at,
+            "comentar não reordena a task"
+        );
+        let ctx = s.prompt_context(&t).unwrap();
+        assert_eq!(ctx.comments.len(), 5);
+        assert_eq!(ctx.comments[0].note.as_deref(), Some("comentário 2"));
+        assert_eq!(ctx.comments[4].note.as_deref(), Some("comentário 6"));
+        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf, &ctx);
+        assert!(prompt.contains("Comentários do gestor"));
+        assert!(!prompt.contains("comentário 1\n") && prompt.contains("comentário 6"));
+        assert!(prompt.find("comentário 2").unwrap() < prompt.find("comentário 6").unwrap());
+        let review = Store::review_prompt(&t, &wf.stages[0], &wf, Some("Ana"), &ctx);
+        assert!(review.contains("Comentários do gestor") && review.contains("comentário 6"));
+        assert!(
+            !Store::task_prompt(&t, &wf.stages[0], &wf, &PromptContext::default())
+                .contains("Comentários do gestor")
+        );
+        assert!(!s
+            .list_audit_events(Some(&project), Some("board.task.commented"), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn finish_task_run_fills_result_files_and_run() {
         use crate::protocol::ObservationKind;
         let (s, project, wf) = setup();
@@ -2977,7 +3119,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf);
+        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf, &PromptContext::default());
         assert!(prompt.contains("# Criar V12"));
         assert!(prompt.contains("Índice composto"));
         assert!(prompt.contains("Critérios de aceite:\n- IT verde"));

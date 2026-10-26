@@ -146,7 +146,8 @@ pub async fn tick_with(
             else {
                 continue;
             };
-            let prompt = Store::task_prompt(&task, &stage, &workflow);
+            let prompt =
+                Store::task_prompt(&task, &stage, &workflow, &store.prompt_context(&task)?);
             let run = store.create_run_full(
                 &project.id,
                 &prompt,
@@ -236,7 +237,13 @@ pub async fn tick_with(
             options.permission_mode = Some(crate::protocol::PermissionMode::Default);
             options.allowed_tools =
                 Some(REVIEW_ALLOWED_TOOLS.iter().map(|t| t.to_string()).collect());
-            let prompt = Store::review_prompt(&task, &stage, &workflow, worker_name.as_deref());
+            let prompt = Store::review_prompt(
+                &task,
+                &stage,
+                &workflow,
+                worker_name.as_deref(),
+                &store.prompt_context(&task)?,
+            );
             let run =
                 store.create_review_run(&project.id, &prompt, &options, &reviewer, &task.id)?;
             if !store.claim_review(&task.id, &run.id)? {

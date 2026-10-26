@@ -65,6 +65,15 @@ describe("Board e scheduler", () => {
     expect(within(detail).getByTestId("task-history")).toHaveTextContent("agente atualizou");
     expect(screen.getByRole("button", { name: /^Board/ })).toHaveTextContent("1");
 
+    // Linha do tempo: o run aparece como card recolhível com prévia e "Abrir run"; comentar vira item e vai ao prompt.
+    const history = within(detail).getByTestId("task-history");
+    expect(within(history).getAllByTestId("task-run")).toHaveLength(1);
+    expect(within(history).getByTestId("task-run")).toHaveTextContent("Pronto para revisão");
+    await user.type(within(history).getByLabelText("Comentário"), "Prefira índice parcial em status.");
+    await user.click(within(history).getByRole("button", { name: "Comentar" }));
+    expect(await within(history).findByTestId("task-comment")).toHaveTextContent("Prefira índice parcial em status.");
+    expect((await transport.invoke("list_task_events", { taskId: (await transport.invoke("list_tasks", { projectId: "proj_demo" }))[0]!.id })).some((e) => e.kind === "comment" && e.actor === "você")).toBe(true);
+
     // Aprovar segue para Sintetizar; o scheduler começa o próximo run.
     await user.type(within(detail).getByLabelText("Observação"), "bom levantamento");
     await user.click(within(detail).getByRole("button", { name: "Aprovar e seguir" }));
@@ -119,6 +128,12 @@ describe("Board e scheduler", () => {
     expect(runs).toHaveLength(2);
     expect(runs.every((r) => r.taskId === tasks[0]?.id)).toBe(true);
     expect(runs[0]?.options.taskContext?.stage).toBe("Sintetizar");
+    // O comentário entrou no prompt do segundo run e "Abrir run" leva à transcrição.
+    expect(runs[0]?.prompt).toContain("Comentários do gestor");
+    expect(runs[0]?.prompt).toContain("Prefira índice parcial em status.");
+    await user.click(within(screen.getByTestId("task-history")).getAllByRole("button", { name: "Abrir run" })[0]!);
+    expect(await screen.findByTestId("run-status")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^Board/ }));
   });
 
   it("com confiança configurada a task é revisada pelo gestor e concluída sem nenhum clique seu", async () => {
