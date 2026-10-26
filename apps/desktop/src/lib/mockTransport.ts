@@ -11,7 +11,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Autonomy, TrustPolicy, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { ActivityItem, AgentProfile, AppSettings, Autonomy, TrustPolicy, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -1575,6 +1575,37 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
       if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);
       return report;
+    },
+    list_project_activity: async ({ projectId, agentProfileId, limit }) => {
+      // Como o SQL do core: eventos de task (sem agent_update), runs avulsos (início/fim) e decisões suas.
+      const items: ActivityItem[] = [];
+      const latestRunFor = (task: Task, at: string) => [...runs.values()].filter((r) => r.taskId === task.id && r.kind !== "consolidation" && r.startedAt <= at).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0] ?? null;
+      for (const e of taskEventsLog) {
+        if (e.kind === "agent_update") continue;
+        const task = tasks.find((t) => t.id === e.taskId);
+        if (!task || task.projectId !== projectId) continue;
+        const run = (e.runId ? runs.get(e.runId) : null) ?? latestRunFor(task, e.at);
+        const closes = ["run_finished", "completed", "advanced", "run_failed", "approved", "returned"].includes(e.kind);
+        const agentId = run?.agentProfileId ?? task.approverAgentId ?? task.assignedAgentId ?? null;
+        items.push({ id: e.id, at: e.at, source: "task", kind: e.kind, actor: e.actor, taskId: task.id, taskTitle: task.title, runId: e.runId ?? run?.id ?? null, agentProfileId: agentId, agentName: agentId ? (findMember(agentId)?.profile.name ?? null) : null, costUsd: closes ? (run?.costUsd ?? null) : null, note: e.note, fromStage: e.fromStage, toStage: e.toStage, payload: null });
+      }
+      for (const r of runs.values()) {
+        if (r.projectId !== projectId || r.taskId || r.kind !== "agent") continue;
+        const agentName = r.agentProfileId ? (findMember(r.agentProfileId)?.profile.name ?? null) : null;
+        items.push({ id: `${r.id}:started`, at: r.startedAt, source: "run", kind: "run_started", actor: r.agentProfileId ? "scheduler" : "você", taskId: null, taskTitle: null, runId: r.id, agentProfileId: r.agentProfileId, agentName, costUsd: null, note: r.prompt, fromStage: null, toStage: null, payload: null });
+        if (r.endedAt) items.push({ id: `${r.id}:ended`, at: r.endedAt, source: "run", kind: r.status === "completed" ? "run_finished" : r.status === "interrupted" ? "run_interrupted" : "run_failed", actor: "sistema", taskId: null, taskTitle: null, runId: r.id, agentProfileId: r.agentProfileId, agentName, costUsd: r.costUsd, note: r.resultText ?? r.errorMessage, fromStage: null, toStage: null, payload: null });
+      }
+      for (const a of auditLog) {
+        if (a.projectId !== projectId || !/^(approval\.|budget\.|team\.member\.)/.test(a.kind)) continue;
+        const p = (a.payload ?? {}) as Record<string, unknown>;
+        const run = typeof p.runId === "string" ? runs.get(p.runId) : undefined;
+        const agentId = run?.agentProfileId ?? (typeof p.agentProfileId === "string" ? p.agentProfileId : null);
+        items.push({ id: `audit:${a.seq}`, at: a.ts, source: "audit", kind: a.kind, actor: a.actor, taskId: typeof p.taskId === "string" ? p.taskId : null, taskTitle: null, runId: typeof p.runId === "string" ? p.runId : null, agentProfileId: agentId, agentName: agentId ? (findMember(agentId)?.profile.name ?? null) : null, costUsd: null, note: typeof p.message === "string" ? p.message : null, fromStage: null, toStage: null, payload: a.payload });
+      }
+      return items
+        .filter((i) => !agentProfileId || i.agentProfileId === agentProfileId)
+        .sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id))
+        .slice(0, Math.min(limit ?? 20, 200));
     },
     list_audit_events: async ({ projectId, kindPrefix, limit }) =>
       auditLog

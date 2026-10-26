@@ -4,6 +4,7 @@
 //! Migrations são SQL versionado aplicado em `open()`. Todo acesso passa por `Store`,
 //! que serializa escritas com um `Mutex` (SQLite tem um único escritor).
 
+pub mod activity;
 pub mod attention;
 pub mod audit;
 pub mod board_calls;
@@ -91,6 +92,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0021_delegation",
         include_str!("migrations/0021_delegation.sql"),
+    ),
+    (
+        "0022_member_state",
+        include_str!("migrations/0022_member_state.sql"),
     ),
 ];
 
@@ -878,11 +883,12 @@ mod tests {
                 "0019_task_result".to_string(),
                 "0020_trust".to_string(),
                 "0021_delegation".to_string(),
+                "0022_member_state".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 21);
+        assert_eq!(s.applied_migrations().unwrap().len(), 22);
     }
 
     #[test]

@@ -237,6 +237,24 @@ pub async fn scheduler_tick(app: AppHandle, state: State<'_, AppState>) -> CmdRe
     Ok(report)
 }
 
+/// Atividade recente do projeto (tasks, runs avulsos e decisões suas), opcionalmente de um membro.
+#[tauri::command]
+pub fn list_project_activity(
+    state: State<'_, AppState>,
+    project_id: String,
+    agent_profile_id: Option<String>,
+    limit: Option<u32>,
+) -> CmdResult<Vec<crate::store::activity::ActivityItem>> {
+    state
+        .store
+        .list_project_activity(
+            &project_id,
+            agent_profile_id.as_deref(),
+            limit.unwrap_or(20).min(200),
+        )
+        .map_err(err)
+}
+
 /// Diff da entrega da task (worktree contra o commit base; sem worktree, a pasta do projeto).
 #[tauri::command]
 pub fn task_diff(

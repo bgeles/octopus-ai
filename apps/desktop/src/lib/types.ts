@@ -157,6 +157,25 @@ export type TaskEvent = {
 // Segurança (Fase 3). Espelham `store::audit`.
 // ---------------------------------------------------------------------------
 
+/** Linha do feed de atividade do projeto (tasks, runs avulsos e decisões suas). */
+export type ActivityItem = {
+  id: string;
+  at: string;
+  source: "task" | "run" | "audit";
+  kind: string;
+  actor: string;
+  taskId: string | null;
+  taskTitle: string | null;
+  runId: string | null;
+  agentProfileId: string | null;
+  agentName: string | null;
+  costUsd: number | null;
+  note: string | null;
+  fromStage: string | null;
+  toStage: string | null;
+  payload: unknown;
+};
+
 export type AuditEvent = {
   seq: number;
   ts: string;
@@ -275,6 +294,8 @@ export type AgentProfile = {
   mcpServerIds?: string[] | null;
   /** Skills escolhidas (null = todas as ativas). */
   skillIds?: string[] | null;
+  /** Pausado: não recebe trabalho novo do scheduler. */
+  pausedAt?: string | null;
   /** Confiança do membro (null = herda do cargo). */
   autonomy?: Autonomy | null;
   canAssignTasks?: boolean | null;
@@ -476,6 +497,7 @@ export type Commands = {
   return_task: { args: { taskId: string; stageId: string; note?: string | null }; result: Task };
   list_task_events: { args: { taskId: string }; result: TaskEvent[] };
   task_diff: { args: { taskId: string }; result: TaskDiff };
+  list_project_activity: { args: { projectId: string; agentProfileId?: string | null; limit?: number }; result: ActivityItem[] };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };

@@ -259,10 +259,13 @@ pub struct AgentProfile {
     pub can_assign_tasks: Option<bool>,
     #[serde(default)]
     pub can_approve: Option<bool>,
+    /// Pausado: não recebe trabalho novo do scheduler (runs em andamento continuam).
+    #[serde(default)]
+    pub paused_at: Option<String>,
 }
 
 impl AgentProfile {
-    const SELECT: &'static str = "SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort, autonomy, can_assign_tasks, can_approve FROM agent_profile";
+    pub(crate) const SELECT: &'static str = "SELECT id, project_id, role_id, name, avatar_seed, instructions_md, model, permission_mode, allowed_tools_json, max_turns, max_budget_usd, created_at, mcp_server_ids_json, skill_ids_json, effort, autonomy, can_assign_tasks, can_approve, paused_at FROM agent_profile";
 
     pub(crate) fn from_row_pub(row: &Row<'_>) -> rusqlite::Result<Self> {
         Self::from_row(row)
@@ -296,6 +299,7 @@ impl AgentProfile {
                 .and_then(Autonomy::parse),
             can_assign_tasks: bool_col(row, 16)?,
             can_approve: bool_col(row, 17)?,
+            paused_at: row.get(18)?,
         })
     }
 }
