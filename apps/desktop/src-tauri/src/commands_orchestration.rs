@@ -195,6 +195,7 @@ pub async fn approve_task(
         .store
         .approve_task(&task_id, note.as_deref())
         .map_err(err)?;
+    crate::maybe_summarize_reports(&state.store, &state.sidecar, &task.project_id).await;
     if let Some(run_id) = before.and_then(|t| t.lock_run_id) {
         if let Ok(result) = state.sidecar.interrupt_run(&run_id).await {
             if result.interrupted {
@@ -235,6 +236,143 @@ pub async fn scheduler_tick(app: AppHandle, state: State<'_, AppState>) -> CmdRe
         let _ = app.emit(BOARD_CHANGED, &report);
     }
     Ok(report)
+}
+
+/// Atividade recente do projeto (tasks, runs avulsos e decisões suas), opcionalmente de um membro.
+#[tauri::command]
+pub fn list_project_activity(
+    state: State<'_, AppState>,
+    project_id: String,
+    agent_profile_id: Option<String>,
+    limit: Option<u32>,
+) -> CmdResult<Vec<crate::store::activity::ActivityItem>> {
+    state
+        .store
+        .list_project_activity(
+            &project_id,
+            agent_profile_id.as_deref(),
+            limit.unwrap_or(20).min(200),
+        )
+        .map_err(err)
+}
+
+// ---------------------------------------------------------------- missão e objetivos
+
+#[tauri::command]
+pub fn list_goals(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<crate::store::goals::GoalProgress>> {
+    state.store.list_goals(&project_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn create_goal(
+    state: State<'_, AppState>,
+    project_id: String,
+    input: crate::store::goals::GoalInput,
+) -> CmdResult<crate::store::goals::Goal> {
+    state.store.create_goal(&project_id, &input).map_err(err)
+}
+
+#[tauri::command]
+pub fn update_goal(
+    state: State<'_, AppState>,
+    goal_id: String,
+    input: crate::store::goals::GoalInput,
+) -> CmdResult<crate::store::goals::Goal> {
+    state.store.update_goal(&goal_id, &input).map_err(err)
+}
+
+#[tauri::command]
+pub fn delete_goal(state: State<'_, AppState>, goal_id: String) -> CmdResult<bool> {
+    state.store.delete_goal(&goal_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_project_mission(
+    state: State<'_, AppState>,
+    project_id: String,
+    mission: Option<String>,
+) -> CmdResult<crate::store::models::Project> {
+    let project = state
+        .store
+        .set_project_mission(&project_id, mission.as_deref())
+        .map_err(err)?;
+    auto_backup(&state);
+    Ok(project)
+}
+
+/// Comentário seu na linha do tempo da task; entra no prompt do próximo run dela.
+#[tauri::command]
+pub fn add_task_comment(
+    state: State<'_, AppState>,
+    task_id: String,
+    body: String,
+) -> CmdResult<crate::store::orchestration::TaskEvent> {
+    state.store.add_task_comment(&task_id, &body).map_err(err)
+}
+
+/// Relatórios finais (última geração por workflow) do projeto.
+#[tauri::command]
+pub fn list_workflow_reports(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<crate::store::reports::WorkflowReport>> {
+    state.store.list_workflow_reports(&project_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn get_workflow_report(
+    state: State<'_, AppState>,
+    workflow_id: String,
+) -> CmdResult<Option<crate::store::reports::WorkflowReport>> {
+    state.store.get_workflow_report(&workflow_id).map_err(err)
+}
+
+/// "Gerar relatório": nova geração manual; se o resumo com Haiku estiver ligado, o run começa já.
+#[tauri::command]
+pub async fn generate_workflow_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workflow_id: String,
+) -> CmdResult<crate::store::reports::WorkflowReport> {
+    let report = state
+        .store
+        .generate_workflow_report(&workflow_id)
+        .map_err(err)?;
+    crate::maybe_summarize_reports(&state.store, &state.sidecar, &report.project_id).await;
+    let _ = app.emit(BOARD_CHANGED, &TickReport::default());
+    Ok(report)
+}
+
+/// Exporta o markdown do relatório (resumo + corpo) para um arquivo, ou devolve o texto.
+#[tauri::command]
+pub fn export_workflow_report(
+    state: State<'_, AppState>,
+    report_id: String,
+    destination: Option<String>,
+) -> CmdResult<String> {
+    let report = state
+        .store
+        .get_report(&report_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("Relatório {report_id} não encontrado"))?;
+    let markdown = report.markdown();
+    match destination {
+        Some(path) if !path.trim().is_empty() => {
+            std::fs::write(&path, &markdown).map_err(|e| format!("gravando {path}: {e}"))?;
+            audit(
+                &state,
+                "você",
+                "board.report.exported",
+                Some(&report.project_id),
+                serde_json::json!({"reportId": report_id, "path": path}),
+            );
+            Ok(path)
+        }
+        _ => Ok(markdown),
+    }
 }
 
 /// Diff da entrega da task (worktree contra o commit base; sem worktree, a pasta do projeto).

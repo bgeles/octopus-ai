@@ -86,6 +86,16 @@ describe("Configurações e backup local", () => {
     await waitFor(async () => expect((await transport.invoke("get_settings", {}))["board.maxAgentReturns"]).toBeUndefined());
   });
 
+  it("Sobre mostra a versão do app, o runtime e as atualizações", async () => {
+    const { user } = setup();
+    await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Configurações" }));
+    const about = await screen.findByTestId("about");
+    expect(within(about).getByTestId("about-version")).toHaveTextContent("0.1.0 · mock · macos/aarch64");
+    expect(about).toHaveTextContent("agent-runtime mock");
+    expect(within(about).getByTestId("updates")).toBeInTheDocument();
+  });
+
   it("formata tamanhos", () => {
     expect(formatBytes(512)).toBe("512 B");
     expect(formatBytes(18_000)).toBe("18 KB");

@@ -117,6 +117,11 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         ) || ev.event.is_terminal()
                         {
                             tray::refresh(&app, &store);
+                            // Início e Time acompanham runs avulsos sem depender do tick do board.
+                            let _ = app.emit(
+                                commands_orchestration::BOARD_CHANGED,
+                                &scheduler::TickReport::default(),
+                            );
                         }
                         if let protocol::RunEvent::Usage { .. } = ev.event {
                             if let Ok(Some(run)) = store.get_run(&ev.run_id) {
@@ -141,6 +146,9 @@ async fn bootstrap(app: &AppHandle) -> Result<()> {
                         }
                         if ev.event.is_terminal() {
                             maybe_consolidate(&store, &sidecar, &ev.run_id).await;
+                            if let Ok(Some(run)) = store.get_run(&ev.run_id) {
+                                maybe_summarize_reports(&store, &sidecar, &run.project_id).await;
+                            }
                         }
                     }
                     SidecarNotification::Hook(hook) => {
@@ -296,6 +304,52 @@ pub async fn maybe_consolidate(store: &Store, sidecar: &sidecar::Sidecar, run_id
         Err(e) => {
             let _ = store.mark_run_failed(&crun.id, &format!("{e:#}"));
             warn!("run de consolidação {} não iniciou: {e}", crun.id);
+        }
+    }
+}
+
+/// Relatórios com resumo pendente: um run `report` por relatório (Haiku, sem ferramentas).
+pub async fn maybe_summarize_reports(store: &Store, sidecar: &sidecar::Sidecar, project_id: &str) {
+    let plans = match store.plan_report_summaries(project_id) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("plano de resumo dos relatórios falhou: {e:#}");
+            return;
+        }
+    };
+    if plans.is_empty() {
+        return;
+    }
+    let Some(project) = store.get_project(project_id).ok().flatten() else {
+        return;
+    };
+    for (report_id, prompt, options) in plans {
+        let run = match store.create_report_run(&project.id, &report_id, &prompt, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("não criei o run de resumo do relatório {report_id}: {e:#}");
+                continue;
+            }
+        };
+        let params = protocol::RunStartParams {
+            run_id: run.id.clone(),
+            cwd: project.path.clone(),
+            prompt,
+            options,
+        };
+        match sidecar.start_run(params).await {
+            Ok(_) => {
+                let _ = store.audit(
+                    "sistema",
+                    "board.report.summary.started",
+                    Some(&project.id),
+                    serde_json::json!({"runId": run.id, "reportId": report_id, "model": store::memory::CONSOLIDATION_MODEL}),
+                );
+            }
+            Err(e) => {
+                let _ = store.mark_run_failed(&run.id, &format!("{e:#}"));
+                warn!("run de resumo {} não iniciou: {e}", run.id);
+            }
         }
     }
 }
@@ -468,6 +522,20 @@ pub fn run() {
             commands_orchestration::list_task_events,
             commands_orchestration::scheduler_tick,
             commands_orchestration::task_diff,
+            commands_orchestration::list_project_activity,
+            commands_team::set_member_paused,
+            commands_team::run_member_now,
+            commands_config::app_info,
+            commands_orchestration::list_workflow_reports,
+            commands_orchestration::get_workflow_report,
+            commands_orchestration::generate_workflow_report,
+            commands_orchestration::export_workflow_report,
+            commands_orchestration::add_task_comment,
+            commands_orchestration::list_goals,
+            commands_orchestration::create_goal,
+            commands_orchestration::update_goal,
+            commands_orchestration::delete_goal,
+            commands_orchestration::set_project_mission,
             commands_security::list_audit_events,
             commands_security::verify_audit,
             commands_security::export_audit,

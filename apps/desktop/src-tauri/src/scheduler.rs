@@ -72,19 +72,41 @@ pub fn is_paused(store: &Store) -> bool {
     )
 }
 
+/// Opções de um tick: só um membro e/ou forçado ("Rodar agora" ignora a pausa global e a do membro).
+#[derive(Debug, Clone, Default)]
+pub struct TickOptions {
+    pub only_agent: Option<String>,
+    pub force: bool,
+}
+
 pub async fn tick(
     store: &Store,
     sidecar: &Sidecar,
     secrets: &dyn SecretStore,
 ) -> Result<TickReport> {
+    tick_with(store, sidecar, secrets, &TickOptions::default()).await
+}
+
+pub async fn tick_with(
+    store: &Store,
+    sidecar: &Sidecar,
+    secrets: &dyn SecretStore,
+    opts: &TickOptions,
+) -> Result<TickReport> {
     let mut report = TickReport::default();
-    if is_paused(store) {
+    if is_paused(store) && !opts.force {
         report.paused = true;
         return Ok(report);
     }
+    let filter = crate::store::orchestration::TaskFilter {
+        only_agent: opts.only_agent.clone(),
+        ignore_pause: opts.force,
+    };
     for project in store.list_projects()? {
-        report.parked += store.park_gate_tasks(&project.id)?;
-        for (task, workflow, stage) in store.runnable_tasks(&project.id)? {
+        if opts.only_agent.is_none() {
+            report.parked += store.park_gate_tasks(&project.id)?;
+        }
+        for (task, workflow, stage) in store.runnable_tasks_with(&project.id, &filter)? {
             // Quem foi atribuído à task (por você ou por um gestor delegando) vence o padrão do estágio.
             let agent_id = task
                 .assigned_agent_id
@@ -124,7 +146,8 @@ pub async fn tick(
             else {
                 continue;
             };
-            let prompt = Store::task_prompt(&task, &stage, &workflow);
+            let prompt =
+                Store::task_prompt(&task, &stage, &workflow, &store.prompt_context(&task)?);
             let run = store.create_run_full(
                 &project.id,
                 &prompt,
@@ -172,7 +195,7 @@ pub async fn tick(
 
         // Revisões por agentes: a task está em `review` esperando o aprovador do organograma.
         let limits = store.review_limits();
-        for (task, workflow, stage) in store.reviewable_tasks(&project.id)? {
+        for (task, workflow, stage) in store.reviewable_tasks_with(&project.id, &filter)? {
             let Some(reviewer) = task.approver_agent_id.clone() else {
                 continue;
             };
@@ -214,7 +237,13 @@ pub async fn tick(
             options.permission_mode = Some(crate::protocol::PermissionMode::Default);
             options.allowed_tools =
                 Some(REVIEW_ALLOWED_TOOLS.iter().map(|t| t.to_string()).collect());
-            let prompt = Store::review_prompt(&task, &stage, &workflow, worker_name.as_deref());
+            let prompt = Store::review_prompt(
+                &task,
+                &stage,
+                &workflow,
+                worker_name.as_deref(),
+                &store.prompt_context(&task)?,
+            );
             let run =
                 store.create_review_run(&project.id, &prompt, &options, &reviewer, &task.id)?;
             if !store.claim_review(&task.id, &run.id)? {
@@ -589,6 +618,143 @@ mod tests {
         assert!(report.failed[0].1.contains("worktree"));
         let t_now = store.get_task(&t.id).unwrap().unwrap();
         assert_eq!(t_now.status, TaskStatus::Failed);
+        sidecar.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn tick_skips_paused_member_and_run_now_starts_only_his_task() {
+        let Some(command) = fake_sidecar_command() else {
+            eprintln!("node não encontrado; pulando teste do scheduler");
+            return;
+        };
+        let (sidecar, _notifications) = Sidecar::spawn(command).await.unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = store
+            .create_project("p", dir.path().to_str().unwrap())
+            .unwrap();
+        let pedro = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Pedro".into(),
+                    role_id: "role_planejador".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        let ana = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Ana".into(),
+                    role_id: "role_implementador".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        // Dois slots: a task do Pedro (forçada) não pode bloquear a da Ana no tick seguinte.
+        let wf = store
+            .update_workflow(
+                &wf.id,
+                &crate::store::orchestration::WorkflowInput {
+                    name: wf.name.clone(),
+                    stages: wf.stages.clone(),
+                    use_worktrees: false,
+                    max_parallel: 2,
+                    goal_id: None,
+                },
+            )
+            .unwrap();
+        let t_pedro = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Do Pedro".into(),
+                    assigned_agent_id: Some(pedro.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let t_ana = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Da Ana".into(),
+                    assigned_agent_id: Some(ana.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.set_member_paused(&pedro, true).unwrap();
+        store
+            .set_setting(PAUSED_SETTING, &serde_json::json!(true))
+            .unwrap();
+
+        // Scheduler global pausado: nada roda; "Rodar agora" do Pedro força só a task dele.
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
+        assert!(report.paused && report.started.is_empty());
+        let report = tick_with(
+            &store,
+            &sidecar,
+            &MemorySecrets::default(),
+            &TickOptions {
+                only_agent: Some(pedro.clone()),
+                force: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.started.len(), 1, "{report:?}");
+        assert_eq!(report.started[0].task_id, t_pedro.id);
+        let run = store.get_run(&report.started[0].run_id).unwrap().unwrap();
+        assert_eq!(run.agent_profile_id.as_deref(), Some(pedro.as_str()));
+        assert_eq!(
+            store.get_task(&t_ana.id).unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
+
+        // Scheduler retomado: Ana roda; Pedro continua pausado para trabalho novo.
+        store
+            .set_setting(PAUSED_SETTING, &serde_json::json!(false))
+            .unwrap();
+        let t_pedro2 = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Outra do Pedro".into(),
+                    assigned_agent_id: Some(pedro.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let report = tick(&store, &sidecar, &MemorySecrets::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            report
+                .started
+                .iter()
+                .map(|s| s.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![t_ana.id.as_str()]
+        );
+        assert_eq!(
+            store.get_task(&t_pedro2.id).unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
         sidecar.shutdown().await;
     }
 
@@ -1061,6 +1227,198 @@ mod tests {
         sidecar.shutdown().await;
     }
 
+    /// Verificação da Fase 9 (relatório final) com o Claude de verdade: a única task de um workflow
+    /// conclui nos dois estágios, o relatório nasce com a entrega e o Haiku escreve o resumo executivo.
+    /// Custa dinheiro: `cargo test real_report -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "usa o Claude de verdade (custa dinheiro); rode com --ignored"]
+    async fn real_report_is_built_and_summarized_by_haiku() {
+        use crate::protocol::{
+            PermissionDecideParams, PermissionDecision, RunEvent, RunStartParams,
+        };
+        use crate::sidecar::command::find_node;
+        use crate::sidecar::SidecarNotification;
+
+        let main_js = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../packages/agent-runtime/dist/main.js")
+            .canonicalize()
+            .expect("sidecar compilado");
+        let (sidecar, mut notifications) = Sidecar::spawn(SidecarCommand::new(
+            find_node(),
+            vec![main_js.to_string_lossy().into_owned()],
+        ))
+        .await
+        .unwrap();
+        sidecar.hello().await.unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = store
+            .create_project("relatorio", dir.path().to_str().unwrap())
+            .unwrap();
+        store
+            .set_setting(
+                crate::store::reports::REPORT_SUMMARY_SETTING,
+                &serde_json::json!("haiku"),
+            )
+            .unwrap();
+        let dani = store
+            .add_team_member(
+                &project.id,
+                &TeamMemberInput {
+                    name: "Dani".into(),
+                    role_id: "role_pesquisador".into(),
+                    max_turns: Some(4),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .id;
+        let wf = store
+            .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        let task = store
+            .create_task(
+                &project.id,
+                &wf.id,
+                &TaskInput {
+                    title: "Definição de triagem".into(),
+                    description_md: "Não leia nem altere arquivos. Chame a tool task_update com status \"done\", uma nota curta e, em \"result\", um resumo em markdown de duas linhas definindo o que é triagem de leads.".into(),
+                    assigned_agent_id: Some(dani.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        async fn drive(
+            store: &Store,
+            sidecar: &Sidecar,
+            notifications: &mut tokio::sync::mpsc::Receiver<crate::sidecar::SidecarNotification>,
+            run_id: &str,
+        ) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(240);
+            loop {
+                let n = tokio::time::timeout_at(deadline, notifications.recv())
+                    .await
+                    .expect("timeout esperando o run")
+                    .expect("canal fechado");
+                match n {
+                    SidecarNotification::MemoryCall(call) => {
+                        let result = store
+                            .handle_memory_call(&call.run_id, call.op, &call.args)
+                            .unwrap();
+                        sidecar
+                            .memory_result(crate::protocol::MemoryResultParams {
+                                run_id: call.run_id.clone(),
+                                call_id: call.call_id.clone(),
+                                result,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    SidecarNotification::Hook(hook) => {
+                        let decision = crate::decide_hook(store, &hook);
+                        sidecar
+                            .decide_hook(crate::protocol::HookDecideParams {
+                                run_id: hook.run_id.clone(),
+                                hook_id: hook.hook_id.clone(),
+                                decision,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    SidecarNotification::RunEvent(ev) if ev.run_id == run_id => {
+                        eprintln!("[{}] {}", ev.seq, ev.event.kind());
+                        if let RunEvent::PermissionRequest { request_id, .. } = &ev.event {
+                            sidecar
+                                .decide_permission(PermissionDecideParams {
+                                    run_id: run_id.to_string(),
+                                    request_id: request_id.clone(),
+                                    decision: PermissionDecision::Deny {
+                                        message: "teste: só task_update".into(),
+                                    },
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        let terminal = ev.event.is_terminal();
+                        store
+                            .record_run_event(&ev.run_id, ev.seq, &ev.at, &ev.event)
+                            .unwrap();
+                        if terminal {
+                            break;
+                        }
+                    }
+                    SidecarNotification::Exited(code) => panic!("sidecar saiu: {code:?}"),
+                    _ => {}
+                }
+            }
+        }
+
+        // Dois estágios, dois runs da Dani; ao fim do segundo a task está concluída e o relatório existe.
+        for stage in 1..=2 {
+            let report = tick(&store, &sidecar, &MemorySecrets::default())
+                .await
+                .unwrap();
+            assert_eq!(report.started.len(), 1, "estágio {stage}: {report:?}");
+            drive(
+                &store,
+                &sidecar,
+                &mut notifications,
+                &report.started[0].run_id,
+            )
+            .await;
+            let run = store.get_run(&report.started[0].run_id).unwrap().unwrap();
+            assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error_message);
+        }
+        let done = store.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(done.status, TaskStatus::Done, "nota: {:?}", done.last_note);
+        let report = store
+            .get_workflow_report(&wf.id)
+            .unwrap()
+            .expect("relatório gerado ao concluir");
+        eprintln!("relatório: {}\n", report.body_md);
+        assert_eq!(report.trigger, "auto");
+        assert_eq!((report.tasks_done, report.tasks_total), (1, 1));
+        assert!(report.body_md.contains("Definição de triagem"));
+        assert_eq!(report.summary_status, "pending");
+
+        // Resumo executivo com o Haiku de verdade.
+        let plans = store.plan_report_summaries(&project.id).unwrap();
+        assert_eq!(plans.len(), 1);
+        let (report_id, prompt, options) = plans.into_iter().next().unwrap();
+        let srun = store
+            .create_report_run(&project.id, &report_id, &prompt, &options)
+            .unwrap();
+        sidecar
+            .start_run(RunStartParams {
+                run_id: srun.id.clone(),
+                cwd: project.path.clone(),
+                prompt,
+                options,
+            })
+            .await
+            .unwrap();
+        drive(&store, &sidecar, &mut notifications, &srun.id).await;
+        let srun_done = store.get_run(&srun.id).unwrap().unwrap();
+        eprintln!(
+            "resumo {:?} custo {:?}: {:?}",
+            srun_done.status, srun_done.cost_usd, srun_done.result_text
+        );
+        assert_eq!(
+            srun_done.status,
+            RunStatus::Completed,
+            "{:?}",
+            srun_done.error_message
+        );
+        let summarized = store.get_report(&report_id).unwrap().unwrap();
+        assert_eq!(summarized.summary_status, "done");
+        assert!(summarized.summary_md.as_deref().unwrap().len() > 20);
+        assert!(summarized.markdown().contains("## Resumo executivo"));
+        sidecar.shutdown().await;
+    }
+
     /// Verificação da Fase 8 (delegação) com o Claude de verdade: Gabi (gestora, delega) lista o
     /// time e cria uma task para a Dani pelas tools do board; o próximo tick roda como a Dani.
     /// Custa dinheiro: `cargo test real_delegation -- --ignored --nocapture`.
@@ -1117,16 +1475,46 @@ mod tests {
             .unwrap()
             .profile
             .id;
-        store
+        let wf = store
             .create_workflow_from_template(&project.id, "research-synthesis", false)
+            .unwrap();
+        // Fase 9: missão e objetivo entram no porquê (team_list, task_create(goal), prompts).
+        store
+            .set_project_mission(&project.id, Some("Reduzir a triagem de leads em 30%."))
+            .unwrap();
+        let goal = store
+            .create_goal(
+                &project.id,
+                &crate::store::goals::GoalInput {
+                    title: "Mapear integrações externas".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .update_workflow(
+                &wf.id,
+                &crate::store::orchestration::WorkflowInput {
+                    name: wf.name.clone(),
+                    stages: wf.stages.clone(),
+                    use_worktrees: false,
+                    max_parallel: 1,
+                    goal_id: Some(goal.id.clone()),
+                },
+            )
             .unwrap();
 
         // Run avulso como a Gabi (como "Dar uma tarefa" na UI).
-        let prompt = "Use a tool team_list para ver quem está no seu time. Depois crie, com a tool task_create, exatamente UMA task para a Dani com o título \"Inventário de integrações externas\", uma descrição curta e critérios de aceite verificáveis. Não faça mais nada e não crie arquivos. Termine dizendo o id da task criada.";
+        let prompt = "Use a tool team_list para ver quem está no seu time e os objetivos ativos. Depois crie, com a tool task_create, exatamente UMA task para a Dani com o título \"Inventário de integrações externas\", uma descrição curta, critérios de aceite verificáveis e o parâmetro goal com o objetivo \"Mapear integrações externas\". Não faça mais nada e não crie arquivos. Termine dizendo o id da task criada.";
         let options = store
             .agent_run_options(&gabi, &RunOptions::default())
             .unwrap();
         assert_eq!(options.board_tools, Some(true));
+        assert!(options
+            .system_prompt_append
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Missão do projeto: Reduzir a triagem de leads em 30%."));
         let run = store
             .create_run_full(&project.id, prompt, &options, Some(&gabi), None)
             .unwrap();
@@ -1261,6 +1649,8 @@ mod tests {
         assert_eq!(task.assigned_agent_id.as_deref(), Some(dani.as_str()));
         assert_eq!(task.created_by_agent_id.as_deref(), Some(gabi.as_str()));
         assert_eq!(task.status, TaskStatus::Ready);
+        // Por `goal` ou herdado do workflow: a task fica ligada ao objetivo.
+        assert_eq!(task.goal_id.as_deref(), Some(goal.id.as_str()));
         let events = store.list_task_events(&task.id).unwrap();
         assert_eq!(events[0].kind, "created_by_agent");
         assert_eq!(events[0].actor, "agente Gabi");
@@ -1273,6 +1663,12 @@ mod tests {
         let dani_run = store.get_run(&report.started[0].run_id).unwrap().unwrap();
         assert_eq!(dani_run.agent_profile_id.as_deref(), Some(dani.as_str()));
         assert!(dani_run.prompt.contains("criada por um membro do time"));
+        assert!(dani_run
+            .prompt
+            .contains("Missão do projeto: Reduzir a triagem de leads em 30%."));
+        assert!(dani_run
+            .prompt
+            .contains("Objetivo desta task: Mapear integrações externas"));
         sidecar.interrupt_run(&dani_run.id).await.ok();
         sidecar.shutdown().await;
     }

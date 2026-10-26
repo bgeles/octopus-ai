@@ -16,6 +16,7 @@ describe("Segurança · Auditoria", () => {
   it("lista os eventos encadeados de um run com aprovação e verifica a cadeia", async () => {
     const { user } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await user.type(screen.getByLabelText("Instrução para o agente"), "rodar testes");
     await user.click(screen.getByRole("button", { name: "Enviar" }));
     const approval = await screen.findByTestId("approval-card");
@@ -49,6 +50,7 @@ describe("Segurança · Auditoria", () => {
   it("alterar um evento fora do app quebra a verificação a partir dele", async () => {
     const { user, transport } = setup();
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
     await transport.invoke("set_setting", { key: "theme", value: "dark" });
     await transport.invoke("set_setting", { key: "theme", value: "light" });
     await transport.invoke("set_setting", { key: "theme", value: "dark" });

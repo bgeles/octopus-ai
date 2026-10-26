@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memberState } from "./lib/memberState";
+import { HomeView } from "./components/HomeView";
 import type { EffortLevel, PermissionMode } from "@octopus/protocol";
 import { AddProjectDialog } from "./components/AddProjectDialog";
 import { ApprovalsView } from "./components/ApprovalsView";
@@ -7,6 +9,7 @@ import { HarnessView } from "./components/HarnessView";
 import { MemoryView } from "./components/MemoryView";
 import { SecurityView, type SecurityTab } from "./components/SecurityView";
 import { TaskDialog } from "./components/TaskDialog";
+import { MissionDialog } from "./components/MissionDialog";
 import { MemberDialog } from "./components/MemberDialog";
 import { MemberSheet } from "./components/MemberSheet";
 import { TeamView, type MemberStatus } from "./components/TeamView";
@@ -22,7 +25,7 @@ import { shortcutFor } from "./lib/shortcuts";
 import { Transcript } from "./components/Transcript";
 import { applyTheme, isThemePreference, readThemePreference, saveThemePreference, type ThemePreference } from "./lib/theme";
 import type { Transport } from "./lib/transport";
-import type { AgentTotals, AppSettings, Approval, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, McpServer, PolicyRule, SandboxProfile, Skill, EnvironmentCheck, FilePreview, HelloResult, PermissionDecision, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SessionSummary, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowTemplate } from "./lib/types";
+import type { ActivityItem, AgentTotals, AppInfo, Approval, AppSettings, AuditEvent, AuditVerification, BackupSnapshot, BudgetStatus, EnvironmentCheck, FilePreview, Goal, GoalInput, GoalProgress, HelloResult, McpServer, PermissionDecision, PolicyRule, Project, ProjectDefaults, ProjectTotals, ResumeTarget, Role, Run, RunEventNotification, SandboxProfile, SessionSummary, Skill, Task, TaskEvent, TaskInput, TeamMember, TeamMemberInput, Workflow, WorkflowReport, WorkflowTemplate } from "./lib/types";
 import { projectDefaultsKey } from "./lib/types";
 import { applyRunEvent, initialRunViewState, isRunActive, resolvePermission, withUserPrompt, type RunViewState } from "./state/runReducer";
 
@@ -31,7 +34,7 @@ type AppProps = { transport: Transport };
 export function App({ transport }: AppProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [view, setView] = useState<View>("run");
+  const [view, setView] = useState<View>("home");
   const [addOpen, setAddOpen] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
@@ -50,10 +53,18 @@ export function App({ transport }: AppProps) {
   const [checking, setChecking] = useState(false);
   const [snapshots, setSnapshots] = useState<BackupSnapshot[] | null>(null);
   const [runtime, setRuntime] = useState<HelloResult | null>(null);
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  /** Atividade recente do projeto (Início); null = carregando. */
+  const [activity, setActivity] = useState<ActivityItem[] | null>(null);
+  const [reports, setReports] = useState<WorkflowReport[]>([]);
+  const [goals, setGoals] = useState<GoalProgress[]>([]);
+  const [missionDialogOpen, setMissionDialogOpen] = useState(false);
   const [team, setTeam] = useState<TeamMember[] | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
   const [teamTotals, setTeamTotals] = useState<AgentTotals[]>([]);
   const [openMemberId, setOpenMemberId] = useState<string | null>(null);
+  /** Feed de atividade do membro aberto na ficha (null = carregando). */
+  const [memberActivity, setMemberActivity] = useState<ActivityItem[] | null>(null);
   const [memberDialog, setMemberDialog] = useState<{ open: boolean; member: TeamMember | null }>({ open: false, member: null });
   const [runAs, setRunAs] = useState<TeamMember | null>(null);
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
@@ -79,8 +90,19 @@ export function App({ transport }: AppProps) {
   const currentRunIdRef = useRef<string | null>(null);
   currentRunIdRef.current = currentRun?.id ?? null;
 
+  const refreshActivity = useCallback(
+    async (projectId: string) => {
+      try {
+        setActivity(await transport.invoke("list_project_activity", { projectId, limit: 10 }));
+      } catch {
+        setActivity([]);
+      }
+    },
+    [transport],
+  );
   const refreshRuns = useCallback(
     async (projectId: string) => {
+      void refreshActivity(projectId);
       const [list, projectTotals, agentTotals] = await Promise.all([
         transport.invoke("list_runs", { projectId, limit: 20 }),
         transport.invoke("get_project_totals", { projectId }),
@@ -174,9 +196,11 @@ export function App({ transport }: AppProps) {
   const refreshBoard = useCallback(
     async (projectId: string) => {
       try {
-        const [wfs, taskList] = await Promise.all([transport.invoke("list_workflows", { projectId }), transport.invoke("list_tasks", { projectId })]);
+        const [wfs, taskList, reportList, goalList] = await Promise.all([transport.invoke("list_workflows", { projectId }), transport.invoke("list_tasks", { projectId }), transport.invoke("list_workflow_reports", { projectId }), transport.invoke("list_goals", { projectId })]);
         setWorkflows(wfs);
         setTasks(taskList);
+        setReports(reportList);
+        setGoals(goalList);
         setSelectedWorkflowId((current) => (current && wfs.some((w) => w.id === current) ? current : (wfs[0]?.id ?? null)));
       } catch (e) {
         setToast(`Falha ao carregar o board: ${messageOf(e)}`);
@@ -230,7 +254,7 @@ export function App({ transport }: AppProps) {
     const keep = (fn: () => void) => (disposed ? fn() : unlisteners.push(fn));
     transport
       .listen("app:navigate", (target) => {
-        if (["run", "sessions", "approvals", "agents", "board", "memory", "harness", "security", "settings"].includes(target)) setView(target as View);
+        if (["home", "run", "sessions", "approvals", "agents", "board", "memory", "harness", "security", "settings"].includes(target)) setView(target as View);
       })
       .then(keep)
       .catch(() => {});
@@ -471,7 +495,7 @@ export function App({ transport }: AppProps) {
   useEffect(() => {
     if (view === "sessions" && sessions === null) void loadSessions();
     // Board e Time recarregam ao entrar: o scheduler e outras janelas podem ter mudado o estado.
-    if ((view === "board" || view === "agents") && selectedProject) {
+    if ((view === "board" || view === "agents" || view === "home") && selectedProject) {
       void refreshBoard(selectedProject.id);
       void refreshTeam(selectedProject.id);
       transport
@@ -603,19 +627,50 @@ export function App({ transport }: AppProps) {
     refreshSnapshots();
   };
 
+  useEffect(() => {
+    transport
+      .invoke("app_info", {})
+      .then(setAppInfo)
+      .catch(() => setAppInfo(null));
+  }, [transport]);
+
   const finishOnboarding = async (result: OnboardingResult) => {
     if (result.project) await createProject(result.project);
     await setSetting("defaultAuthMode", result.defaultAuthMode);
     await setSetting("theme", result.theme);
     await setSetting("onboarding.completedAt", new Date().toISOString());
-    setView("run");
+    setView("home");
   };
 
   const memberStatus = (agentProfileId: string): MemberStatus => {
-    const mine = runs.filter((r) => r.agentProfileId === agentProfileId);
-    if (mine.some((r) => r.status === "waiting_approval")) return "waiting";
-    if (mine.some((r) => r.status === "running" || r.status === "queued")) return "active";
-    return "idle";
+    const member = team?.find((m) => m.profile.id === agentProfileId);
+    if (!member) return "idle";
+    return memberState(member, teamTotals.find((t) => t.agentProfileId === agentProfileId) ?? null, runs);
+  };
+  const pauseMember = async (member: TeamMember, paused: boolean) => {
+    try {
+      await transport.invoke("set_member_paused", { agentProfileId: member.profile.id, paused });
+      setToast(paused ? `${member.profile.name} pausado: não recebe tasks novas até retomar.` : `${member.profile.name} retomado.`);
+      if (selectedProject) {
+        await refreshTeam(selectedProject.id);
+        await refreshBoard(selectedProject.id);
+        await refreshRuns(selectedProject.id);
+      }
+    } catch (e) {
+      setToast(`Falha ao ${paused ? "pausar" : "retomar"}: ${messageOf(e)}`);
+    }
+  };
+  const runMemberNow = async (member: TeamMember) => {
+    try {
+      const report = await transport.invoke("run_member_now", { agentProfileId: member.profile.id });
+      if (report.started.length === 0) setToast(report.failed[0] ? `Não deu para iniciar: ${report.failed[0][1]}` : `Nenhuma task pronta para ${member.profile.name}.`);
+      if (selectedProject) {
+        await refreshBoard(selectedProject.id);
+        await refreshRuns(selectedProject.id);
+      }
+    } catch (e) {
+      setToast(`Falha ao rodar agora: ${messageOf(e)}`);
+    }
   };
 
   const saveMember = async (input: TeamMemberInput) => {
@@ -638,6 +693,43 @@ export function App({ transport }: AppProps) {
   };
 
   const openMember = team?.find((m) => m.profile.id === openMemberId) ?? null;
+  const refreshMemberActivity = useCallback(
+    (projectId: string, agentProfileId: string) => {
+      transport
+        .invoke("list_project_activity", { projectId, agentProfileId, limit: 50 })
+        .then(setMemberActivity)
+        .catch(() => setMemberActivity([]));
+    },
+    [transport],
+  );
+  useEffect(() => {
+    if (!openMemberId || !selectedProject) {
+      setMemberActivity(null);
+      return;
+    }
+    // Recarrega quando o board/os runs mudam (board:changed, fim de run).
+    refreshMemberActivity(selectedProject.id, openMemberId);
+  }, [openMemberId, selectedProject, refreshMemberActivity, tasks, runs]);
+  /** Abre uma task no Board (seleciona o workflow dela). */
+  const openTask = (taskId: string) => {
+    const task = tasks.find((t) => t.id === taskId);
+    if (task) setSelectedWorkflowId(task.workflowId);
+    setSelectedTaskId(taskId);
+    setView("board");
+  };
+  const generateReport = async (workflow: Workflow) => {
+    await transport.invoke("generate_workflow_report", { workflowId: workflow.id });
+    if (selectedProject) await refreshBoard(selectedProject.id);
+  };
+  const exportReport = async (report: WorkflowReport, destination: string | null) => {
+    const result = await transport.invoke("export_workflow_report", { reportId: report.id, destination });
+    setToast(destination ? `Relatório exportado para ${destination}` : "Relatório copiado.");
+    return result;
+  };
+  const openRunById = async (runId: string) => {
+    const run = runs.find((r) => r.id === runId) ?? (await transport.invoke("get_run", { runId }).catch(() => null));
+    if (run) await openRun(run);
+  };
   const monthlyTeamCost = teamTotals.reduce((sum, t) => sum + t.costUsd, 0);
 
   // Defaults do projeto (esforço) podem ter mudado no Harness: relê as preferências ao voltar ao run.
@@ -679,6 +771,35 @@ export function App({ transport }: AppProps) {
     if (!selectedProject) return;
     await refreshBoard(selectedProject.id);
     void tick();
+  };
+
+  // Missão e objetivos: o porquê que entra nos prompts.
+  const saveMission = async (mission: string | null) => {
+    if (!selectedProject) return;
+    const updated = await transport.invoke("set_project_mission", { projectId: selectedProject.id, mission });
+    setSelectedProject(updated);
+    setProjects((current) => current.map((p) => (p.id === updated.id ? updated : p)));
+  };
+  const createGoal = async (input: GoalInput) => {
+    if (!selectedProject) return;
+    await transport.invoke("create_goal", { projectId: selectedProject.id, input });
+    await refreshBoard(selectedProject.id);
+  };
+  const updateGoal = async (goal: Goal, input: GoalInput) => {
+    await transport.invoke("update_goal", { goalId: goal.id, input });
+    if (selectedProject) await refreshBoard(selectedProject.id);
+  };
+  const deleteGoal = async (goal: Goal) => {
+    await transport.invoke("delete_goal", { goalId: goal.id });
+    if (selectedProject) await refreshBoard(selectedProject.id);
+  };
+  const setWorkflowGoal = async (workflow: Workflow, goalId: string | null) => {
+    try {
+      await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages, useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel, goalId } });
+      if (selectedProject) await refreshBoard(selectedProject.id);
+    } catch (e) {
+      setToast(`Falha ao mudar o objetivo do workflow: ${messageOf(e)}`);
+    }
   };
 
   const refreshAudit = useCallback(
@@ -759,12 +880,57 @@ export function App({ transport }: AppProps) {
       onAddProject={() => setAddOpen(true)}
       view={view}
       onChangeView={setView}
+      team={team ?? []}
+      onOpenRun={(run) => void openRun(run)}
+      appVersion={appInfo?.version ?? null}
       activeRuns={activeRuns}
       pendingApprovals={pendingApprovals}
       pendingGates={pendingGates}
       theme={theme}
       onThemeChange={changeTheme}
     >
+      {view === "home" && (
+        <HomeView
+          project={selectedProject}
+          team={team}
+          totals={teamTotals}
+          runs={runs}
+          tasks={tasks}
+          workflows={workflows ?? []}
+          approvals={approvals}
+          budget={budget}
+          activity={activity}
+          reports={reports}
+          goals={goals}
+          onEditMission={() => setMissionDialogOpen(true)}
+          onGenerateReport={generateReport}
+          onExportReport={exportReport}
+          statusOf={memberStatus}
+          schedulerPaused={schedulerPaused}
+          onOpenMember={(member) => {
+            setOpenMemberId(member.profile.id);
+            setView("agents");
+          }}
+          onRunAs={runAsMember}
+          onPause={pauseMember}
+          onRunNow={runMemberNow}
+          onOpenTask={openTask}
+          onOpenRun={(id) => void openRunById(id)}
+          onGo={setView}
+          onAddMember={() => {
+            setView("agents");
+            setMemberDialog({ open: true, member: null });
+          }}
+          onRefresh={() => {
+            if (selectedProject) {
+              void refreshBoard(selectedProject.id);
+              void refreshRuns(selectedProject.id);
+              void refreshApprovals(selectedProject.id);
+              void refreshTeam(selectedProject.id);
+            }
+          }}
+        />
+      )}
       {view === "run" && (
         <>
           <RunHeader
@@ -778,6 +944,9 @@ export function App({ transport }: AppProps) {
             sandboxName={sandboxProfiles.find((p) => p.id === (selectedProject?.sandboxProfileId ?? "sandbox_dev"))?.name ?? null}
             budget={budget}
             liveCostUsd={liveCost && liveCost.runId === currentRun?.id ? liveCost.usd : null}
+            member={team?.find((m) => m.profile.id === currentRun?.agentProfileId) ?? null}
+            task={tasks.find((t) => t.id === currentRun?.taskId) ?? null}
+            onOpenTask={(task) => openTask(task.id)}
             onContinue={() => {
               const sessionId = runState.sessionId ?? currentRun?.claudeSessionId;
               if (sessionId) beginResume({ sessionId, title: currentRun?.prompt ?? null }, false);
@@ -827,6 +996,7 @@ export function App({ transport }: AppProps) {
       {view === "sessions" && (
         <SessionsView
           runs={runs}
+          team={team ?? []}
           sessions={sessions}
           busySessionId={busySessionId}
           onOpenRun={(run) => void openRun(run)}
@@ -858,6 +1028,12 @@ export function App({ transport }: AppProps) {
           totals={teamTotals.find((t) => t.agentProfileId === openMember.profile.id) ?? null}
           tasks={tasks}
           runs={runs}
+          activity={memberActivity}
+          workflows={workflows ?? []}
+          onOpenTask={openTask}
+          onOpenRunById={(id) => void openRunById(id)}
+          onPause={(paused) => pauseMember(openMember, paused)}
+          onRunNow={tasks.some((t) => t.status === "ready" && t.assignedAgentId === openMember.profile.id) ? () => runMemberNow(openMember) : undefined}
           onBack={() => setOpenMemberId(null)}
           onEdit={() => setMemberDialog({ open: true, member: openMember })}
           onRunAs={() => runAsMember(openMember)}
@@ -876,6 +1052,8 @@ export function App({ transport }: AppProps) {
           onAddMember={() => setMemberDialog({ open: true, member: null })}
           onOpenMember={(member) => setOpenMemberId(member.profile.id)}
           onRunAs={runAsMember}
+          onPause={pauseMember}
+          onRunNow={runMemberNow}
         />
       )}
 
@@ -902,9 +1080,22 @@ export function App({ transport }: AppProps) {
           onNewTask={() => setTaskDialogOpen(true)}
           onOpenTask={(task) => setSelectedTaskId(task.id)}
           onLoadDiff={(task) => transport.invoke("task_diff", { taskId: task.id })}
+          onComment={async (task, body) => {
+            await transport.invoke("add_task_comment", { taskId: task.id, body });
+            setTaskEvents(await transport.invoke("list_task_events", { taskId: task.id }));
+          }}
+          report={reports.find((r) => r.workflowId === (selectedWorkflow?.id ?? "")) ?? null}
+          onGenerateReport={generateReport}
+          onExportReport={exportReport}
+          goals={goals}
+          onEditMission={() => setMissionDialogOpen(true)}
+          onSetWorkflowGoal={setWorkflowGoal}
+          onCreateGoal={createGoal}
+          onUpdateGoal={updateGoal}
+          onDeleteGoal={deleteGoal}
           onSetGateApprover={async (workflow, stage, approver) => {
             try {
-              await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages.map((s) => (s.id === stage.id ? { ...s, approver } : s)), useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel } });
+              await transport.invoke("update_workflow", { workflowId: workflow.id, input: { name: workflow.name, stages: workflow.stages.map((s) => (s.id === stage.id ? { ...s, approver } : s)), useWorktrees: workflow.useWorktrees, maxParallel: workflow.maxParallel, goalId: workflow.goalId ?? null } });
               await afterTaskChange();
             } catch (e) {
               setToast(`Falha ao mudar o gate: ${messageOf(e)}`);
@@ -1032,6 +1223,7 @@ export function App({ transport }: AppProps) {
           }}
           onRedoOnboarding={() => setSetting("onboarding.completedAt", null)}
           runtimeLabel={runtime ? `agent-runtime ${runtime.runtimeVersion} · SDK ${runtime.sdkVersion} · protocolo ${runtime.protocolVersion}` : "…"}
+          appInfo={appInfo}
         />
       )}
 
@@ -1045,7 +1237,8 @@ export function App({ transport }: AppProps) {
       )}
 
       <AddProjectDialog open={addOpen} onClose={() => setAddOpen(false)} onCreate={createProject} />
-      <TaskDialog open={taskDialogOpen} workflow={selectedWorkflow} tasks={tasks.filter((t) => t.workflowId === selectedWorkflow?.id)} team={team ?? []} onClose={() => setTaskDialogOpen(false)} onCreate={createTask} />
+      <TaskDialog open={taskDialogOpen} workflow={selectedWorkflow} tasks={tasks.filter((t) => t.workflowId === selectedWorkflow?.id)} team={team ?? []} goals={goals} onClose={() => setTaskDialogOpen(false)} onCreate={createTask} />
+      <MissionDialog open={missionDialogOpen} project={selectedProject} onClose={() => setMissionDialogOpen(false)} onSave={saveMission} />
       <MemberDialog
         open={memberDialog.open}
         roles={roles}

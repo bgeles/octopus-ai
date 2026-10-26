@@ -1,6 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
+
+// Com a suíte inteira em paralelo, o padrão de 1 s dos findBy*/waitFor fica curto para os fluxos do mock.
+configure({ asyncUtilTimeout: 3000 });
 
 afterEach(() => {
   cleanup();

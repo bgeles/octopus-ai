@@ -11,6 +11,7 @@ describe("Esforço por run", () => {
     const user = userEvent.setup();
     render(<App transport={transport} />);
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
 
     const select = await screen.findByTestId("effort-select");
     await waitFor(() => expect(within(select).getAllByRole("option")[0]).toHaveTextContent("Padrão (médio, do projeto)"));
@@ -30,6 +31,7 @@ describe("Esforço por run", () => {
     const user = userEvent.setup();
     render(<App transport={transport} />);
     await screen.findByDisplayValue("chat-core");
+    await user.click(screen.getByRole("button", { name: "Run ao vivo" }));
 
     const runAs = await screen.findByTestId("run-as-select");
     const lia = within(runAs).getByRole("option", { name: /Lia/ }) as HTMLOptionElement;

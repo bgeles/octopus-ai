@@ -8,9 +8,31 @@ use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashSet;
+
 use super::team::{resolve_approver, Approver};
 use super::{new_id, now, Store};
 use crate::protocol::{TaskContext, TaskMode, TaskStatusUpdate};
+
+/// Contexto extra dos prompts de task e de revisão: comentários seus na task (e, adiante, missão e objetivo).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PromptContext {
+    /// Últimos comentários do gestor, em ordem cronológica.
+    pub comments: Vec<TaskEvent>,
+    /// Missão do projeto e objetivo da task (ou do workflow): o "porquê".
+    pub mission: Option<String>,
+    pub goal: Option<super::goals::Goal>,
+}
+
+pub const MAX_COMMENT_CHARS: usize = 4_000;
+const PROMPT_COMMENTS: usize = 5;
+
+/// Filtro do scheduler: só um membro e/ou ignorando pausas (usado por "Rodar agora").
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskFilter {
+    pub only_agent: Option<String>,
+    pub ignore_pause: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +71,9 @@ pub struct Workflow {
     pub use_worktrees: bool,
     pub max_parallel: u32,
     pub created_at: String,
+    /// Objetivo padrão das tasks deste workflow.
+    #[serde(default)]
+    pub goal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -60,6 +85,8 @@ pub struct WorkflowInput {
     pub use_worktrees: bool,
     #[serde(default = "default_parallel")]
     pub max_parallel: u32,
+    #[serde(default)]
+    pub goal_id: Option<String>,
 }
 
 fn default_parallel() -> u32 {
@@ -145,13 +172,16 @@ pub struct Task {
     /// Membro (agente) que criou a task pelas tools de delegação; `None` = você.
     #[serde(default)]
     pub created_by_agent_id: Option<String>,
+    /// Objetivo da task (herda do workflow quando não informado).
+    #[serde(default)]
+    pub goal_id: Option<String>,
     /// Commit base no claim, para o diff da entrega.
     #[serde(default)]
     pub base_commit: Option<String>,
 }
 
 impl Task {
-    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit, approver_agent_id, return_count, review_attempts, created_by_agent_id FROM task";
+    const SELECT: &'static str = "SELECT id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, worktree_path, lock_run_id, last_note, position, created_at, updated_at, result_md, files_changed_json, result_run_id, base_commit, approver_agent_id, return_count, review_attempts, created_by_agent_id, goal_id FROM task";
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let deps: String = row.get(9)?;
@@ -183,6 +213,7 @@ impl Task {
             return_count: row.get::<_, i64>(21)? as u32,
             review_attempts: row.get::<_, i64>(22)? as u32,
             created_by_agent_id: row.get(23)?,
+            goal_id: row.get(24)?,
         })
     }
 }
@@ -205,6 +236,9 @@ pub struct TaskInput {
     /// `true` entra em `ready` (o scheduler pega); `false` fica em `backlog`.
     #[serde(default = "default_true")]
     pub ready: bool,
+    /// Objetivo; `None` herda o do workflow.
+    #[serde(default)]
+    pub goal_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -221,6 +255,7 @@ impl Default for TaskInput {
             assigned_agent_id: None,
             depends_on: Vec::new(),
             ready: true,
+            goal_id: None,
         }
     }
 }
@@ -273,7 +308,7 @@ impl Store {
 
     pub fn list_workflows(&self, project_id: &str) -> Result<Vec<Workflow>> {
         let conn = self.conn.lock().expect("store mutex");
-        let mut stmt = conn.prepare("SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE project_id = ?1 ORDER BY created_at")?;
+        let mut stmt = conn.prepare("SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE project_id = ?1 ORDER BY created_at")?;
         let rows = stmt
             .query_map(params![project_id], workflow_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -284,7 +319,7 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex");
         Ok(conn
             .query_row(
-                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE id = ?1",
+                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE id = ?1",
                 params![id],
                 workflow_from_row,
             )
@@ -298,11 +333,15 @@ impl Store {
         if input.stages.is_empty() {
             anyhow::bail!("Um workflow precisa de pelo menos um estágio");
         }
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(project_id, g)?),
+            None => None,
+        };
         let id = new_id("wf");
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
-            "INSERT INTO workflow (id, project_id, name, stages_json, use_worktrees, max_parallel, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, project_id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64, now()],
+            "INSERT INTO workflow (id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, project_id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64, now(), goal_id],
         )?;
         drop(conn);
         self.get_workflow(&id)?.context("workflow sumiu após criar")
@@ -343,11 +382,19 @@ impl Store {
                 stages,
                 use_worktrees,
                 max_parallel: 1,
+                goal_id: None,
             },
         )
     }
 
     pub fn update_workflow(&self, id: &str, input: &WorkflowInput) -> Result<Workflow> {
+        let current = self
+            .get_workflow(id)?
+            .with_context(|| format!("Workflow {id} não encontrado"))?;
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(&current.project_id, g)?),
+            None => None,
+        };
         if input.name.trim().is_empty() {
             anyhow::bail!("Informe o nome do workflow");
         }
@@ -357,8 +404,8 @@ impl Store {
         {
             let conn = self.conn.lock().expect("store mutex");
             let changed = conn.execute(
-                "UPDATE workflow SET name = ?2, stages_json = ?3, use_worktrees = ?4, max_parallel = ?5 WHERE id = ?1",
-                params![id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64],
+                "UPDATE workflow SET name = ?2, stages_json = ?3, use_worktrees = ?4, max_parallel = ?5, goal_id = ?6 WHERE id = ?1",
+                params![id, input.name.trim(), serde_json::to_string(&input.stages)?, input.use_worktrees as i64, input.max_parallel.max(1) as i64, goal_id],
             )?;
             if changed == 0 {
                 anyhow::bail!("Workflow {id} não encontrado");
@@ -438,6 +485,10 @@ impl Store {
                 anyhow::bail!("Dependência {dep} não encontrada");
             }
         }
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(project_id, g)?),
+            None => workflow.goal_id.clone(),
+        };
         let id = new_id("task");
         let ts = now();
         {
@@ -449,8 +500,8 @@ impl Store {
                 |r| r.get(0),
             )?;
             tx.execute(
-                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at, created_by_agent_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
+                "INSERT INTO task (id, project_id, workflow_id, stage_id, title, description_md, acceptance_md, status, assigned_agent_id, depends_on_json, position, created_at, updated_at, created_by_agent_id, goal_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
                 params![
                     id,
                     project_id,
@@ -464,7 +515,8 @@ impl Store {
                     serde_json::to_string(&input.depends_on)?,
                     position,
                     ts,
-                    created_by
+                    created_by,
+                    goal_id
                 ],
             )?;
             insert_event(
@@ -493,6 +545,10 @@ impl Store {
         let current = self
             .get_task(id)?
             .with_context(|| format!("Task {id} não encontrada"))?;
+        let goal_id = match input.goal_id.as_deref() {
+            Some(g) => Some(self.resolve_goal_for(&current.project_id, g)?),
+            None => current.goal_id.clone(),
+        };
         for dep in &input.depends_on {
             if dep == id {
                 anyhow::bail!("Uma task não pode depender de si mesma");
@@ -505,8 +561,8 @@ impl Store {
         {
             let conn = self.conn.lock().expect("store mutex");
             conn.execute(
-                "UPDATE task SET title = ?2, description_md = ?3, acceptance_md = ?4, stage_id = ?5, assigned_agent_id = ?6, depends_on_json = ?7, updated_at = ?8 WHERE id = ?1",
-                params![id, input.title.trim(), input.description_md.trim(), input.acceptance_md.trim(), stage_id, input.assigned_agent_id, serde_json::to_string(&input.depends_on)?, now()],
+                "UPDATE task SET title = ?2, description_md = ?3, acceptance_md = ?4, stage_id = ?5, assigned_agent_id = ?6, depends_on_json = ?7, updated_at = ?8, goal_id = ?9 WHERE id = ?1",
+                params![id, input.title.trim(), input.description_md.trim(), input.acceptance_md.trim(), stage_id, input.assigned_agent_id, serde_json::to_string(&input.depends_on)?, now(), goal_id],
             )?;
         }
         self.get_task(id)?.context("task sumiu após atualizar")
@@ -560,6 +616,10 @@ impl Store {
                 "UPDATE task SET stage_id = ?2, status = ?3, last_note = COALESCE(?4, last_note), updated_at = ?5 WHERE id = ?1",
                 params![id, target_stage, status.as_str(), note, now()],
             )?;
+            // Só quando a task acabou de virar `done` (mover uma concluída de novo não gera relatório).
+            if status == TaskStatus::Done && task.status != TaskStatus::Done {
+                Store::maybe_complete_workflow_in(&tx, &task.workflow_id, None)?;
+            }
             insert_event(
                 &tx,
                 id,
@@ -645,8 +705,32 @@ impl Store {
 
     /// Tasks `ready` cujas dependências estão `done`, respeitando o paralelismo do workflow.
     pub fn runnable_tasks(&self, project_id: &str) -> Result<Vec<(Task, Workflow, Stage)>> {
+        self.runnable_tasks_with(project_id, &TaskFilter::default())
+    }
+
+    /// Membros pausados do projeto (não recebem trabalho novo).
+    fn paused_agents(&self, project_id: &str, filter: &TaskFilter) -> Result<HashSet<String>> {
+        if filter.ignore_pause {
+            return Ok(HashSet::new());
+        }
+        Ok(self
+            .list_team(project_id)?
+            .into_iter()
+            .filter(|m| m.profile.paused_at.is_some())
+            .map(|m| m.profile.id)
+            .collect())
+    }
+
+    /// Como `runnable_tasks`, com filtro: só um membro (`only_agent`, pelo responsável efetivo —
+    /// atribuído, senão o do estágio) e/ou ignorando pausas ("Rodar agora").
+    pub fn runnable_tasks_with(
+        &self,
+        project_id: &str,
+        filter: &TaskFilter,
+    ) -> Result<Vec<(Task, Workflow, Stage)>> {
         let tasks = self.list_tasks(project_id)?;
         let workflows = self.list_workflows(project_id)?;
+        let paused = self.paused_agents(project_id, filter)?;
         let mut out = Vec::new();
         for workflow in &workflows {
             let active = tasks
@@ -675,6 +759,19 @@ impl Store {
                 if stage.gate {
                     // Gate sem run: a task espera você.
                     continue;
+                }
+                let effective = task
+                    .assigned_agent_id
+                    .as_deref()
+                    .or(stage.agent_profile_id.as_deref());
+                // Membro pausado: a task continua pronta, sem consumir slot nem bloquear as outras.
+                if effective.is_some_and(|a| paused.contains(a)) {
+                    continue;
+                }
+                if let Some(only) = filter.only_agent.as_deref() {
+                    if effective != Some(only) {
+                        continue;
+                    }
                 }
                 out.push((task.clone(), workflow.clone(), stage.clone()));
                 slots -= 1;
@@ -725,8 +822,17 @@ impl Store {
     /// Tasks em `review` esperando um run de revisão do aprovador, respeitando o paralelismo
     /// do workflow (runs de trabalho e de revisão contam juntos).
     pub fn reviewable_tasks(&self, project_id: &str) -> Result<Vec<(Task, Workflow, Stage)>> {
+        self.reviewable_tasks_with(project_id, &TaskFilter::default())
+    }
+
+    pub fn reviewable_tasks_with(
+        &self,
+        project_id: &str,
+        filter: &TaskFilter,
+    ) -> Result<Vec<(Task, Workflow, Stage)>> {
         let tasks = self.list_tasks(project_id)?;
         let workflows = self.list_workflows(project_id)?;
+        let paused = self.paused_agents(project_id, filter)?;
         let mut out = Vec::new();
         for workflow in &workflows {
             let active = tasks
@@ -742,6 +848,15 @@ impl Store {
             }) {
                 if slots == 0 {
                     break;
+                }
+                let reviewer = task.approver_agent_id.as_deref();
+                if reviewer.is_some_and(|a| paused.contains(a)) {
+                    continue;
+                }
+                if let Some(only) = filter.only_agent.as_deref() {
+                    if reviewer != Some(only) {
+                        continue;
+                    }
                 }
                 let Some(stage) = workflow.stages.iter().find(|s| s.id == task.stage_id) else {
                     continue;
@@ -841,11 +956,85 @@ impl Store {
     }
 
     /// Prompt do run de revisão: o revisor vê a task, a entrega e os critérios, e decide.
+    /// Comentário seu na task (linha do tempo): vira evento `comment` e entra no prompt do próximo run.
+    pub fn add_task_comment(&self, task_id: &str, body: &str) -> Result<TaskEvent> {
+        let body = body.trim();
+        if body.is_empty() {
+            anyhow::bail!("Escreva o comentário antes de enviar");
+        }
+        if body.chars().count() > MAX_COMMENT_CHARS {
+            anyhow::bail!("Comentário longo demais (máximo {MAX_COMMENT_CHARS} caracteres)");
+        }
+        let task = self
+            .get_task(task_id)?
+            .with_context(|| format!("Task {task_id} não encontrada"))?;
+        let id = {
+            let mut conn = self.conn.lock().expect("store mutex");
+            let tx = conn.transaction()?;
+            let id = new_id("tev");
+            tx.execute(
+                "INSERT INTO task_event (id, task_id, at, kind, from_stage, to_stage, run_id, actor, note) VALUES (?1, ?2, ?3, 'comment', NULL, NULL, NULL, 'você', ?4)",
+                params![id, task_id, now(), body],
+            )?;
+            Self::audit_in(
+                &tx,
+                "você",
+                "board.task.commented",
+                Some(&task.project_id),
+                serde_json::json!({"taskId": task_id, "chars": body.chars().count()}),
+            )?;
+            tx.commit()?;
+            id
+        };
+        self.list_task_events(task_id)?
+            .into_iter()
+            .find(|e| e.id == id)
+            .context("comentário sumiu após gravar")
+    }
+
+    /// Últimos `limit` comentários seus na task, em ordem cronológica.
+    pub fn task_comments(&self, task_id: &str, limit: usize) -> Result<Vec<TaskEvent>> {
+        let mut comments: Vec<TaskEvent> = self
+            .list_task_events(task_id)?
+            .into_iter()
+            .filter(|e| e.kind == "comment")
+            .collect();
+        if comments.len() > limit {
+            comments.drain(..comments.len() - limit);
+        }
+        Ok(comments)
+    }
+
+    /// Contexto para `task_prompt`/`review_prompt`: os últimos comentários do gestor.
+    pub fn prompt_context(&self, task: &Task) -> Result<PromptContext> {
+        let mission = self
+            .get_project(&task.project_id)?
+            .and_then(|p| p.mission)
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        let goal_id = match task.goal_id.clone() {
+            Some(g) => Some(g),
+            None => self
+                .get_workflow(&task.workflow_id)?
+                .and_then(|w| w.goal_id),
+        };
+        let goal = match goal_id {
+            Some(g) => self.get_goal(&g)?,
+            None => None,
+        };
+        Ok(PromptContext {
+            comments: self.task_comments(&task.id, PROMPT_COMMENTS)?,
+            mission,
+            goal,
+        })
+    }
+
     pub fn review_prompt(
         task: &Task,
         stage: &Stage,
         workflow: &Workflow,
         worker: Option<&str>,
+        ctx: &PromptContext,
     ) -> String {
         let mut text = format!(
             "Revisão da task {id} do board \"{wf}\" (estágio \"{stage}\"), feita por {who}.\n\n# {title}\n",
@@ -855,6 +1044,7 @@ impl Store {
             who = worker.unwrap_or("um membro do time"),
             title = task.title
         );
+        push_purpose(&mut text, ctx);
         if !task.description_md.trim().is_empty() {
             text.push_str("\nPedido original:\n");
             text.push_str(task.description_md.trim());
@@ -890,6 +1080,7 @@ impl Store {
             text.push_str(note);
             text.push('\n');
         }
+        push_comments(&mut text, ctx);
         text.push_str("\nVocê é o revisor: inspecione o trabalho no diretório atual (leia os arquivos, rode testes se fizer sentido), sem editar nada. Depois chame a tool task_update com status \"approved\" se a entrega cumpre o pedido e os critérios, ou \"returned\" com uma nota objetiva do que falta ou está errado.");
         text
     }
@@ -962,7 +1153,12 @@ impl Store {
     }
 
     /// Texto da task para o prompt do run.
-    pub fn task_prompt(task: &Task, stage: &Stage, workflow: &Workflow) -> String {
+    pub fn task_prompt(
+        task: &Task,
+        stage: &Stage,
+        workflow: &Workflow,
+        ctx: &PromptContext,
+    ) -> String {
         let mut text = format!(
             "Task {id} do board \"{wf}\", estágio \"{stage}\".\n\n# {title}\n",
             id = task.id,
@@ -970,6 +1166,7 @@ impl Store {
             stage = stage.name,
             title = task.title
         );
+        push_purpose(&mut text, ctx);
         if task.created_by_agent_id.is_some() {
             // Só um rótulo: política, sandbox e permissões não mudam por quem criou a task.
             text.push_str(
@@ -1006,6 +1203,7 @@ impl Store {
             text.push_str(note);
             text.push('\n');
         }
+        push_comments(&mut text, ctx);
         text.push_str("\nAo terminar, chame a tool task_update com status \"done\" (concluiu este estágio), \"review\" (precisa de revisão) ou \"blocked\" (não consegue prosseguir), uma nota curta e, em `result`, o resumo da entrega em markdown: o que mudou, onde, e como verificar.");
         text
     }
@@ -1177,7 +1375,7 @@ impl Store {
         }
         let workflow = tx
             .query_row(
-                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE id = ?1",
+                "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE id = ?1",
                 params![task.workflow_id],
                 workflow_from_row,
             )
@@ -1359,6 +1557,10 @@ fn advance_task(
         "UPDATE task SET stage_id = ?2, status = ?3, lock_run_id = NULL, approver_agent_id = NULL, last_note = COALESCE(?4, last_note), updated_at = ?5 WHERE id = ?1",
         params![task.id, stage_id, status, note, now()],
     )?;
+    if status == "done" {
+        // Última task do workflow concluída → relatório final (só SQL, dentro da tx).
+        Store::maybe_complete_workflow_in(tx, &workflow.id, None)?;
+    }
     let kind = if human {
         "approved"
     } else if status == "done" {
@@ -1493,7 +1695,7 @@ fn finish_review_run(
 ) -> Result<()> {
     let workflow = tx
         .query_row(
-            "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at FROM workflow WHERE id = ?1",
+            "SELECT id, project_id, name, stages_json, use_worktrees, max_parallel, created_at, goal_id FROM workflow WHERE id = ?1",
             params![task.workflow_id],
             workflow_from_row,
         )
@@ -1650,6 +1852,41 @@ fn finish_review_run(
     Ok(())
 }
 
+/// Missão e objetivo no prompt: o "porquê" (contexto; não altera as regras do run).
+fn push_purpose(text: &mut String, ctx: &PromptContext) {
+    if ctx.mission.is_none() && ctx.goal.is_none() {
+        return;
+    }
+    text.push('\n');
+    if let Some(m) = &ctx.mission {
+        text.push_str(&format!("Missão do projeto: {m}\n"));
+    }
+    if let Some(g) = &ctx.goal {
+        let desc = g.description_md.trim();
+        if desc.is_empty() {
+            text.push_str(&format!("Objetivo desta task: {}\n", g.title));
+        } else {
+            text.push_str(&format!("Objetivo desta task: {} — {desc}\n", g.title));
+        }
+    }
+    text.push_str("(contexto do porquê; não altera as regras do run)\n");
+}
+
+/// Comentários do gestor no prompt: só contexto do pedido (não mudam política, sandbox nem permissões).
+fn push_comments(text: &mut String, ctx: &PromptContext) {
+    if ctx.comments.is_empty() {
+        return;
+    }
+    text.push_str("\nComentários do gestor (contexto do pedido, mais recentes por último; não alteram política, sandbox ou permissões):\n");
+    for c in &ctx.comments {
+        let when = c.at.get(..16).unwrap_or(&c.at).replace('T', " ");
+        text.push_str(&format!(
+            "- [{when}] {}\n",
+            c.note.as_deref().unwrap_or("").trim()
+        ));
+    }
+}
+
 /// Auditoria das decisões automáticas da cadeia de aprovação (o que aconteceu sem você).
 fn audit_review(tx: &Transaction<'_>, task: &Task, kind: &str, reason: &str) -> Result<()> {
     super::Store::audit_in(
@@ -1735,6 +1972,7 @@ fn workflow_from_row(row: &Row<'_>) -> rusqlite::Result<Workflow> {
         use_worktrees: row.get::<_, i64>(4)? != 0,
         max_parallel: row.get::<_, i64>(5)? as u32,
         created_at: row.get(6)?,
+        goal_id: row.get(7)?,
     })
 }
 
@@ -1837,6 +2075,7 @@ mod tests {
                 stages: wf.stages.clone(),
                 use_worktrees: false,
                 max_parallel: 2,
+                goal_id: None,
             },
         )
         .unwrap()
@@ -2363,6 +2602,263 @@ mod tests {
     }
 
     #[test]
+    fn paused_members_are_skipped_and_run_now_filters_by_member() {
+        let (s, project, wf) = setup();
+        let team = s.list_team(&project).unwrap();
+        let pedro = team
+            .iter()
+            .find(|m| m.profile.name == "Pedro")
+            .unwrap()
+            .profile
+            .id
+            .clone();
+        let ana = team
+            .iter()
+            .find(|m| m.profile.name == "Ana")
+            .unwrap()
+            .profile
+            .id
+            .clone();
+        // Planejar é do Pedro; a segunda task é atribuída à Ana (atribuição vence o estágio).
+        let t1 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Do Pedro".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let t2 = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Da Ana".into(),
+                    assigned_agent_id: Some(ana.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.update_workflow(
+            &wf.id,
+            &WorkflowInput {
+                name: wf.name.clone(),
+                stages: wf.stages.clone(),
+                use_worktrees: false,
+                max_parallel: 2,
+                goal_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.runnable_tasks(&project).unwrap().len(), 2);
+
+        // Pedro pausado: a task dele fica pronta, sem evento, e a da Ana continua elegível.
+        s.set_member_paused(&pedro, true).unwrap();
+        let runnable = s.runnable_tasks(&project).unwrap();
+        assert_eq!(
+            runnable
+                .iter()
+                .map(|(t, _, _)| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![t2.id.as_str()]
+        );
+        assert_eq!(
+            s.get_task(&t1.id).unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
+        assert_eq!(s.list_task_events(&t1.id).unwrap().len(), 1, "só o created");
+        // "Rodar agora" ignora a pausa e filtra pelo membro.
+        let forced = s
+            .runnable_tasks_with(
+                &project,
+                &TaskFilter {
+                    only_agent: Some(pedro.clone()),
+                    ignore_pause: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            forced
+                .iter()
+                .map(|(t, _, _)| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![t1.id.as_str()]
+        );
+        let only_ana = s
+            .runnable_tasks_with(
+                &project,
+                &TaskFilter {
+                    only_agent: Some(ana.clone()),
+                    ignore_pause: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(only_ana.len(), 1);
+        assert_eq!(only_ana[0].0.id, t2.id);
+        s.set_member_paused(&pedro, false).unwrap();
+        assert_eq!(s.runnable_tasks(&project).unwrap().len(), 2);
+
+        // Revisor pausado não recebe runs de revisão.
+        let rui = team
+            .iter()
+            .find(|m| m.profile.name == "Rui")
+            .unwrap()
+            .profile
+            .id
+            .clone();
+        let run = s
+            .create_run_full(
+                &project,
+                "x",
+                &RunOptions::default(),
+                Some(&ana),
+                Some(&t2.id),
+            )
+            .unwrap();
+        assert!(s.claim_task(&t2.id, &run.id, None, None).unwrap());
+        {
+            let mut conn = s.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "UPDATE task SET status = 'review', approver_agent_id = ?2, lock_run_id = NULL WHERE id = ?1",
+                params![t2.id, rui],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(s.reviewable_tasks(&project).unwrap().len(), 1);
+        s.set_member_paused(&rui, true).unwrap();
+        assert!(s.reviewable_tasks(&project).unwrap().is_empty());
+        assert_eq!(
+            s.reviewable_tasks_with(
+                &project,
+                &TaskFilter {
+                    only_agent: Some(rui.clone()),
+                    ignore_pause: true
+                }
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn prompts_carry_mission_and_goal() {
+        use crate::store::goals::GoalInput;
+        let (s, project, wf) = setup();
+        s.set_project_mission(&project, Some("Reduzir a triagem em 30%."))
+            .unwrap();
+        let goal = s
+            .create_goal(
+                &project,
+                &GoalInput {
+                    title: "Regras de roteamento".into(),
+                    description_md: "para onde cada lead vai".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.update_workflow(
+            &wf.id,
+            &WorkflowInput {
+                name: wf.name.clone(),
+                stages: wf.stages.clone(),
+                use_worktrees: false,
+                max_parallel: 1,
+                goal_id: Some(goal.id.clone()),
+            },
+        )
+        .unwrap();
+        let t = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Com porquê".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ctx = s.prompt_context(&t).unwrap();
+        assert_eq!(ctx.mission.as_deref(), Some("Reduzir a triagem em 30%."));
+        assert_eq!(
+            ctx.goal.as_ref().map(|g| g.id.as_str()),
+            Some(goal.id.as_str()),
+            "herdado do workflow"
+        );
+        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf, &ctx);
+        assert!(prompt.contains("Missão do projeto: Reduzir a triagem em 30%."));
+        assert!(
+            prompt.contains("Objetivo desta task: Regras de roteamento — para onde cada lead vai")
+        );
+        assert!(prompt.contains("não altera as regras do run"));
+        assert!(
+            Store::review_prompt(&t, &wf.stages[0], &wf, Some("Ana"), &ctx)
+                .contains("Objetivo desta task")
+        );
+        assert!(
+            !Store::task_prompt(&t, &wf.stages[0], &wf, &PromptContext::default())
+                .contains("Missão do projeto")
+        );
+    }
+
+    #[test]
+    fn comments_are_recorded_and_only_the_last_five_enter_the_prompts() {
+        let (s, project, wf) = setup();
+        let t = s
+            .create_task(
+                &project,
+                &wf.id,
+                &TaskInput {
+                    title: "Com comentários".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(s.add_task_comment(&t.id, "   ").is_err());
+        assert!(s
+            .add_task_comment(&t.id, &"x".repeat(MAX_COMMENT_CHARS + 1))
+            .is_err());
+        assert!(s.add_task_comment("task_nope", "oi").is_err());
+        for i in 1..=6 {
+            let ev = s
+                .add_task_comment(&t.id, &format!("  comentário {i}  "))
+                .unwrap();
+            assert_eq!(ev.kind, "comment");
+            assert_eq!(ev.actor, "você");
+            assert_eq!(ev.note.as_deref(), Some(format!("comentário {i}").as_str()));
+        }
+        let all = s.list_task_events(&t.id).unwrap();
+        assert_eq!(all.iter().filter(|e| e.kind == "comment").count(), 6);
+        assert_eq!(
+            s.get_task(&t.id).unwrap().unwrap().updated_at,
+            t.updated_at,
+            "comentar não reordena a task"
+        );
+        let ctx = s.prompt_context(&t).unwrap();
+        assert_eq!(ctx.comments.len(), 5);
+        assert_eq!(ctx.comments[0].note.as_deref(), Some("comentário 2"));
+        assert_eq!(ctx.comments[4].note.as_deref(), Some("comentário 6"));
+        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf, &ctx);
+        assert!(prompt.contains("Comentários do gestor"));
+        assert!(!prompt.contains("comentário 1\n") && prompt.contains("comentário 6"));
+        assert!(prompt.find("comentário 2").unwrap() < prompt.find("comentário 6").unwrap());
+        let review = Store::review_prompt(&t, &wf.stages[0], &wf, Some("Ana"), &ctx);
+        assert!(review.contains("Comentários do gestor") && review.contains("comentário 6"));
+        assert!(
+            !Store::task_prompt(&t, &wf.stages[0], &wf, &PromptContext::default())
+                .contains("Comentários do gestor")
+        );
+        assert!(!s
+            .list_audit_events(Some(&project), Some("board.task.commented"), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn finish_task_run_fills_result_files_and_run() {
         use crate::protocol::ObservationKind;
         let (s, project, wf) = setup();
@@ -2762,7 +3258,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf);
+        let prompt = Store::task_prompt(&t, &wf.stages[0], &wf, &PromptContext::default());
         assert!(prompt.contains("# Criar V12"));
         assert!(prompt.contains("Índice composto"));
         assert!(prompt.contains("Critérios de aceite:\n- IT verde"));

@@ -1,6 +1,7 @@
 import { History, Lock, Square } from "lucide-react";
 import { EFFORT_LABELS } from "../lib/effort";
-import type { BudgetStatus, Project, ProjectTotals, Run } from "../lib/types";
+import type { BudgetStatus, Project, ProjectTotals, Run, Task, TeamMember } from "../lib/types";
+import { Avatar } from "./Avatar";
 import type { RunViewState } from "../state/runReducer";
 import { formatUsd } from "./RunSidebar";
 
@@ -21,9 +22,13 @@ type RunHeaderProps = {
   budget?: BudgetStatus | null;
   /** Custo estimado do run ativo (tokens × tabela de preços), antes do custo final do SDK. */
   liveCostUsd?: number | null;
+  /** Membro do time que executa este run e a task do board a que ele pertence. */
+  member?: TeamMember | null;
+  task?: Task | null;
+  onOpenTask?: (task: Task) => void;
 };
 
-export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue, totals = null, sandboxName = null, budget = null, liveCostUsd = null }: RunHeaderProps) {
+export function RunHeader({ project, run, state, active, onInterrupt, interrupting, onContinue, totals = null, sandboxName = null, budget = null, liveCostUsd = null, member = null, task = null, onOpenTask }: RunHeaderProps) {
   const status = statusOf(run, state, active);
   const sessionId = state.sessionId ?? run?.claudeSessionId ?? null;
   const canContinue = Boolean(run && !active && sessionId && onContinue);
@@ -32,6 +37,21 @@ export function RunHeader({ project, run, state, active, onInterrupt, interrupti
       <div className="flex min-w-0 flex-col gap-0.5">
         <div className="eyebrow text-brand">{project ? project.name : "Sem projeto"}{run ? ` · Run ${run.id.slice(-6)}` : ""}</div>
         <h1 className="m-0 truncate font-display text-xl font-bold tracking-tight text-ink">{run ? run.prompt : "Run ao vivo"}</h1>
+        {(member || task) && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate">
+            {member && (
+              <span className="inline-flex items-center gap-1.5" data-testid="run-member">
+                como <Avatar initials={member.profile.avatarSeed} size={18} active={active} /> <strong className="text-ink">{member.profile.name}</strong> · {member.role.title}
+                {run?.kind === "review" ? " · revisão" : ""}
+              </span>
+            )}
+            {task && (
+              <button type="button" onClick={() => onOpenTask?.(task)} className="inline-flex items-center gap-1 rounded-full border hairline-strong px-2 py-0.5 hover:border-ink hover:text-ink" data-testid="run-task">
+                Task · <span className="truncate">{task.title}</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <div className="ml-auto flex flex-wrap items-center gap-2.5">
         <span data-testid="run-status" className={["inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-semibold", status.className].join(" ")}>

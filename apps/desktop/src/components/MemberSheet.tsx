@@ -1,5 +1,7 @@
 import { ChevronLeft } from "lucide-react";
-import { AUTONOMY_LABELS, type AgentTotals, type Run, type TeamMember, type Task } from "../lib/types";
+import { firstLine } from "../lib/text";
+import { AUTONOMY_LABELS, type ActivityItem, type AgentTotals, type Run, type Task, type TeamMember, type Workflow } from "../lib/types";
+import { ActivityFeed } from "./ActivityFeed";
 import { Avatar } from "./Avatar";
 import { formatUsd } from "./RunSidebar";
 import { formatRelative, labelFor } from "./SessionsView";
@@ -12,6 +14,13 @@ type MemberSheetProps = {
   totals: AgentTotals | null;
   runs: Run[];
   tasks?: Task[];
+  /** Atividade recente deste membro (feed do projeto filtrado); null = carregando. */
+  activity?: ActivityItem[] | null;
+  workflows?: Workflow[];
+  onOpenTask?: (taskId: string) => void;
+  onOpenRunById?: (runId: string) => void;
+  onPause?: (paused: boolean) => Promise<void>;
+  onRunNow?: () => Promise<void>;
   onBack: () => void;
   onEdit: () => void;
   onRunAs: () => void;
@@ -26,7 +35,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   auto: "classificador automático",
 };
 
-export function MemberSheet({ member, team, status, totals, runs, tasks = [], onBack, onEdit, onRunAs, onOpenRun }: MemberSheetProps) {
+export function MemberSheet({ member, team, status, totals, runs, tasks = [], activity = null, workflows = [], onOpenTask, onOpenRunById, onPause, onRunNow, onBack, onEdit, onRunAs, onOpenRun }: MemberSheetProps) {
   const load = taskLoad(tasks, member.profile.id);
   const boss = team.find((m) => m.profile.id === member.reportsToAgentId) ?? null;
   const delegates = team.filter((m) => m.reportsToAgentId === member.profile.id);
@@ -63,6 +72,25 @@ export function MemberSheet({ member, team, status, totals, runs, tasks = [], on
           <button type="button" onClick={onEdit} className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium hover:border-ink">
             Editar membro
           </button>
+          {onPause && (
+
+            <button type="button" onClick={() => void onPause(!member.profile.pausedAt)} className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium hover:border-ink" data-testid="member-pause">
+
+              {member.profile.pausedAt ? "Retomar" : "Pausar"}
+
+            </button>
+
+          )}
+
+          {onRunNow && (
+
+            <button type="button" onClick={() => void onRunNow()} className="rounded-md border hairline-strong bg-surface px-3.5 py-2 text-[13px] font-medium hover:border-ink" data-testid="member-run-now">
+
+              Rodar agora
+
+            </button>
+
+          )}
         </div>
       </div>
 
@@ -119,6 +147,14 @@ export function MemberSheet({ member, team, status, totals, runs, tasks = [], on
         </section>
       </div>
 
+      <section aria-label={`Atividade de ${member.profile.name}`} className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5" data-testid="member-activity">
+        <div className="flex flex-wrap items-baseline gap-3">
+          <h2 className="m-0 font-display text-sm font-semibold">Atividade de {member.profile.name}</h2>
+          <span className="text-xs text-slate">tasks, runs e decisões em que {member.profile.name} aparece</span>
+        </div>
+        <ActivityFeed items={activity} team={team} workflows={workflows} onOpenTask={onOpenTask} onOpenRun={onOpenRunById} emptyText={`Nada ainda: quando ${member.profile.name} rodar uma task, os movimentos aparecem aqui.`} />
+      </section>
+
       <section aria-label="Runs deste membro" className="flex flex-col gap-3 rounded-xl border hairline bg-surface p-5">
         <div className="flex flex-wrap items-baseline gap-4">
           <h2 className="m-0 font-display text-sm font-semibold">Runs deste membro</h2>
@@ -139,7 +175,11 @@ export function MemberSheet({ member, team, status, totals, runs, tasks = [], on
             <li key={run.id}>
               <button type="button" onClick={() => onOpenRun(run)} className="flex w-full items-center gap-3 border-b hairline py-2.5 text-left text-[13px] last:border-b-0 hover:text-brand-hover">
                 <span className={["size-2 shrink-0 rounded-full", run.status === "running" || run.status === "queued" ? "bg-brand" : run.status === "waiting_approval" ? "bg-warning" : run.status === "completed" ? "bg-success" : "bg-mist"].join(" ")} />
-                <span className="min-w-0 flex-1 truncate font-medium">{run.prompt}</span>
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate font-medium">{run.prompt}</span>
+                  {firstLine(run.resultText ?? run.errorMessage) && <span className="truncate text-xs text-slate" data-testid="run-preview">{firstLine(run.resultText ?? run.errorMessage)}</span>}
+                </span>
+                {run.kind === "review" && <span className="rounded-full border hairline-strong px-1.5 text-[10px] text-slate">revisão</span>}
                 <span className="text-xs text-slate">
                   {labelFor(run.status)} · {formatRelative(run.startedAt)}
                 </span>

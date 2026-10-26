@@ -16,7 +16,15 @@ export type Project = {
   createdAt: string;
   /** Perfil de sandbox do projeto (padrão sandbox_dev). */
   sandboxProfileId?: string | null;
+  /** Missão do projeto: o "porquê" que entra nos prompts do time. */
+  mission?: string | null;
 };
+
+export type GoalStatus = "active" | "done";
+export type Goal = { id: string; projectId: string; title: string; descriptionMd: string; parentGoalId: string | null; status: GoalStatus; position: number; createdAt: string; updatedAt: string };
+export type GoalInput = { title: string; descriptionMd?: string; parentGoalId?: string | null; status?: GoalStatus | null };
+/** Objetivo com progresso: tasks do projeto ligadas a ele. */
+export type GoalProgress = Goal & { tasksTotal: number; tasksDone: number; workflows: number };
 
 export type RunStatus = "queued" | "running" | "waiting_approval" | "completed" | "failed" | "interrupted";
 
@@ -50,7 +58,7 @@ export type Run = {
   stopCause?: "budget" | null;
 };
 
-export type RunKind = "agent" | "consolidation" | "review";
+export type RunKind = "agent" | "consolidation" | "review" | "report";
 export type ConsolidationMode = "raw" | "haiku";
 export const CONSOLIDATION_SETTING = "memory.consolidation";
 export const CONSOLIDATION_MODEL = "claude-haiku-5-5";
@@ -79,9 +87,11 @@ export type Workflow = {
   useWorktrees: boolean;
   maxParallel: number;
   createdAt: string;
+  /** Objetivo padrão das tasks deste workflow. */
+  goalId?: string | null;
 };
 
-export type WorkflowInput = { name: string; stages: Stage[]; useWorktrees?: boolean; maxParallel?: number };
+export type WorkflowInput = { name: string; stages: Stage[]; useWorktrees?: boolean; maxParallel?: number; goalId?: string | null };
 
 export type WorkflowTemplate = { id: string; name: string; stages: { name: string; roleTitle: string | null; gate: boolean }[] };
 
@@ -118,6 +128,8 @@ export type Task = {
   reviewAttempts: number;
   /** Membro (agente) que criou a task pelas tools de delegação; null = você. */
   createdByAgentId: string | null;
+  /** Objetivo da task (herda do workflow quando não informado). */
+  goalId: string | null;
 };
 
 export type FileDiff = { path: string; status: "added" | "modified" | "deleted" | "renamed"; before: string; after: string; truncated: boolean };
@@ -139,6 +151,7 @@ export type TaskInput = {
   assignedAgentId?: string | null;
   dependsOn?: string[];
   ready?: boolean;
+  goalId?: string | null;
 };
 
 export type TaskEvent = {
@@ -156,6 +169,53 @@ export type TaskEvent = {
 // ---------------------------------------------------------------------------
 // Segurança (Fase 3). Espelham `store::audit`.
 // ---------------------------------------------------------------------------
+
+/** Linha do feed de atividade do projeto (tasks, runs avulsos e decisões suas). */
+export type ActivityItem = {
+  id: string;
+  at: string;
+  source: "task" | "run" | "audit";
+  kind: string;
+  actor: string;
+  taskId: string | null;
+  taskTitle: string | null;
+  runId: string | null;
+  agentProfileId: string | null;
+  agentName: string | null;
+  costUsd: number | null;
+  note: string | null;
+  fromStage: string | null;
+  toStage: string | null;
+  payload: unknown;
+};
+
+/** Relatório final de um workflow: entregas consolidadas, custo, membros e resumo executivo opcional. */
+export type ReportTask = { taskId: string; title: string; stageName: string; memberName: string | null; agentProfileId: string | null; costUsd: number; filesChanged: string[]; resultRunId: string | null; done: boolean; status: string };
+export type ReportMember = { agentProfileId: string; name: string; roleTitle: string; runs: number; costUsd: number };
+export type WorkflowReport = {
+  id: string;
+  projectId: string;
+  workflowId: string;
+  generation: number;
+  trigger: "auto" | "manual";
+  title: string;
+  bodyMd: string;
+  summaryMd: string | null;
+  summaryStatus: "none" | "pending" | "running" | "done" | "failed";
+  summaryRunId: string | null;
+  sourceRunId: string | null;
+  costUsd: number;
+  tasksTotal: number;
+  tasksDone: number;
+  members: ReportMember[];
+  tasks: ReportTask[];
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+};
+
+/** Identidade do app (rodapé e Sobre). */
+export type AppInfo = { version: string; platform: string; arch: string; build: string };
 
 export type AuditEvent = {
   seq: number;
@@ -275,6 +335,8 @@ export type AgentProfile = {
   mcpServerIds?: string[] | null;
   /** Skills escolhidas (null = todas as ativas). */
   skillIds?: string[] | null;
+  /** Pausado: não recebe trabalho novo do scheduler. */
+  pausedAt?: string | null;
   /** Confiança do membro (null = herda do cargo). */
   autonomy?: Autonomy | null;
   canAssignTasks?: boolean | null;
@@ -314,6 +376,9 @@ export type TeamMemberInput = {
 
 export type AgentTotals = {
   agentProfileId: string;
+  /** Status e id do run mais recente (sem consolidações). */
+  lastRunStatus?: RunStatus | null;
+  lastRunId?: string | null;
   runs: number;
   activeRuns: number;
   costUsd: number;
@@ -476,6 +541,20 @@ export type Commands = {
   return_task: { args: { taskId: string; stageId: string; note?: string | null }; result: Task };
   list_task_events: { args: { taskId: string }; result: TaskEvent[] };
   task_diff: { args: { taskId: string }; result: TaskDiff };
+  list_project_activity: { args: { projectId: string; agentProfileId?: string | null; limit?: number }; result: ActivityItem[] };
+  add_task_comment: { args: { taskId: string; body: string }; result: TaskEvent };
+  list_goals: { args: { projectId: string }; result: GoalProgress[] };
+  create_goal: { args: { projectId: string; input: GoalInput }; result: Goal };
+  update_goal: { args: { goalId: string; input: GoalInput }; result: Goal };
+  delete_goal: { args: { goalId: string }; result: boolean };
+  set_project_mission: { args: { projectId: string; mission: string | null }; result: Project };
+  set_member_paused: { args: { agentProfileId: string; paused: boolean }; result: TeamMember };
+  run_member_now: { args: { agentProfileId: string }; result: TickReport };
+  app_info: { args: Record<string, never>; result: AppInfo };
+  list_workflow_reports: { args: { projectId: string }; result: WorkflowReport[] };
+  get_workflow_report: { args: { workflowId: string }; result: WorkflowReport | null };
+  generate_workflow_report: { args: { workflowId: string }; result: WorkflowReport };
+  export_workflow_report: { args: { reportId: string; destination?: string | null }; result: string };
   scheduler_tick: { args: Record<string, never>; result: TickReport };
   list_audit_events: { args: { projectId?: string | null; kindPrefix?: string | null; limit?: number }; result: AuditEvent[] };
   verify_audit: { args: Record<string, never>; result: AuditVerification };

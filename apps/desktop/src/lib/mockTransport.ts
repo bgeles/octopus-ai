@@ -11,7 +11,7 @@ import taskEvents from "@octopus/protocol/fixtures/run-events-task.notifications
 import fixtureEvents from "@octopus/protocol/fixtures/run-events.notifications.json";
 import type { PermissionDecision, RunEventNotification } from "@octopus/protocol";
 import type { Transport, Unlisten } from "./transport";
-import type { AgentProfile, AppSettings, Autonomy, TrustPolicy, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
+import type { ActivityItem, AgentProfile, AppSettings, Autonomy, Goal, GoalProgress, TrustPolicy, WorkflowReport, Approval, AuditEvent, BackupSnapshot, BudgetLine, BudgetPolicy, CommandName, Commands, ConfigExport, ContextEvent, ContextPin, EventName, Events, HookInfo, ImportMode, ImportPreview, ImportResult, McpServer, MemoryHandoff, MemoryObservation, MemoryPage, MemoryPageInput, MemoryPageKind, MemoryPageVersion, MemorySearchHit, PolicyDecision, PolicyRule, PreviewNote, Project, ProjectDefaults, Role, Run, RunOptions, CustomHookRecord, CustomHookInput, HookRunResult, SandboxProfile, SessionSummary, Skill, Stage, StoredRunEvent, Task, TaskEvent, TeamMember, TeamMemberInput, TickReport, Workflow, WorkflowTemplate } from "./types";
 
 type FixtureNotification = { params: RunEventNotification };
 
@@ -211,13 +211,16 @@ const MOCK_FILES: Record<string, string> = {
   ].join("\n"),
 };
 
+/** Versão que o mock informa (igual ao package.json/tauri.conf.json). */
+export const MOCK_APP_VERSION = "0.1.0";
+
 export function createMockTransport(options: MockOptions = {}): Transport & { emit: <E extends EventName>(e: E, p: Events[E]) => void; tamperAudit: (seq: number) => void } {
   const tickMs = options.tickMs ?? 120;
   const script = options.events ?? fixtureRunEvents();
   const listeners = new Map<EventName, Set<(payload: never) => void>>();
   const fresh = options.freshInstall ?? false;
   const projects: Project[] = options.projects ?? (fresh ? [] : [
-    { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString(), sandboxProfileId: "sandbox_dev" },
+    { id: "proj_demo", name: "chat-core", path: "/Users/dev/projetos/chat-core", authMode: "subscription", createdAt: new Date().toISOString(), sandboxProfileId: "sandbox_dev", mission: null },
   ]);
   const settings: AppSettings = fresh ? {} : { "onboarding.completedAt": "2026-10-15T10:00:00.000Z", defaultAuthMode: "subscription" };
   const roles: Role[] = seedRoles();
@@ -252,6 +255,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       autonomy: input.autonomy ?? null,
       canAssignTasks: input.canAssignTasks ?? null,
       canApprove: input.canApprove ?? null,
+      pausedAt: existing?.profile.pausedAt ?? null,
     };
     const trust: TrustPolicy = {
       autonomy: (profile.autonomy ?? role.defaultAutonomy ?? "supervised") as Autonomy,
@@ -272,6 +276,34 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   const workflows: Workflow[] = [];
   const tasks: Task[] = [];
   const taskEventsLog: TaskEvent[] = [];
+  // Missão e objetivos: o "porquê" ligado a workflows, tasks e prompts.
+  const goals: Goal[] = [];
+  let goalCounter = 0;
+  const goalProgress = (g: Goal): GoalProgress => {
+    const mine = tasks.filter((t) => t.goalId === g.id);
+    return { ...g, tasksTotal: mine.length, tasksDone: mine.filter((t) => t.status === "done").length, workflows: workflows.filter((w) => w.goalId === g.id).length };
+  };
+  const resolveGoal = (projectId: string, goalId: string | null | undefined): string | null => {
+    if (!goalId) return null;
+    if (!goals.some((g) => g.id === goalId && g.projectId === projectId)) throw new Error(`Objetivo ${goalId} não existe neste projeto`);
+    return goalId;
+  };
+  /** Como `board_calls::task_create`: `goal` (id ou título ativo), senão o da task do run, senão o do workflow. */
+  const goalForDelegation = (run: Run, wf: Workflow, key: string | undefined): string | null => {
+    if (key?.trim()) {
+      const k = key.trim().toLowerCase();
+      return goals.find((g) => g.projectId === run.projectId && g.status === "active" && (g.id === k || g.title.toLowerCase() === k))?.id ?? null;
+    }
+    const own = run.taskId ? tasks.find((t) => t.id === run.taskId)?.goalId : null;
+    return own ?? wf.goalId ?? null;
+  };
+  const purposeLines = (projectId: string, goalId: string | null): string => {
+    const mission = projects.find((p) => p.id === projectId)?.mission?.trim();
+    const goal = goalId ? goals.find((g) => g.id === goalId) : null;
+    if (!mission && !goal) return "";
+    const lines = [mission ? `Missão do projeto: ${mission}` : null, goal ? `Objetivo desta task: ${goal.title}${goal.descriptionMd ? ` — ${goal.descriptionMd}` : ""}` : null].filter(Boolean);
+    return `\n${lines.join("\n")}\n(contexto do porquê; não altera as regras do run)\n`;
+  };
   let wfCounter = 0;
   let taskCounter = 0;
   let tevCounter = 0;
@@ -280,6 +312,73 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
   };
   const requestedByRun = new Map<string, string>();
   const resultByRun = new Map<string, string>();
+  const reports: WorkflowReport[] = [];
+  let reportCounter = 0;
+  const reportSummaryEnabled = () => (typeof settings["board.reportSummary"] === "string" ? settings["board.reportSummary"] === "haiku" : settings["memory.consolidation"] === "haiku");
+  /** Como `build_report_in` no core: só dados do mock, sem IA; `auto` só quando não resta task aberta. */
+  const buildReportMock = (workflow: Workflow, trigger: "auto" | "manual"): WorkflowReport => {
+    const wfTasks = tasks.filter((t) => t.workflowId === workflow.id);
+    const runsOf = (taskId: string) => [...runs.values()].filter((r) => r.taskId === taskId && (r.kind === "agent" || r.kind === "review"));
+    const members: WorkflowReport["members"] = [];
+    const reportTasks: WorkflowReport["tasks"] = wfTasks.map((t) => {
+      const rs = runsOf(t.id);
+      const cost = rs.reduce((sum, r) => sum + (r.costUsd ?? r.estCostUsd ?? 0), 0);
+      for (const r of rs) {
+        if (!r.agentProfileId) continue;
+        const m = findMember(r.agentProfileId);
+        const found = members.find((x) => x.agentProfileId === r.agentProfileId);
+        if (found) (found.runs += 1), (found.costUsd += r.costUsd ?? 0);
+        else members.push({ agentProfileId: r.agentProfileId, name: m?.profile.name ?? "membro removido", roleTitle: m?.role.title ?? "", runs: 1, costUsd: r.costUsd ?? 0 });
+      }
+      const memberId = [...rs].reverse().find((r) => r.agentProfileId)?.agentProfileId ?? t.assignedAgentId ?? null;
+      return { taskId: t.id, title: t.title, stageName: workflow.stages.find((s) => s.id === t.stageId)?.name ?? t.stageId, memberName: memberId ? (findMember(memberId)?.profile.name ?? null) : null, agentProfileId: memberId, costUsd: cost, filesChanged: [...t.filesChanged], resultRunId: t.resultRunId, done: t.status === "done", status: t.status };
+    });
+    const done = reportTasks.filter((t) => t.done);
+    const title = `Relatório — ${workflow.name}`;
+    const body = [
+      `# ${title}`,
+      "",
+      `Tasks: ${done.length} de ${reportTasks.length} concluídas · Custo: US$ ${reportTasks.reduce((s, t) => s + t.costUsd, 0).toFixed(2)}${members.length ? ` · Membros: ${members.map((m) => (m.roleTitle ? `${m.name} (${m.roleTitle})` : m.name)).join(", ")}` : ""}`,
+      "",
+      "## Entregas",
+      ...done.flatMap((t) => {
+        const task = wfTasks.find((x) => x.id === t.taskId)!;
+        return ["", `### ${t.taskId.replace(/^task_/, "T-")} · ${t.title} — ${t.memberName ?? "run avulso"} · US$ ${t.costUsd.toFixed(2)} · ${t.filesChanged.length} ${t.filesChanged.length === 1 ? "arquivo" : "arquivos"}`, task.resultMd?.trim() || "_Sem resumo da entrega._", ...(t.filesChanged.length ? [`Arquivos: ${t.filesChanged.join(", ")}`, "Diff: abra a task no Board (Ver diff)."] : [])];
+      }),
+      ...(done.length < reportTasks.length ? ["", "## Pendentes", ...reportTasks.filter((t) => !t.done).map((t) => `- ${t.taskId.replace(/^task_/, "T-")} · ${t.title} — ${t.stageName} (${t.status})`)] : []),
+    ].join("\n");
+    const generation = reports.filter((r) => r.workflowId === workflow.id).length + 1;
+    const doneTasks = wfTasks.filter((t) => t.status === "done");
+    const report: WorkflowReport = { id: `report_${++reportCounter}`, projectId: workflow.projectId, workflowId: workflow.id, generation, trigger, title, bodyMd: body, summaryMd: null, summaryStatus: reportSummaryEnabled() ? "pending" : "none", summaryRunId: null, sourceRunId: null, costUsd: reportTasks.reduce((s, t) => s + t.costUsd, 0), tasksTotal: reportTasks.length, tasksDone: done.length, members, tasks: reportTasks, startedAt: wfTasks.map((t) => t.createdAt).sort()[0] ?? null, finishedAt: doneTasks.map((t) => t.updatedAt).sort().at(-1) ?? null, createdAt: new Date().toISOString() };
+    reports.push(report);
+    if (report.summaryStatus === "pending") scheduleReportSummary(report);
+    return report;
+  };
+  const maybeCompleteWorkflow = (workflow: Workflow) => {
+    const wfTasks = tasks.filter((t) => t.workflowId === workflow.id);
+    if (wfTasks.length === 0 || wfTasks.some((t) => t.status !== "done")) return;
+    const lastDone = wfTasks.map((t) => t.updatedAt).sort().at(-1)!;
+    const covered = reports.filter((r) => r.workflowId === workflow.id && r.trigger === "auto").at(-1)?.finishedAt ?? null;
+    if (covered && covered >= lastDone) return;
+    buildReportMock(workflow, "auto");
+  };
+  /** Run `kind: report` do Haiku: sem tools, o texto final vira o resumo executivo. */
+  const scheduleReportSummary = (report: WorkflowReport) => {
+    report.summaryStatus = "running";
+    const run: Run = { id: `run_mock_${++runCounter}`, projectId: report.projectId, prompt: `Resuma o relatório ${report.title}`, options: { model: "claude-haiku-5-5", permissionMode: "dontAsk", maxTurns: 2, maxBudgetUsd: 0.1, allowedTools: [] }, agentProfileId: null, kind: "report", taskId: null, status: "running", claudeSessionId: null, model: "claude-haiku-5-5", startedAt: new Date().toISOString(), endedAt: null, costUsd: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, numTurns: null, stopReason: null, resultText: null, errorMessage: null };
+    report.summaryRunId = run.id;
+    runs.set(run.id, run);
+    events.set(run.id, []);
+    const at = run.startedAt;
+    scriptByRun.set(run.id, [
+      { runId: run.id, seq: 0, at, event: { type: "session_init", sessionId: `sess_${run.id}`, model: "claude-haiku-5-5", tools: [], mcpServers: [], permissionMode: "dontAsk", skills: [] } },
+      { runId: run.id, seq: 1, at, event: { type: "assistant_text", messageId: null, text: "**Entregas no prazo.** As tasks do workflow foram concluídas com os critérios atendidos; nenhuma pendência aberta. Próximo passo: revisar os arquivos tocados e seguir para o próximo objetivo.", parentToolUseId: null } },
+      { runId: run.id, seq: 2, at, event: { type: "result", sessionId: `sess_${run.id}`, subtype: "success", isError: false, costUsd: 0.01, durationMs: 800, numTurns: 1, usage: null, stopReason: "end_turn", resultText: "**Entregas no prazo.** As tasks do workflow foram concluídas com os critérios atendidos; nenhuma pendência aberta. Próximo passo: revisar os arquivos tocados e seguir para o próximo objetivo." } },
+    ]);
+    audit("sistema", "board.report.summary.started", report.projectId, { runId: run.id, reportId: report.id, model: "claude-haiku-5-5" });
+    schedule(run.id, 0);
+  };
+
   /** Como `resolve_approver` no core: supervisionado → você; senão sobe até um chefe que aprova; no topo, autônomo → auto. */
   const resolveApproverMock = (assignee: string | null): { kind: "human" } | { kind: "agent"; id: string } | { kind: "auto" } => {
     const member = assignee ? findMember(assignee) : undefined;
@@ -331,6 +430,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     if (note) task.lastNote = note;
     task.updatedAt = new Date().toISOString();
     pushTaskEvent(task.id, human ? "approved" : task.status === "done" ? "completed" : "advanced", from, task.stageId, null, actor, note);
+    if (task.status === "done") maybeCompleteWorkflow(workflow);
     if (next?.gate) enterGate(task, workflow, index + 1, worker, null);
   };
   const maxAgentReturns = () => (typeof settings["board.maxAgentReturns"] === "number" ? (settings["board.maxAgentReturns"] as number) : 2);
@@ -425,7 +525,9 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     // Como o loop do core: o próximo estágio (ou a revisão) começa sem esperar um clique.
     setTimeout(() => void handlers.scheduler_tick({}), tickMs);
   };
-  const runnableTasks = (projectId: string): Array<{ task: Task; workflow: Workflow; stage: Stage }> => {
+  type TickFilter = { onlyAgent?: string; force?: boolean };
+  const isPausedMember = (agentId: string | null | undefined, filter: TickFilter) => !filter.force && Boolean(agentId && findMember(agentId)?.profile.pausedAt);
+  const runnableTasks = (projectId: string, filter: TickFilter = {}): Array<{ task: Task; workflow: Workflow; stage: Stage }> => {
     const out: Array<{ task: Task; workflow: Workflow; stage: Stage }> = [];
     for (const workflow of workflows.filter((w) => w.projectId === projectId)) {
       const active = tasks.filter((t) => t.workflowId === workflow.id && t.status === "running").length;
@@ -435,6 +537,10 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         if (!task.dependsOn.every((dep) => tasks.some((t) => t.id === dep && t.status === "done"))) continue;
         const stage = workflow.stages.find((s) => s.id === task.stageId);
         if (!stage || stage.gate) continue;
+        const effective = task.assignedAgentId ?? stage.agentProfileId ?? null;
+        // Membro pausado: a task continua pronta, sem consumir slot.
+        if (isPausedMember(effective, filter)) continue;
+        if (filter.onlyAgent && effective !== filter.onlyAgent) continue;
         out.push({ task, workflow, stage });
         slots--;
       }
@@ -933,6 +1039,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       }
     } else if (ev.type === "result") {
       if (run.status === "interrupted") return;
+      if (run.kind === "report") {
+        const report = reports.find((r) => r.summaryRunId === run.id);
+        if (report) {
+          if (!ev.isError && ev.resultText?.trim()) (report.summaryMd = ev.resultText.trim()), (report.summaryStatus = "done");
+          else report.summaryStatus = "failed";
+          emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+        }
+      }
       run.status = ev.isError ? "failed" : "completed";
       run.costUsd = ev.costUsd;
       run.numTurns = ev.numTurns;
@@ -941,6 +1055,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       closePendingApprovals(run.id);
       finishTaskRun(run, !ev.isError, ev.resultText);
       audit("sistema", "run.finished", run.projectId, { runId, status: run.status, costUsd: ev.costUsd, numTurns: ev.numTurns });
+      if (!run.taskId) emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
       consolidateRunMock(run);
     } else if (ev.type === "tool_use" && (ev.name === "mcp__octopus__task_create" || ev.name === "mcp__octopus__task_assign") && run.agentProfileId) {
       // Como `handle_board_call` no core: só para quem reporta ao membro do run; o responsável pode vir por nome.
@@ -951,14 +1066,14 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         const current = frontier.pop()!;
         for (const m of members) if (m.reportsToAgentId === current && !reports.includes(m)) (reports.push(m), frontier.push(m.profile.id));
       }
-      const input = ev.input as { title?: string; description?: string; acceptance?: string; assignee?: string; dependsOn?: string[]; ready?: boolean; taskId?: string };
+      const input = ev.input as { title?: string; description?: string; acceptance?: string; assignee?: string; dependsOn?: string[]; ready?: boolean; taskId?: string; goal?: string };
       const assignee = reports.find((m) => m.profile.id === input.assignee || m.profile.name.toLowerCase() === String(input.assignee ?? "").toLowerCase());
       if (me?.trust.canAssignTasks && assignee) {
         if (ev.name === "mcp__octopus__task_create" && input.title) {
           const wf = workflows.find((w) => w.projectId === run.projectId);
           if (wf) {
             const at = new Date().toISOString();
-            const task: Task = { id: `task_${++taskCounter}`, projectId: run.projectId, workflowId: wf.id, stageId: wf.stages[0]!.id, title: input.title.trim(), descriptionMd: input.description?.trim() ?? "", acceptanceMd: input.acceptance?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: assignee.profile.id, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: me.profile.id };
+            const task: Task = { id: `task_${++taskCounter}`, projectId: run.projectId, workflowId: wf.id, stageId: wf.stages[0]!.id, title: input.title.trim(), descriptionMd: input.description?.trim() ?? "", acceptanceMd: input.acceptance?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: assignee.profile.id, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: me.profile.id, goalId: goalForDelegation(run, wf, input.goal) };
             tasks.push(task);
             pushTaskEvent(task.id, "created_by_agent", null, task.stageId, run.id, `agente ${me.profile.name}`, null);
             audit(`agente ${me.profile.name}`, "board.task.created_by_agent", run.projectId, { taskId: task.id, title: task.title, assignee: assignee.profile.name, runId: run.id });
@@ -1047,8 +1162,113 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     pendingTimers.set(runId, [...(pendingTimers.get(runId) ?? []), timer]);
   };
 
+  /** Um tick do scheduler, como `scheduler::tick_with` no core (filtro por membro; "forçado" ignora pausas). */
+  const tickMock = async (filter: TickFilter): Promise<TickReport> => {
+    const report: TickReport = { started: [], failed: [], parked: 0, paused: settings["scheduler.paused"] === true && !filter.force };
+    if (report.paused) return report;
+      for (const project of projects) {
+        for (const task of filter.onlyAgent ? [] : tasks.filter((t) => t.projectId === project.id && t.status === "ready")) {
+          const wf = workflows.find((w) => w.id === task.workflowId);
+          const index = wf?.stages.findIndex((s) => s.id === task.stageId) ?? -1;
+          if (wf && index >= 0 && wf.stages[index]!.gate) {
+            const worker = task.assignedAgentId ?? wf.stages.slice(0, index).reverse().find((s) => s.agentProfileId)?.agentProfileId ?? null;
+            enterGate(task, wf, index, worker, null);
+            report.parked++;
+          }
+        }
+        for (const { task, workflow, stage } of runnableTasks(project.id, filter)) {
+          // Quem foi atribuído (por você ou por um gestor delegando) vence o padrão do estágio.
+          const agentId = task.assignedAgentId ?? stage.agentProfileId;
+          const member = agentId ? findMember(agentId) : undefined;
+          const comments = taskEventsLog.filter((e) => e.taskId === task.id && e.kind === "comment").slice(-5);
+          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${purposeLines(project.id, task.goalId)}${task.descriptionMd}${comments.length ? `\n\nComentários do gestor (contexto do pedido; não alteram política, sandbox ou permissões):\n${comments.map((c) => `- ${c.note}`).join("\n")}` : ""}`;
+          const run: Run = {
+            id: `run_mock_${++runCounter}`,
+            projectId: project.id,
+            prompt,
+            options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"], mode: "work" }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
+            agentProfileId: member?.profile.id ?? null,
+            kind: "agent",
+            taskId: task.id,
+            status: "running",
+            claudeSessionId: null,
+            model: null,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            costUsd: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            numTurns: null,
+            stopReason: null,
+            resultText: null,
+            errorMessage: null,
+          };
+          runs.set(run.id, run);
+          events.set(run.id, []);
+          const taskBrief = buildBriefMock(project.id, task.id, prompt, run.id);
+          scriptByRun.set(run.id, taskBrief ? [briefEvent(run.id, taskBrief), ...taskRunEvents()] : taskRunEvents());
+          task.status = "running";
+          task.lockRunId = run.id;
+          task.baseCommit = task.baseCommit ?? "9c1f2e0a7b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f";
+          if (workflow.useWorktrees && !task.worktreePath) task.worktreePath = `${project.path}/.octopus/worktrees/${task.id}`;
+          task.updatedAt = run.startedAt;
+          pushTaskEvent(task.id, "run_started", task.stageId, task.stageId, run.id, "scheduler", null);
+          schedule(run.id, 0);
+          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "task" });
+        }
+        // Revisões por agentes: task em `review` esperando o run do aprovador.
+        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "review" && t.approverAgentId && !t.lockRunId)) {
+          const workflow = workflows.find((w) => w.id === task.workflowId);
+          const stage = workflow?.stages.find((s) => s.id === task.stageId);
+          const reviewer = findMember(task.approverAgentId!);
+          if (!workflow || !stage || !reviewer) continue;
+          if (isPausedMember(reviewer.profile.id, filter)) continue;
+          if (filter.onlyAgent && reviewer.profile.id !== filter.onlyAgent) continue;
+          const busy = tasks.filter((t) => t.workflowId === workflow.id && t.lockRunId).length;
+          if (busy >= workflow.maxParallel) continue;
+          const worker = task.assignedAgentId ?? stage.agentProfileId;
+          const prompt = `Revisão da task ${task.id} do board "${workflow.name}" (estágio "${stage.name}"), feita por ${worker ? nameOf(worker) : "um membro do time"}.\n\n# ${task.title}\n${task.resultMd ? `\nResumo da entrega deixado pelo autor:\n${task.resultMd}\n` : ""}\nVocê é o revisor: inspecione o trabalho sem editar nada e chame task_update com "approved" ou "returned".`;
+          const run: Run = {
+            id: `run_mock_${++runCounter}`,
+            projectId: project.id,
+            prompt,
+            options: { maxTurns: typeof settings["board.reviewMaxTurns"] === "number" ? (settings["board.reviewMaxTurns"] as number) : 15, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["approved", "returned"], mode: "review" }, disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"], systemPromptAppend: `Você é ${reviewer.profile.name}, ${reviewer.role.title} do time deste projeto.`, permissionMode: reviewer.profile.permissionMode ?? reviewer.role.defaultPermissionMode ?? undefined },
+            agentProfileId: reviewer.profile.id,
+            kind: "review",
+            taskId: task.id,
+            status: "running",
+            claudeSessionId: null,
+            model: null,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            costUsd: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            numTurns: null,
+            stopReason: null,
+            resultText: null,
+            errorMessage: null,
+          };
+          runs.set(run.id, run);
+          events.set(run.id, []);
+          scriptByRun.set(run.id, reviewRunEvents());
+          task.lockRunId = run.id;
+          task.reviewAttempts += 1;
+          task.updatedAt = run.startedAt;
+          pushTaskEvent(task.id, "review_started", null, null, run.id, "scheduler", null);
+          schedule(run.id, 0);
+          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "review" });
+        }
+      }
+    if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);
+    return report;
+  };
+
   const handlers: { [C in CommandName]: (args: Commands[C]["args"]) => Promise<Commands[C]["result"]> } = {
     runtime_info: async () => ({ protocolVersion: 1, runtimeVersion: "mock", sdkVersion: "mock" }),
+    app_info: async () => ({ version: MOCK_APP_VERSION, platform: "macos", arch: "aarch64", build: "mock" }),
     list_projects: async () => [...projects],
     create_project: async ({ input }) => {
       const project: Project = {
@@ -1355,14 +1575,17 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         if (!t.lastRunAt || r.startedAt > t.lastRunAt) t.lastRunAt = r.startedAt;
         byAgent.set(r.agentProfileId, t);
       }
-      return [...byAgent].map(([agentProfileId, t]) => ({ agentProfileId, ...t }));
+      return [...byAgent].map(([agentProfileId, t]) => {
+        const last = [...runs.values()].filter((r) => r.agentProfileId === agentProfileId && r.kind !== "consolidation").sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+        return { agentProfileId, ...t, lastRunStatus: last?.status ?? null, lastRunId: last?.id ?? null };
+      });
     },
     list_workflow_templates: async () => WORKFLOW_TEMPLATES.map((t) => ({ ...t, stages: t.stages.map((s) => ({ ...s })) })),
     list_workflows: async ({ projectId }) => workflows.filter((w) => w.projectId === projectId).map((w) => ({ ...w, stages: w.stages.map((s) => ({ ...s })) })),
     create_workflow: async ({ projectId, input }) => {
       if (!input.name.trim()) throw new Error("Informe o nome do workflow");
       if (input.stages.length === 0) throw new Error("Um workflow precisa de pelo menos um estágio");
-      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId, name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? false, maxParallel: Math.max(1, input.maxParallel ?? 1), createdAt: new Date().toISOString() };
+      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId, name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? false, maxParallel: Math.max(1, input.maxParallel ?? 1), createdAt: new Date().toISOString(), goalId: resolveGoal(projectId, input.goalId) };
       workflows.push(wf);
       writeSnapshot("auto");
       return { ...wf };
@@ -1378,7 +1601,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
         gate: s.gate,
         instruction: TEMPLATE_INSTRUCTIONS[s.name] ?? null,
       }));
-      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId: input.projectId, name: template.name, stages, useWorktrees: input.useWorktrees ?? false, maxParallel: 1, createdAt: new Date().toISOString() };
+      const wf: Workflow = { id: `wf_${++wfCounter}`, projectId: input.projectId, name: template.name, stages, useWorktrees: input.useWorktrees ?? false, maxParallel: 1, createdAt: new Date().toISOString(), goalId: null };
       workflows.push(wf);
       writeSnapshot("auto");
       return { ...wf };
@@ -1386,7 +1609,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     update_workflow: async ({ workflowId, input }) => {
       const wf = workflows.find((w) => w.id === workflowId);
       if (!wf) throw new Error(`Workflow ${workflowId} não encontrado`);
-      Object.assign(wf, { name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? wf.useWorktrees, maxParallel: Math.max(1, input.maxParallel ?? wf.maxParallel) });
+      Object.assign(wf, { name: input.name.trim(), stages: input.stages.map((s) => ({ ...s })), useWorktrees: input.useWorktrees ?? wf.useWorktrees, maxParallel: Math.max(1, input.maxParallel ?? wf.maxParallel), goalId: input.goalId === undefined ? (wf.goalId ?? null) : resolveGoal(wf.projectId, input.goalId) });
       return { ...wf };
     },
     delete_workflow: async ({ workflowId }) => {
@@ -1405,7 +1628,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (!wf.stages.some((s) => s.id === stageId)) throw new Error(`Estágio ${stageId} não existe neste workflow`);
       for (const dep of input.dependsOn ?? []) if (!tasks.some((t) => t.id === dep)) throw new Error(`Dependência ${dep} não encontrada`);
       const at = new Date().toISOString();
-      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: null };
+      const task: Task = { id: `task_${++taskCounter}`, projectId, workflowId, stageId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", acceptanceMd: input.acceptanceMd?.trim() ?? "", status: input.ready === false ? "backlog" : "ready", assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? [])], worktreePath: null, lockRunId: null, lastNote: null, position: tasks.length + 1, createdAt: at, updatedAt: at, resultMd: null, filesChanged: [], resultRunId: null, baseCommit: null, approverAgentId: null, returnCount: 0, reviewAttempts: 0, createdByAgentId: null, goalId: input.goalId ? resolveGoal(projectId, input.goalId) : (wf.goalId ?? null) };
       tasks.push(task);
       pushTaskEvent(task.id, "created", null, stageId, null, "você", null);
       return { ...task };
@@ -1414,8 +1637,45 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       const task = tasks.find((t) => t.id === taskId);
       if (!task) throw new Error(`Task ${taskId} não encontrada`);
       if (!input.title.trim()) throw new Error("Informe o título da task");
-      Object.assign(task, { title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? task.descriptionMd, acceptanceMd: input.acceptanceMd?.trim() ?? task.acceptanceMd, stageId: input.stageId ?? task.stageId, assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? task.dependsOn)], updatedAt: new Date().toISOString() });
+      Object.assign(task, { title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? task.descriptionMd, acceptanceMd: input.acceptanceMd?.trim() ?? task.acceptanceMd, stageId: input.stageId ?? task.stageId, assignedAgentId: input.assignedAgentId ?? null, dependsOn: [...(input.dependsOn ?? task.dependsOn)], updatedAt: new Date().toISOString(), goalId: input.goalId === undefined ? task.goalId : resolveGoal(task.projectId, input.goalId) });
       return { ...task };
+    },
+    list_goals: async ({ projectId }) => goals.filter((g) => g.projectId === projectId).map(goalProgress),
+    create_goal: async ({ projectId, input }) => {
+      if (!input.title.trim()) throw new Error("Informe o título do objetivo");
+      if (input.parentGoalId && !goals.some((g) => g.id === input.parentGoalId && g.projectId === projectId)) throw new Error("O objetivo pai não está neste projeto");
+      const at = new Date().toISOString();
+      const goal: Goal = { id: `goal_${++goalCounter}`, projectId, title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? "", parentGoalId: input.parentGoalId ?? null, status: input.status ?? "active", position: goals.filter((g) => g.projectId === projectId).length + 1, createdAt: at, updatedAt: at };
+      goals.push(goal);
+      audit("você", "board.goal.created", projectId, { goalId: goal.id, title: goal.title });
+      return { ...goal };
+    },
+    update_goal: async ({ goalId, input }) => {
+      const goal = goals.find((g) => g.id === goalId);
+      if (!goal) throw new Error(`Objetivo ${goalId} não encontrado`);
+      if (!input.title.trim()) throw new Error("Informe o título do objetivo");
+      if (input.parentGoalId === goal.id) throw new Error("Um objetivo não pode ser pai de si mesmo");
+      Object.assign(goal, { title: input.title.trim(), descriptionMd: input.descriptionMd?.trim() ?? goal.descriptionMd, parentGoalId: input.parentGoalId === undefined ? goal.parentGoalId : input.parentGoalId, status: input.status ?? goal.status, updatedAt: new Date().toISOString() });
+      return { ...goal };
+    },
+    delete_goal: async ({ goalId }) => {
+      const index = goals.findIndex((g) => g.id === goalId);
+      if (index === -1) return false;
+      goals.splice(index, 1);
+      for (const g of goals) if (g.parentGoalId === goalId) g.parentGoalId = null;
+      for (const t of tasks) if (t.goalId === goalId) t.goalId = null;
+      for (const w of workflows) if (w.goalId === goalId) w.goalId = null;
+      return true;
+    },
+    set_project_mission: async ({ projectId, mission }) => {
+      const project = projects.find((p) => p.id === projectId);
+      if (!project) throw new Error(`Projeto ${projectId} não encontrado`);
+      const trimmed = mission?.trim() ?? "";
+      if (trimmed.length > 2000) throw new Error("A missão pode ter no máximo 2000 caracteres");
+      project.mission = trimmed || null;
+      audit("você", "project.mission.updated", projectId, { chars: trimmed.length });
+      writeSnapshot("auto");
+      return { ...project };
     },
     delete_task: async ({ taskId }) => {
       const index = tasks.findIndex((t) => t.id === taskId);
@@ -1433,6 +1693,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (input.note) task.lastNote = input.note;
       task.updatedAt = new Date().toISOString();
       pushTaskEvent(task.id, "moved", from, task.stageId, null, "você", input.note ?? null);
+      if (task.status === "done") maybeCompleteWorkflow(workflows.find((w) => w.id === task.workflowId)!);
       return { ...task };
     },
     approve_task: async ({ taskId, note }) => {
@@ -1469,6 +1730,16 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       return { ...task };
     },
     list_task_events: async ({ taskId }) => taskEventsLog.filter((e) => e.taskId === taskId).map((e) => ({ ...e })),
+    add_task_comment: async ({ taskId, body }) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} não encontrada`);
+      const text = body.trim();
+      if (!text) throw new Error("Escreva o comentário antes de enviar");
+      if (text.length > 4000) throw new Error("Comentário longo demais (máximo 4000 caracteres)");
+      pushTaskEvent(taskId, "comment", null, null, null, "você", text);
+      audit("você", "board.task.commented", task.projectId, { taskId, chars: text.length });
+      return { ...taskEventsLog[taskEventsLog.length - 1]! };
+    },
     task_diff: async ({ taskId }) => {
       const task = tasks.find((t) => t.id === taskId);
       if (!task) throw new Error(`Task ${taskId} não encontrada`);
@@ -1477,104 +1748,76 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
       if (task.resultRunId && !files.some((f) => f.path === MOCK_REPO_FILE)) files.push({ path: MOCK_REPO_FILE, status: "modified", before: MOCK_REPO_BEFORE, after: MOCK_REPO_AFTER, truncated: false });
       return { available: true, reason: null, base: task.baseCommit, scope: task.worktreePath ? "worktree" : "project", files };
     },
-    scheduler_tick: async () => {
-      const report: TickReport = { started: [], failed: [], parked: 0, paused: settings["scheduler.paused"] === true };
-      if (report.paused) return report;
-      for (const project of projects) {
-        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "ready")) {
-          const wf = workflows.find((w) => w.id === task.workflowId);
-          const index = wf?.stages.findIndex((s) => s.id === task.stageId) ?? -1;
-          if (wf && index >= 0 && wf.stages[index]!.gate) {
-            const worker = task.assignedAgentId ?? wf.stages.slice(0, index).reverse().find((s) => s.agentProfileId)?.agentProfileId ?? null;
-            enterGate(task, wf, index, worker, null);
-            report.parked++;
-          }
-        }
-        for (const { task, workflow, stage } of runnableTasks(project.id)) {
-          // Quem foi atribuído (por você ou por um gestor delegando) vence o padrão do estágio.
-          const agentId = task.assignedAgentId ?? stage.agentProfileId;
-          const member = agentId ? findMember(agentId) : undefined;
-          const prompt = `Task ${task.id} do board "${workflow.name}", estágio "${stage.name}".\n\n# ${task.title}\n${task.descriptionMd}`;
-          const run: Run = {
-            id: `run_mock_${++runCounter}`,
-            projectId: project.id,
-            prompt,
-            options: { maxTurns: 40, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["done", "review", "blocked"], mode: "work" }, ...(member ? { systemPromptAppend: `Você é ${member.profile.name}, ${member.role.title} do time deste projeto.`, permissionMode: member.profile.permissionMode ?? member.role.defaultPermissionMode ?? undefined } : {}) },
-            agentProfileId: member?.profile.id ?? null,
-            kind: "agent",
-            taskId: task.id,
-            status: "running",
-            claudeSessionId: null,
-            model: null,
-            startedAt: new Date().toISOString(),
-            endedAt: null,
-            costUsd: null,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            numTurns: null,
-            stopReason: null,
-            resultText: null,
-            errorMessage: null,
-          };
-          runs.set(run.id, run);
-          events.set(run.id, []);
-          const taskBrief = buildBriefMock(project.id, task.id, prompt, run.id);
-          scriptByRun.set(run.id, taskBrief ? [briefEvent(run.id, taskBrief), ...taskRunEvents()] : taskRunEvents());
-          task.status = "running";
-          task.lockRunId = run.id;
-          task.baseCommit = task.baseCommit ?? "9c1f2e0a7b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f";
-          if (workflow.useWorktrees && !task.worktreePath) task.worktreePath = `${project.path}/.octopus/worktrees/${task.id}`;
-          task.updatedAt = run.startedAt;
-          pushTaskEvent(task.id, "run_started", task.stageId, task.stageId, run.id, "scheduler", null);
-          schedule(run.id, 0);
-          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "task" });
-        }
-        // Revisões por agentes: task em `review` esperando o run do aprovador.
-        for (const task of tasks.filter((t) => t.projectId === project.id && t.status === "review" && t.approverAgentId && !t.lockRunId)) {
-          const workflow = workflows.find((w) => w.id === task.workflowId);
-          const stage = workflow?.stages.find((s) => s.id === task.stageId);
-          const reviewer = findMember(task.approverAgentId!);
-          if (!workflow || !stage || !reviewer) continue;
-          const busy = tasks.filter((t) => t.workflowId === workflow.id && t.lockRunId).length;
-          if (busy >= workflow.maxParallel) continue;
-          const worker = task.assignedAgentId ?? stage.agentProfileId;
-          const prompt = `Revisão da task ${task.id} do board "${workflow.name}" (estágio "${stage.name}"), feita por ${worker ? nameOf(worker) : "um membro do time"}.\n\n# ${task.title}\n${task.resultMd ? `\nResumo da entrega deixado pelo autor:\n${task.resultMd}\n` : ""}\nVocê é o revisor: inspecione o trabalho sem editar nada e chame task_update com "approved" ou "returned".`;
-          const run: Run = {
-            id: `run_mock_${++runCounter}`,
-            projectId: project.id,
-            prompt,
-            options: { maxTurns: typeof settings["board.reviewMaxTurns"] === "number" ? (settings["board.reviewMaxTurns"] as number) : 15, includePartialMessages: true, taskContext: { taskId: task.id, title: task.title, stage: stage.name, allowedStatuses: ["approved", "returned"], mode: "review" }, disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"], systemPromptAppend: `Você é ${reviewer.profile.name}, ${reviewer.role.title} do time deste projeto.`, permissionMode: reviewer.profile.permissionMode ?? reviewer.role.defaultPermissionMode ?? undefined },
-            agentProfileId: reviewer.profile.id,
-            kind: "review",
-            taskId: task.id,
-            status: "running",
-            claudeSessionId: null,
-            model: null,
-            startedAt: new Date().toISOString(),
-            endedAt: null,
-            costUsd: null,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            numTurns: null,
-            stopReason: null,
-            resultText: null,
-            errorMessage: null,
-          };
-          runs.set(run.id, run);
-          events.set(run.id, []);
-          scriptByRun.set(run.id, reviewRunEvents());
-          task.lockRunId = run.id;
-          task.reviewAttempts += 1;
-          task.updatedAt = run.startedAt;
-          pushTaskEvent(task.id, "review_started", null, null, run.id, "scheduler", null);
-          schedule(run.id, 0);
-          report.started.push({ taskId: task.id, runId: run.id, projectId: project.id, kind: "review" });
-        }
-      }
-      if (report.started.length > 0 || report.parked > 0) emit("board:changed", report);
+    scheduler_tick: async () => tickMock({}),
+    set_member_paused: async ({ agentProfileId, paused }) => {
+      const existing = findMember(agentProfileId);
+      if (!existing) throw new Error(`Membro ${agentProfileId} não encontrado`);
+      existing.profile.pausedAt = paused ? (existing.profile.pausedAt ?? new Date().toISOString()) : null;
+      audit("você", paused ? "team.member.paused" : "team.member.resumed", existing.projectId, { agentProfileId, name: existing.profile.name });
+      emit("board:changed", paused ? { started: [], failed: [], parked: 0, paused: false } : await tickMock({}));
+      return { ...existing, profile: { ...existing.profile } };
+    },
+    run_member_now: async ({ agentProfileId }) => {
+      const existing = findMember(agentProfileId);
+      if (!existing) throw new Error(`Membro ${agentProfileId} não encontrado`);
+      const report = await tickMock({ onlyAgent: agentProfileId, force: true });
+      audit("você", "team.member.run_now", existing.projectId, { agentProfileId, name: existing.profile.name, started: report.started.length });
       return report;
+    },
+    list_workflow_reports: async ({ projectId }) => {
+      const latest = new Map<string, WorkflowReport>();
+      for (const r of reports) if (r.projectId === projectId) latest.set(r.workflowId, r);
+      return [...latest.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((r) => ({ ...r }));
+    },
+    get_workflow_report: async ({ workflowId }) => reports.filter((r) => r.workflowId === workflowId).at(-1) ?? null,
+    generate_workflow_report: async ({ workflowId }) => {
+      const wf = workflows.find((w) => w.id === workflowId);
+      if (!wf) throw new Error(`Workflow ${workflowId} não encontrado`);
+      const report = buildReportMock(wf, "manual");
+      audit("você", "board.report.generated", wf.projectId, { workflowId, reportId: report.id, generation: report.generation });
+      emit("board:changed", { started: [], failed: [], parked: 0, paused: false });
+      return { ...report };
+    },
+    export_workflow_report: async ({ reportId, destination }) => {
+      const report = reports.find((r) => r.id === reportId);
+      if (!report) throw new Error(`Relatório ${reportId} não encontrado`);
+      const md = report.summaryMd ? `${report.bodyMd}\n\n## Resumo executivo\n\n${report.summaryMd}` : report.bodyMd;
+      if (destination) {
+        audit("você", "board.report.exported", report.projectId, { reportId, path: destination });
+        return destination;
+      }
+      return md;
+    },
+    list_project_activity: async ({ projectId, agentProfileId, limit }) => {
+      // Como o SQL do core: eventos de task (sem agent_update), runs avulsos (início/fim) e decisões suas.
+      const items: ActivityItem[] = [];
+      const latestRunFor = (task: Task, at: string) => [...runs.values()].filter((r) => r.taskId === task.id && r.kind !== "consolidation" && r.startedAt <= at).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0] ?? null;
+      for (const e of taskEventsLog) {
+        if (e.kind === "agent_update") continue;
+        const task = tasks.find((t) => t.id === e.taskId);
+        if (!task || task.projectId !== projectId) continue;
+        const run = (e.runId ? runs.get(e.runId) : null) ?? latestRunFor(task, e.at);
+        const closes = ["run_finished", "completed", "advanced", "run_failed", "approved", "returned"].includes(e.kind);
+        const agentId = run?.agentProfileId ?? task.approverAgentId ?? task.assignedAgentId ?? null;
+        items.push({ id: e.id, at: e.at, source: "task", kind: e.kind, actor: e.actor, taskId: task.id, taskTitle: task.title, runId: e.runId ?? run?.id ?? null, agentProfileId: agentId, agentName: agentId ? (findMember(agentId)?.profile.name ?? null) : null, costUsd: closes ? (run?.costUsd ?? null) : null, note: e.note, fromStage: e.fromStage, toStage: e.toStage, payload: null });
+      }
+      for (const r of runs.values()) {
+        if (r.projectId !== projectId || r.taskId || r.kind !== "agent") continue;
+        const agentName = r.agentProfileId ? (findMember(r.agentProfileId)?.profile.name ?? null) : null;
+        items.push({ id: `${r.id}:started`, at: r.startedAt, source: "run", kind: "run_started", actor: r.agentProfileId ? "scheduler" : "você", taskId: null, taskTitle: null, runId: r.id, agentProfileId: r.agentProfileId, agentName, costUsd: null, note: r.prompt, fromStage: null, toStage: null, payload: null });
+        if (r.endedAt) items.push({ id: `${r.id}:ended`, at: r.endedAt, source: "run", kind: r.status === "completed" ? "run_finished" : r.status === "interrupted" ? "run_interrupted" : "run_failed", actor: "sistema", taskId: null, taskTitle: null, runId: r.id, agentProfileId: r.agentProfileId, agentName, costUsd: r.costUsd, note: r.resultText ?? r.errorMessage, fromStage: null, toStage: null, payload: null });
+      }
+      for (const a of auditLog) {
+        if (a.projectId !== projectId || !/^(approval\.|budget\.|team\.member\.)/.test(a.kind)) continue;
+        const p = (a.payload ?? {}) as Record<string, unknown>;
+        const run = typeof p.runId === "string" ? runs.get(p.runId) : undefined;
+        const agentId = run?.agentProfileId ?? (typeof p.agentProfileId === "string" ? p.agentProfileId : null);
+        items.push({ id: `audit:${a.seq}`, at: a.ts, source: "audit", kind: a.kind, actor: a.actor, taskId: typeof p.taskId === "string" ? p.taskId : null, taskTitle: null, runId: typeof p.runId === "string" ? p.runId : null, agentProfileId: agentId, agentName: agentId ? (findMember(agentId)?.profile.name ?? null) : null, costUsd: null, note: typeof p.message === "string" ? p.message : null, fromStage: null, toStage: null, payload: a.payload });
+      }
+      return items
+        .filter((i) => !agentProfileId || i.agentProfileId === agentProfileId)
+        .sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id))
+        .slice(0, Math.min(limit ?? 20, 200));
     },
     list_audit_events: async ({ projectId, kindPrefix, limit }) =>
       auditLog
@@ -1926,7 +2169,7 @@ export function createMockTransport(options: MockOptions = {}): Transport & { em
     },
     check_update: async () => {
       const endpoint = typeof settings["updates.endpoint"] === "string" ? (settings["updates.endpoint"] as string).trim() : "";
-      if (!endpoint) return { configured: false, currentVersion: "0.1.0", available: false, version: null, notes: null, date: null };
+      if (!endpoint) return { configured: false, currentVersion: MOCK_APP_VERSION, available: false, version: null, notes: null, date: null };
       if (endpoint.includes("offline")) throw new Error("Não consegui verificar: servidor indisponível");
       const available = endpoint.includes("nova");
       return { configured: true, currentVersion: "0.1.0", available, version: available ? "0.2.0" : null, notes: available ? "Melhorias no harness e correções." : null, date: available ? "2026-10-20T10:00:00Z" : null };

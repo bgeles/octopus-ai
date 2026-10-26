@@ -4,10 +4,12 @@
 //! Migrations são SQL versionado aplicado em `open()`. Todo acesso passa por `Store`,
 //! que serializa escritas com um `Mutex` (SQLite tem um único escritor).
 
+pub mod activity;
 pub mod attention;
 pub mod audit;
 pub mod board_calls;
 pub mod config;
+pub mod goals;
 pub mod harness;
 pub mod hooks;
 pub mod memory;
@@ -16,6 +18,7 @@ pub mod orchestration;
 pub mod policy;
 pub mod preview;
 pub mod pricing;
+pub mod reports;
 pub mod security;
 pub mod skills;
 pub mod task_diff;
@@ -92,6 +95,15 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0021_delegation",
         include_str!("migrations/0021_delegation.sql"),
     ),
+    (
+        "0022_member_state",
+        include_str!("migrations/0022_member_state.sql"),
+    ),
+    (
+        "0023_workflow_report",
+        include_str!("migrations/0023_workflow_report.sql"),
+    ),
+    ("0024_goals", include_str!("migrations/0024_goals.sql")),
 ];
 
 pub struct Store {
@@ -196,6 +208,7 @@ impl Store {
             auth_mode: models::AuthMode::Subscription,
             created_at: now(),
             sandbox_profile_id: Some("sandbox_dev".into()),
+            mission: None,
         };
         let conn = self.conn.lock().expect("store mutex");
         conn.execute(
@@ -222,7 +235,7 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let conn = self.conn.lock().expect("store mutex");
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id FROM project ORDER BY created_at DESC",
+            "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id, mission FROM project ORDER BY created_at DESC",
         )?;
         let rows = stmt
             .query_map([], Project::from_row)?
@@ -234,7 +247,7 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex");
         let project = conn
             .query_row(
-                "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id FROM project WHERE id = ?1",
+                "SELECT id, name, path, auth_mode, created_at, sandbox_profile_id, mission FROM project WHERE id = ?1",
                 params![id],
                 Project::from_row,
             )
@@ -566,16 +579,6 @@ impl Store {
                 } else {
                     RunStatus::Completed
                 };
-                close_pending_approvals(&tx, run_id)?;
-                Self::finish_task_run(&tx, run_id, !*is_error, result_text.as_deref())?;
-                let project_id = run_project_id(&tx, run_id)?;
-                Self::audit_in(
-                    &tx,
-                    "sistema",
-                    "run.finished",
-                    project_id.as_deref(),
-                    serde_json::json!({"runId": run_id, "status": status.as_str(), "costUsd": cost_usd, "numTurns": num_turns}),
-                )?;
                 tx.execute(
                     "UPDATE run SET status = CASE WHEN status = 'interrupted' THEN 'interrupted' ELSE ?2 END, claude_session_id = COALESCE(NULLIF(?3, ''), claude_session_id),
                         cost_usd = ?4, num_turns = ?5, stop_reason = ?6, result_text = ?7, ended_at = ?8,
@@ -595,6 +598,18 @@ impl Store {
                         usage.as_ref().map(|u| u.output_tokens as i64),
                         usage.as_ref().map(|u| u.cache_read_tokens as i64),
                     ],
+                )?;
+                close_pending_approvals(&tx, run_id)?;
+                // Run de resumo do relatório: o texto final vira o resumo executivo.
+                Self::finish_report_run_in(&tx, run_id, !*is_error, result_text.as_deref())?;
+                Self::finish_task_run(&tx, run_id, !*is_error, result_text.as_deref())?;
+                let project_id = run_project_id(&tx, run_id)?;
+                Self::audit_in(
+                    &tx,
+                    "sistema",
+                    "run.finished",
+                    project_id.as_deref(),
+                    serde_json::json!({"runId": run_id, "status": status.as_str(), "costUsd": cost_usd, "numTurns": num_turns}),
                 )?;
             }
             RunEvent::Observation {
@@ -878,11 +893,14 @@ mod tests {
                 "0019_task_result".to_string(),
                 "0020_trust".to_string(),
                 "0021_delegation".to_string(),
+                "0022_member_state".to_string(),
+                "0023_workflow_report".to_string(),
+                "0024_goals".to_string(),
             ]
         );
         // Reaplicar não deve falhar nem duplicar.
         s.migrate().unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 21);
+        assert_eq!(s.applied_migrations().unwrap().len(), 24);
     }
 
     #[test]
